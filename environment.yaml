@@ -1,0 +1,15 @@
+name: onsite-dev
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - pyopenms>=3.4
+  - numpy>=2.3
+  - scipy>=1.16
+  - pytest>=8
+  - pip
+  - pip:
+      - -e .
+
+

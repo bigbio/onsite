@@ -1,11 +1,12 @@
-[tool.poetry]
+[project]
 name = "onsite"
 version = "0.0.1"
 description = "onsite: mass spectrometry post-translational localization tool"
-authors = ["BigBio Stack"]
+authors = [
+    {name = "BigBio Stack"}
+]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "onsite"}]
 keywords = ["mass-spectrometry", "proteomics", "phosphorylation", "ptm", "ascore", "phosphors"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -18,24 +19,32 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
-homepage = "https://github.com/bigbio/onsite"
-repository = "https://github.com/bigbio/onsite"
-documentation = "https://github.com/bigbio/onsite"
+requires-python = ">=3.11"
+dependencies = [
+    "pyopenms>=3.4.0",
+    "numpy>=2.3.2",
+    "scipy>=1.16.1",
+    "click>=8.0.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-pyopenms = "^3.4.0"
-numpy = "^2.3.2"
-scipy = "^1.16.1"
+[project.urls]
+Homepage = "https://github.com/bigbio/onsite"
+Repository = "https://github.com/bigbio/onsite"
+Documentation = "https://github.com/bigbio/onsite"
+
+[project.scripts]
+onsite = "onsite.onsitec:main"
+phospho-scoring = "onsite.phospho_scoring:main"
+phosphors-scoring = "onsite.phosphors_scoring:main"
+lucxor = "onsite.lucxor.cli:main"
+
+[tool.poetry]
+packages = [{include = "onsite"}]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 black = "^24.0.0"
 flake8 = "^7.0.0"
-
-[tool.poetry.scripts]
-phospho-scoring = "PhosphoScoring:main"
-lucxor = "onsite.lucxor.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

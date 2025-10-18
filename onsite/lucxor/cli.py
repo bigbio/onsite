@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 import logging
+import time
 import json
 import pyopenms
 from typing import Dict, List, Optional, Tuple
@@ -22,18 +23,18 @@ from pyopenms import (
     IDFilter
 )
 
-from onsite.lucxor.psm import PSM
-from onsite.lucxor.peptide import Peptide
-from onsite.lucxor.models import CIDModel, HCDModel
-from onsite.lucxor.constants import (
+from .psm import PSM
+from .peptide import Peptide
+from .models import CIDModel, HCDModel
+from .constants import (
     NTERM_MOD,
     CTERM_MOD,
     AA_MASSES,
     DEFAULT_CONFIG
 )
-from onsite.lucxor.spectrum import Spectrum
-from onsite.lucxor.flr import FLRCalculator
-from onsite.lucxor.parallel import parallel_psm_processing, get_optimal_thread_count
+from .spectrum import Spectrum
+from .flr import FLRCalculator
+from .parallel import parallel_psm_processing, get_optimal_thread_count
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ class PyLuciPHOr2:
             "--target_modifications",
             nargs="+",
             default=["Phospho (S)", "Phospho (T)", "Phospho (Y)"],
-            help="List of target modifications"
+            help="List of target modifications (e.g., Phospho(S),Phospho(T),Phospho(Y),PhosphoDecoy(A))"
         )
         parser.add_argument(
             "--neutral_losses",
@@ -199,7 +200,7 @@ class PyLuciPHOr2:
             help="Minimum number of PSMs for modeling"
         )
         parser.add_argument(
-            "--num_threads",
+            "--threads",
             type=int,
             default=4,
             help="Number of threads to use (default: 4)"
@@ -316,13 +317,13 @@ class PyLuciPHOr2:
         self.logger.info("Processing PSM...")
         psm.process(config)
         
-        self.logger.info(f"PSM processing result - Score: {psm.score}, Delta Score: {psm.delta_score}, Global FLR: {psm.global_flr}, Local FLR: {psm.local_flr}")
+        self.logger.debug(f"PSM processing result - Score: {psm.score}, Delta Score: {psm.delta_score}, Global FLR: {psm.global_flr}, Local FLR: {psm.local_flr}")
         
         # Update hit with results
-        hit.setMetaValue("search_engine_sequence", sequence)
         hit.setMetaValue("Luciphor_pep_score", psm.psm_score)
         hit.setMetaValue("Luciphor_global_flr", psm.global_flr)
         hit.setMetaValue("Luciphor_local_flr", psm.local_flr)
+        hit.setMetaValue("search_engine_sequence", sequence)
         hit.setScore(psm.delta_score)
         
         # Create new peptide identification
@@ -344,12 +345,21 @@ class PyLuciPHOr2:
         """
         args = self.args  # Use already parsed arguments
         config = DEFAULT_CONFIG.copy()
+        # Parse target_modifications to handle comma-separated format
+        target_modifications = []
+        for mod in args.target_modifications:
+            if ',' in mod:
+                # Split comma-separated modifications
+                target_modifications.extend([m.strip() for m in mod.split(',')])
+            else:
+                target_modifications.append(mod.strip())
+        
         config.update({
             "fragment_method": args.fragment_method,
             "fragment_mass_tolerance": args.fragment_mass_tolerance,
             "fragment_error_units": args.fragment_error_units,
             "min_mz": args.min_mz,
-            "target_modifications": args.target_modifications,
+            "target_modifications": target_modifications,
             "neutral_losses": args.neutral_losses,
             "decoy_mass": args.decoy_mass,
             "decoy_neutral_losses": args.decoy_neutral_losses,
@@ -359,10 +369,13 @@ class PyLuciPHOr2:
             "modeling_score_threshold": args.modeling_score_threshold,
             "scoring_threshold": args.scoring_threshold,
             "min_num_psms_model": args.min_num_psms_model,
-            "num_threads": args.num_threads,
+            "num_threads": args.threads,
             "rt_tolerance": args.rt_tolerance
         })
         
+        # Start timing
+        start_time = time.time()
+
         self.logger.info("Loading input files...")
         self.logger.debug(f"Debug mode: {args.debug}")
         self.logger.debug(f"Log level: {logging.getLogger().level}")
@@ -431,6 +444,9 @@ class PyLuciPHOr2:
                 }
                 peptide = Peptide(sequence, config, charge=charge)
                 psm = PSM(peptide, spectrum_dict, config=config)
+                
+                # Set search_engine_sequence to the original sequence
+                psm.search_engine_sequence = sequence
                 
                 # Automatically determine score type and assign values
                 score_type = pep_id.getScoreType() if hasattr(pep_id, 'getScoreType') else None
@@ -509,7 +525,7 @@ class PyLuciPHOr2:
         self.logger.info("Starting first round calculation (including decoy permutations)...")
         
         # Use multi-threading for PSM processing
-        num_threads = get_optimal_thread_count(len(all_psms), max_threads=args.num_threads)
+        num_threads = get_optimal_thread_count(len(all_psms), max_threads=args.threads)
         self.logger.info(f"Using {num_threads} threads for PSM processing...")
         
         parallel_psm_processing(all_psms, model=self.model, round_number=0, num_threads=num_threads)
@@ -558,6 +574,7 @@ class PyLuciPHOr2:
 
         # 6. Write results to output file (using second round calculation results)
         new_pep_ids = []
+        phospho_count = 0
         for psm in all_psms:
             idx = all_psms.index(psm)
             if idx < len(pep_ids):
@@ -566,9 +583,31 @@ class PyLuciPHOr2:
                 
                 # Use second round calculated delta score and FLR values
                 hit.setScore(psm.delta_score)  # Second round calculated delta score
+                
+                # Set search_engine_sequence to the original sequence from the peptide
+                if hasattr(psm, 'search_engine_sequence'):
+                    hit.setMetaValue("search_engine_sequence", psm.search_engine_sequence)
+                else:
+                    # Fallback to the peptide sequence if search_engine_sequence is not available
+                    hit.setMetaValue("search_engine_sequence", psm.peptide.peptide)
+                
                 hit.setMetaValue("Luciphor_pep_score", psm.psm_score)
                 hit.setMetaValue("Luciphor_global_flr", psm.global_flr)  # Second round assigned FLR value
                 hit.setMetaValue("Luciphor_local_flr", psm.local_flr)    # Second round assigned FLR value
+                
+                # Update the sequence to the best scoring sequence from permutations
+                best_sequence = psm.get_best_sequence(include_decoys=False)  # Use second round (real permutations only)
+                if best_sequence != psm.peptide.peptide:
+                    # Create new AASequence with the best sequence
+                    from pyopenms import AASequence
+                    try:
+                        best_aa_sequence = AASequence.fromString(best_sequence)
+                        hit.setSequence(best_aa_sequence)
+                        logger.debug(f"Updated sequence for PSM {psm.scan_num}: {psm.peptide.peptide} -> {best_sequence}")
+                    except Exception as e:
+                        logger.debug(f"Failed to create AASequence for {best_sequence}: {str(e)}, keeping original sequence")
+                        # Keep original sequence if conversion fails
+                        pass
                 
                 new_pep_id = PeptideIdentification(orig_pep_id)
                 new_pep_id.setScoreType("Luciphor_delta_score")
@@ -577,12 +616,44 @@ class PyLuciPHOr2:
                 new_pep_id.assignRanks()
                 new_pep_ids.append(new_pep_id)
 
+                # Count phosphorylated peptides
+                try:
+                    seq_str = hit.getSequence().toString()
+                    if "(Phospho)" in seq_str:
+                        phospho_count += 1
+                except Exception:
+                    pass
+
         # 7. Save results
         IdXMLFile().store(args.output, prot_ids, new_pep_ids)
         self.logger.info(f"Results saved to: {args.output}")
 
-        # 8. Processing completed
-        
+        # 8. Processing completed - print run summary similar to Ascore
+        elapsed = time.time() - start_time
+        total = len(pep_ids)
+        processed = len(new_pep_ids)
+        errors = max(0, total - processed)
+
+        print("\nProcessing Complete:")
+        print(f"  Total identifications: {total}")
+        print(f"  Successfully processed: {processed}")
+        print(f"  Phosphorylated peptides: {phospho_count}")
+        print(f"  Processing errors: {errors}")
+        print(f"  Time elapsed: {elapsed:.2f} seconds")
+        if elapsed > 0:
+            print(f"  Processing speed: {processed/elapsed:.2f} IDs/second")
+
+        if self.args.debug:
+            self.logger.info("Processing completed successfully")
+            self.logger.info({
+                'total': total,
+                'processed': processed,
+                'phospho': phospho_count,
+                'errors': errors,
+                'elapsed_sec': round(elapsed, 2),
+                'speed_ids_per_sec': round(processed/elapsed, 2) if elapsed > 0 else None
+            })
+
         return 0
         
 

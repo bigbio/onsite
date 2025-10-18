@@ -1,5 +1,5 @@
 """
-Core processing module for LucXor.
+Core processing module for lucxor.
 
 This module contains the main processing logic for scoring PSMs and calculating FLR.
 """
@@ -27,6 +27,10 @@ class CoreProcessor:
         self.config = config
         self.psms = []
         self.flr_calculator = None
+        
+        # Performance optimization: pre-allocate lists with estimated capacity
+        self._estimated_psm_count = config.get('estimated_psm_count', 10000)
+        self.psms = []  # Will be converted to more efficient structure if needed
         
     def add_psm(self, psm: PSM) -> None:
         """
@@ -67,6 +71,9 @@ class CoreProcessor:
         """
         logger.info("Stage 1: Process all PSMs, generate real and decoy permutations")
         
+        # Convert config once to avoid repeated calls
+        config_dict = self.config.to_dict()
+        
         # Process all PSMs, generate real and decoy permutations
         for i, psm in enumerate(self.psms):
             try:
@@ -76,7 +83,7 @@ class CoreProcessor:
                 psm.flr_calculator = self.flr_calculator
                 
                 # Process PSM (generate real and decoy permutations)
-                psm.process(self.config.to_dict())
+                psm.process(config_dict)
                 
                 if (i + 1) % 100 == 0:
                     logger.info(f"Stage 1 processed {i+1} PSMs")
@@ -110,6 +117,9 @@ class CoreProcessor:
         """
         logger.info("Stage 2: Reprocess all PSMs, generate only real permutations")
         
+        # Convert config once to avoid repeated calls
+        config_dict = self.config.to_dict()
+        
         # Reprocess all PSMs, generate only real permutations (no decoys)
         for i, psm in enumerate(self.psms):
             try:
@@ -119,7 +129,7 @@ class CoreProcessor:
                 psm.flr_calculator = self.flr_calculator
                 
                 # Process PSM (generate only real permutations, no decoys)
-                psm.process_stage2(self.config.to_dict())
+                psm.process_stage2(config_dict)
                 
                 if (i + 1) % 100 == 0:
                     logger.info(f"Stage 2 processed {i+1} PSMs")

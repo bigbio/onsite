@@ -1,5 +1,5 @@
 """
-Parallel processing module for LucXor.
+Parallel processing module for lucxor.
 
 This module contains classes and functions for parallel processing.
 """
@@ -45,7 +45,9 @@ class PSMProcessingWorker:
         """Process a single PSM"""
         try:
             if self.round_number == 0:
-                psm.process({'model': self.model}, round_number=0)
+                # Update PSM config with model
+                psm.config['model'] = self.model
+                psm.process(psm.config, round_number=0)
             elif self.round_number == 2:
                 psm.process_round2(self.flr_calculator)
         except Exception as e:

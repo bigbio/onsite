@@ -5,6 +5,7 @@ This module contains the Peak class, which represents a mass spectrometry peak.
 """
 
 from typing import Optional, Dict, Any
+import numpy as np
 
 
 class Peak:
@@ -13,7 +14,14 @@ class Peak:
     
     This class contains information about a mass spectrometry peak, including
     its m/z value, intensity, and whether it matches a theoretical fragment ion.
+    Optimized with __slots__ for better memory efficiency and performance.
     """
+    
+    __slots__ = [
+        'mz', 'raw_intensity', 'rel_intensity', 'norm_intensity',
+        'matched', 'dist', 'matched_ion_str', 'matched_ion_mz',
+        'score', 'intensity_score', 'dist_score', '_hash_cache'
+    ]
     
     def __init__(self, mz: float, intensity: float, norm_intensity: Optional[float] = None):
         """
@@ -24,10 +32,10 @@ class Peak:
             intensity: Raw intensity
             norm_intensity: Normalized intensity (optional)
         """
-        self.mz = mz
-        self.raw_intensity = intensity
+        self.mz = float(mz)  # Ensure float type for consistency
+        self.raw_intensity = float(intensity)
         self.rel_intensity = 0.0  # Relative intensity (percentage of max)
-        self.norm_intensity = norm_intensity if norm_intensity is not None else 0.0  # Normalized intensity (log(rel/median))
+        self.norm_intensity = float(norm_intensity) if norm_intensity is not None else 0.0  # Normalized intensity (log(rel/median))
         
         # Matching information
         self.matched = False  # Whether this peak matches a theoretical fragment ion
@@ -39,6 +47,9 @@ class Peak:
         self.score = 0.0  # Score assigned to this peak
         self.intensity_score = 0.0  # Intensity component of the score
         self.dist_score = 0.0  # Distance component of the score
+        
+        # Cache for hash computation
+        self._hash_cache = None
     
     def __eq__(self, other):
         """
@@ -59,12 +70,15 @@ class Peak:
     
     def __hash__(self):
         """
-        Get the hash value of the peak.
+        Get the hash value of the peak with caching for better performance.
         
         Returns:
             Hash value
         """
-        return hash(self.mz)
+        if self._hash_cache is None:
+            # Round to avoid floating point precision issues
+            self._hash_cache = hash(round(self.mz, 6))
+        return self._hash_cache
     
     def __str__(self):
         """

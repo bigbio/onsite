@@ -1,1 +1,3 @@
-# Tests package
+"""
+Test package for OnSite.
+"""

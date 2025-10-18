@@ -14,14 +14,14 @@ import re
 
 import numpy as np
 import pyopenms
-from pyopenms import AASequence, Modification
+from pyopenms import AASequence, ResidueModification
 
 from .constants import (
     NTERM_MOD, CTERM_MOD, AA_MASSES, DECOY_AA_MAP, AA_DECOY_MAP, NEUTRAL_LOSSES, MIN_DELTA_SCORE, PROTON_MASS, WATER_MASS,
     DECOY_AMINO_ACIDS, PHOSPHO_MOD_MASS, OXIDATION_MASS
 )
 from .peak import Peak
-from .peptide import Peptide
+from .peptide import Peptide, extract_target_amino_acids
 from .spectrum import Spectrum
 from .flr import FLRCalculator
 from .globals import get_decoy_symbol
@@ -140,6 +140,9 @@ class PSM:
         psm.peptide_id = peptide_id
         psm.peptide_hit = peptide_hit
         
+        # Store search_engine_sequence for later use in idXML output
+        psm.search_engine_sequence = sequence
+        
         return psm
     
     def _load_spectrum(self) -> None:
@@ -236,6 +239,13 @@ class PSM:
                         self.mod_coord_map[pos] = PHOSPHO_MOD_MASS
                         self.mod_pos_map[pos] = PHOSPHO_MOD_MASS
                     i += 9
+                elif i + 14 <= len(seq) and seq[i:i+14] == "(PhosphoDecoy)":
+                    # Treat PhosphoDecoy as phosphorylation modification
+                    if len(mod_pep_pos) > 0:
+                        pos = len(mod_pep_pos) - 1
+                        self.mod_coord_map[pos] = PHOSPHO_MOD_MASS
+                        self.mod_pos_map[pos] = PHOSPHO_MOD_MASS
+                    i += 14
                 elif i + 11 <= len(seq) and seq[i:i+11] == "(Oxidation)":
                     if len(mod_pep_pos) > 0:
                         pos = len(mod_pep_pos) - 1
@@ -299,13 +309,19 @@ class PSM:
             while i < len(peptide_seq):
                 if peptide_seq[i:i+9] == "(Phospho)":
                     # Add phosphorylation modification
-                    mod = Modification()
+                    mod = ResidueModification()
                     mod.setMonoMass(79.966331)
                     seq.setModification(i-1, mod)
                     i += 9
+                elif peptide_seq[i:i+14] == "(PhosphoDecoy)":
+                    # Add decoy phosphorylation modification (treat as phosphorylation)
+                    mod = ResidueModification()
+                    mod.setMonoMass(79.966331)
+                    seq.setModification(i-1, mod)
+                    i += 14
                 elif peptide_seq[i:i+9] == "(Oxidation)":
                     # Add oxidation modification
-                    mod = Modification()
+                    mod = ResidueModification()
                     mod.setMonoMass(15.994915)
                     seq.setModification(i-1, mod)
                     i += 9
@@ -331,8 +347,8 @@ class PSM:
         if config:
             self.config.update(config)
         
-        # Skip if no phosphorylation
-        if "(Phospho)" not in self.peptide.peptide:
+        # Skip if no phosphorylation (including PhosphoDecoy)
+        if "(Phospho)" not in self.peptide.peptide and "(PhosphoDecoy)" not in self.peptide.peptide:
             self.is_keeper = False
             self.use_for_model = False
             self.psm_score = -1.0
@@ -348,8 +364,12 @@ class PSM:
             return
             
         # Calculate number of potential PTM sites
-        potential_ptm_sites = sum(1 for aa in self.peptide.peptide if aa in 'STY')
-        reported_ptm_sites = self.peptide.peptide.count("(Phospho)")
+        # Extract target amino acids from target_modifications
+        target_modifications = self.config.get('target_modifications', [])
+        target_amino_acids = extract_target_amino_acids(target_modifications)
+        
+        potential_ptm_sites = sum(1 for aa in self.peptide.peptide if aa in target_amino_acids)
+        reported_ptm_sites = self.peptide.peptide.count("(Phospho)") + self.peptide.peptide.count("(PhosphoDecoy)")
         
         # Set is_unambiguous flag
         self.is_unambiguous = (potential_ptm_sites == reported_ptm_sites)
@@ -449,7 +469,7 @@ class PSM:
                 self.psm_score = 0.0
                 self.delta_score = 0.0
         self.score = self.delta_score
-        logger.info(f"PSM processing completed (round {round_number}) - Delta Score: {self.delta_score}, PepScore: {self.psm_score}")
+        logger.debug(f"PSM processing completed (round {round_number}) - Delta Score: {self.delta_score}, PepScore: {self.psm_score}")
     
     def process_round2(self, flr_calculator) -> None:
         """
@@ -524,8 +544,10 @@ class PSM:
                 while i < len(seq):
                     if seq[i:i+9] == "(Phospho)":
                         i += 9
-                    elif seq[i:i+9] == "(Oxidation)":
-                        i += 9
+                    elif seq[i:i+14] == "(PhosphoDecoy)":
+                        i += 14
+                    elif seq[i:i+11] == "(Oxidation)":
+                        i += 11
                     else:
                         length += 1
                         i += 1
@@ -542,7 +564,8 @@ class PSM:
             # Check if modification site count is correct
             phospho_count = perm.count("(Phospho)")
             decoy_count = sum(1 for c in perm if c in DECOY_AA_MAP)
-            expected_count = self.peptide.peptide.count("(Phospho)")
+            # Expected total phospho-like sites include both target and decoy phospho markers
+            expected_count = self.peptide.peptide.count("(Phospho)") + self.peptide.peptide.count("(PhosphoDecoy)")
             
             if phospho_count + decoy_count != expected_count:
                 logger.debug(f"Phosphorylation count mismatch: {phospho_count + decoy_count} != {expected_count}")
@@ -772,6 +795,8 @@ class PSM:
             while i < len(sequence):
                 if sequence[i:i+9] == "(Phospho)":
                     i += 9
+                elif sequence[i:i+14] == "(PhosphoDecoy)":
+                    i += 14
                 elif sequence[i:i+11] == "(Oxidation)":
                     i += 11
                 else:
@@ -917,7 +942,13 @@ class PSM:
         """Get result string"""
         results = []
         results.append(str(self.scan_num))
-        results.append(self.peptide.peptide)
+        # Use the best sequence if available, otherwise use original peptide sequence
+        best_seq = getattr(self, '_best_sequence', None)
+        if best_seq is None:
+            best_seq = self.get_best_sequence(include_decoys=False)
+            self._best_sequence = best_seq
+        
+        results.append(best_seq)
         results.append(f"{self.psm_score:.4f}")  # Use psm_score as peptide match score
         results.append(f"{self.delta_score:.4f}")  # delta_score for site localization
         results.append(f"{self.global_flr:.4f}")
@@ -1051,9 +1082,13 @@ class PSM:
             peptide_seq = self.remove_modifications(self.peptide.get_unmodified_sequence())
             
             # Find all possible modification sites (target modification sites)
+            # Extract target amino acids from target_modifications
+            target_modifications = self.config.get('target_modifications', [])
+            target_amino_acids = extract_target_amino_acids(target_modifications)
+            
             cand_mod_sites = []
             for i, aa in enumerate(peptide_seq):
-                if aa in ['S', 'T', 'Y']:  # Target modification sites
+                if aa in target_amino_acids:  # Target modification sites
                     cand_mod_sites.append(i)
             
             if not cand_mod_sites:
@@ -1118,14 +1153,18 @@ class PSM:
             # Get unmodified peptide sequence
             peptide_seq = self.remove_modifications(self.peptide.get_unmodified_sequence())
             
-            # Find non-STY sites as decoy modification sites
+            # Extract target amino acids from target_modifications
+            target_modifications = self.config.get('target_modifications', [])
+            target_amino_acids = extract_target_amino_acids(target_modifications)
+            
+            # Find non-target amino acid sites as decoy modification sites
             cand_mod_sites = []
             for i, aa in enumerate(peptide_seq):
-                if aa not in ['S', 'T', 'Y']:  # Non-STY sites
+                if aa not in target_amino_acids:  # Non-target amino acid sites
                     cand_mod_sites.append(i)
             
             if not cand_mod_sites:
-                logger.debug("No non-STY sites available for decoy generation")
+                logger.debug("No non-target amino acid sites available for decoy generation")
                 return []
             
             # Calculate the number of modifications in the original peptide
@@ -1295,10 +1334,19 @@ class PSM:
             
             # Add FLR-related metadata
             self.peptide_hit.setMetaValue("Luciphor_delta_score", self.delta_score)
+            self.peptide_hit.setMetaValue("target_decoy", "decoy" if self.is_decoy else "target")
+            
+            # Add search_engine_sequence information
+            # This should be the original sequence from the search engine
+            if hasattr(self, 'search_engine_sequence'):
+                self.peptide_hit.setMetaValue("search_engine_sequence", self.search_engine_sequence)
+            else:
+                # If not available, use the original peptide sequence
+                self.peptide_hit.setMetaValue("search_engine_sequence", self.peptide.peptide)
+            
             self.peptide_hit.setMetaValue("Luciphor_pep_score", self.psm_score) # Use psm_score as pep_score
             self.peptide_hit.setMetaValue("Luciphor_global_flr", self.global_flr)
             self.peptide_hit.setMetaValue("Luciphor_local_flr", self.local_flr)
-            self.peptide_hit.setMetaValue("target_decoy", "decoy" if self.is_decoy else "target")
             
             # Update peptide_id score type and attributes
             self.peptide_id.setScoreType("Luciphor_delta_score")
@@ -1320,6 +1368,79 @@ class PSM:
             logger.error(f"Error updating peptide identification data for PSM {self.scan_num}: {str(e)}")
             raise
 
+    def convert_sequence_to_standard_format(self, sequence: str) -> str:
+        """
+        Convert sequence from lowercase modification format to standard (Phospho) format
+        
+        Args:
+            sequence: Sequence with lowercase letters indicating modifications
+            
+        Returns:
+            str: Sequence in standard format with (Phospho) modifications
+        """
+        try:
+            if not sequence:
+                return sequence
+                
+            result = ""
+            i = 0
+            while i < len(sequence):
+                if sequence[i].islower() and sequence[i].upper() in ['S', 'T', 'Y']:
+                    # Convert lowercase to uppercase and add (Phospho)
+                    result += sequence[i].upper() + "(Phospho)"
+                elif sequence[i].islower() and sequence[i].upper() in ['M', 'W', 'F', 'Y']:
+                    # Convert lowercase to uppercase and add (Oxidation)
+                    result += sequence[i].upper() + "(Oxidation)"
+                else:
+                    result += sequence[i]
+                i += 1
+                
+            return result
+        except Exception as e:
+            logger.error(f"Error converting sequence format: {str(e)}")
+            return sequence
+
+    def get_best_sequence(self, include_decoys: bool = True) -> str:
+        """
+        Get the best scoring sequence from permutations
+        
+        Args:
+            include_decoys: Whether to include decoy permutations (True: first round calculation, False: second round calculation)
+            
+        Returns:
+            str: The best scoring sequence, or original sequence if no permutations available
+        """
+        try:
+            # Get scores for all real permutations
+            real_scores = list(self.pos_permutation_score_map.values())
+            
+            if len(real_scores) == 0:
+                logger.debug(f"PSM {self.scan_num} has no real permutation scores, returning original sequence")
+                return self.peptide.peptide
+            
+            # Find the best scoring real permutation
+            best_real_perm = max(self.pos_permutation_score_map.items(), key=lambda x: x[1])
+            best_real_score = best_real_perm[1]
+            
+            if include_decoys and len(self.neg_permutation_score_map) > 0:
+                # Check if any decoy permutation has higher score
+                best_decoy_perm = max(self.neg_permutation_score_map.items(), key=lambda x: x[1])
+                best_decoy_score = best_decoy_perm[1]
+                
+                if best_decoy_score > best_real_score:
+                    logger.debug(f"PSM {self.scan_num} best sequence is decoy: {best_decoy_perm[0]} (score: {best_decoy_score:.6f})")
+                    return self.convert_sequence_to_standard_format(best_decoy_perm[0])
+                else:
+                    logger.debug(f"PSM {self.scan_num} best sequence is real: {best_real_perm[0]} (score: {best_real_score:.6f})")
+                    return self.convert_sequence_to_standard_format(best_real_perm[0])
+            else:
+                logger.debug(f"PSM {self.scan_num} best sequence is real: {best_real_perm[0]} (score: {best_real_score:.6f})")
+                return self.convert_sequence_to_standard_format(best_real_perm[0])
+                
+        except Exception as e:
+            logger.error(f"Error getting best sequence for PSM {self.scan_num}: {str(e)}")
+            return self.peptide.peptide
+
     def calculate_delta_score(self, include_decoys: bool = True) -> None:
         """
         Calculate delta score based on permutation scores
@@ -1340,13 +1461,23 @@ class PSM:
             
             real_scores.sort(reverse=True)
             
+            # For unambiguous cases, delta_score should equal the top real score
+            if self.is_unambiguous:
+                top_score = real_scores[0]
+                self.delta_score = top_score
+                self.psm_score = top_score
+                logger.debug(f"PSM {self.scan_num} unambiguous: setting delta_score = top real score {top_score:.6f}")
+                return
+            
             if include_decoys and len(self.neg_permutation_score_map) > 0:
                 all_scores = real_scores + list(self.neg_permutation_score_map.values())
                 all_scores.sort(reverse=True)
                 
                 if len(all_scores) == 1:
-                    self.delta_score = 0.0
-                    logger.debug(f"PSM {self.scan_num} has only one permutation (including decoys), setting delta_score to 0")
+                    # Only one permutation overall: treat as unambiguous
+                    self.delta_score = all_scores[0]
+                    self.psm_score = all_scores[0]
+                    logger.debug(f"PSM {self.scan_num} single permutation overall: delta_score = {self.delta_score:.6f}")
                 else:
                     top_score = all_scores[0]
                     second_score = all_scores[1]
@@ -1354,8 +1485,10 @@ class PSM:
                     logger.debug(f"PSM {self.scan_num} first round delta_score (including decoys): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}")
             else:
                 if len(real_scores) == 1:
-                    self.delta_score = 0.0
-                    logger.debug(f"PSM {self.scan_num} has only one real permutation, setting delta_score to 0")
+                    # Only one real permutation: treat as unambiguous
+                    self.delta_score = real_scores[0]
+                    self.psm_score = real_scores[0]
+                    logger.debug(f"PSM {self.scan_num} single real permutation: delta_score = {self.delta_score:.6f}")
                 else:
                     top_score = real_scores[0]
                     second_score = real_scores[1]

@@ -61,6 +61,7 @@ AA_MASSES.update({
     's': 87.03203 + 79.966331,  # Ser + phosphorylation
     't': 101.04768 + 79.966331,  # Thr + phosphorylation
     'y': 163.06333 + 79.966331,  # Tyr + phosphorylation
+    'a': 71.03711 + 79.966331,  # Ala + PhosphoDecoy
     'm': 131.04049 + 15.994915,  # Met + oxidation
 })
 

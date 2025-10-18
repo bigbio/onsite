@@ -67,67 +67,57 @@ class ModelData_CID:
     
     def _initialize_arrays(self, peaks: List[Peak]) -> None:
         """
-        Initialize data arrays
+        Initialize data arrays using vectorized operations for better performance
         
         Args:
             peaks: Peak list
         """
-        # Count various ion types
-        nb = 0
-        ny = 0
-        nu = 0
+        # Convert peaks to structured arrays for efficient processing
+        matched_peaks = []
+        unmatched_peaks = []
         
         for peak in peaks:
             if peak.get('matched', False):
-                ion_str = peak.get('matched_ion_str', '')
-                if ion_str.startswith("b"):
-                    nb += 1
-                if ion_str.startswith("y"):
-                    ny += 1
+                matched_peaks.append({
+                    'ion_str': peak.get('matched_ion_str', ''),
+                    'norm_intensity': peak.get('norm_intensity', 0.0),
+                    'mass_diff': peak.get('mass_diff', 0.0)
+                })
             else:
-                nu += 1
+                unmatched_peaks.append({
+                    'norm_intensity': peak.get('norm_intensity', 0.0),
+                    'mass_diff': peak.get('mass_diff', 0.0)
+                })
         
-        # Initialize arrays
-        self.b_intensity = np.zeros(nb)
-        self.b_distance = np.zeros(nb)
-        self.y_intensity = np.zeros(ny)
-        self.y_distance = np.zeros(ny)
+        # Separate b and y ions using list comprehensions for better performance
+        b_ions = [p for p in matched_peaks if p['ion_str'].startswith('b')]
+        y_ions = [p for p in matched_peaks if p['ion_str'].startswith('y')]
         
-        # Refill arrays
-        nb = 0
-        ny = 0
+        # Initialize arrays with pre-allocated sizes
+        nb, ny = len(b_ions), len(y_ions)
         
-        for peak in peaks:
-            if peak.get('matched', False):
-                ion_str = peak.get('matched_ion_str', '')
-                if ion_str.startswith("b"):
-                    self.b_intensity[nb] = peak.get('norm_intensity', 0.0)
-                    self.b_distance[nb] = peak.get('mass_diff', 0.0)
-                    nb += 1
-                if ion_str.startswith("y"):
-                    self.y_intensity[ny] = peak.get('norm_intensity', 0.0)
-                    self.y_distance[ny] = peak.get('mass_diff', 0.0)
-                    ny += 1
+        self.b_intensity = np.array([ion['norm_intensity'] for ion in b_ions]) if nb > 0 else np.array([])
+        self.b_distance = np.array([ion['mass_diff'] for ion in b_ions]) if nb > 0 else np.array([])
+        self.y_intensity = np.array([ion['norm_intensity'] for ion in y_ions]) if ny > 0 else np.array([])
+        self.y_distance = np.array([ion['mass_diff'] for ion in y_ions]) if ny > 0 else np.array([])
         
-        # Limit negative distribution size
-        limit_n = nb + ny
-        if limit_n < 50000:  # constants.MIN_NUM_NEG_PKS
-            limit_n += 50000
+        # Handle unmatched peaks more efficiently
+        nu = len(unmatched_peaks)
+        limit_n = min(nb + ny + 50000, nu) if nu > 0 else 0
         
-        if limit_n > nu:
-            limit_n = nu
-        
-        self.u_intensity = np.zeros(limit_n)
-        self.u_distance = np.zeros(limit_n)
-        
-        # Collect unmatched peaks
-        neg_peaks = [pk for pk in peaks if not pk.get('matched', False)]
-        np.random.shuffle(neg_peaks)
-        
-        for i in range(limit_n):
-            peak = neg_peaks[i]
-            self.u_intensity[i] = peak.get('norm_intensity', 0.0)
-            self.u_distance[i] = peak.get('mass_diff', 0.0)
+        if limit_n > 0:
+            # Randomly sample unmatched peaks
+            if limit_n < nu:
+                selected_indices = np.random.choice(nu, limit_n, replace=False)
+                selected_unmatched = [unmatched_peaks[i] for i in selected_indices]
+            else:
+                selected_unmatched = unmatched_peaks
+            
+            self.u_intensity = np.array([p['norm_intensity'] for p in selected_unmatched])
+            self.u_distance = np.array([p['mass_diff'] for p in selected_unmatched])
+        else:
+            self.u_intensity = np.array([])
+            self.u_distance = np.array([])
     
     def calc_mean(self) -> None:
         """
@@ -293,70 +283,47 @@ class ModelData_HCD:
     
     def _initialize_arrays(self, peaks: List[Peak]) -> None:
         """
-        Initialize data arrays
+        Initialize data arrays using vectorized operations for better performance
         
         Args:
             peaks: Peak list
         """
-        pos_peaks = []
-        neg_peaks = []
-        
-        b = 0
-        y = 0
-        n = 0
-        p = 0
+        # Separate peaks into matched and unmatched more efficiently
+        matched_peaks = []
+        unmatched_peaks = []
         
         for peak in peaks:
             if peak.get('matched', False):
-                p += 1
-                ion_str = peak.get('matched_ion_str', '')
-                if ion_str.startswith("b"):
-                    pos_peaks.append(peak)
-                    b += 1
-                if ion_str.startswith("y"):
-                    pos_peaks.append(peak)
-                    y += 1
+                matched_peaks.append({
+                    'ion_str': peak.get('matched_ion_str', ''),
+                    'norm_intensity': peak.get('norm_intensity', 0.0),
+                    'mass_diff': peak.get('mass_diff', 0.0)
+                })
             else:
-                neg_peaks.append(peak)
-                n += 1
+                unmatched_peaks.append(peak.get('norm_intensity', 0.0))
         
-        # Separate data into original arrays
-        self.b_int = np.zeros(b)
-        self.y_int = np.zeros(y)
-        self.pos_dist = np.zeros(p)
+        # Separate b and y ions using vectorized operations
+        b_ions = [p for p in matched_peaks if p['ion_str'].startswith('b')]
+        y_ions = [p for p in matched_peaks if p['ion_str'].startswith('y')]
         
-        # Fill intensity data
-        b = 0
-        y = 0
-        for peak in pos_peaks:
-            ion_str = peak.get('matched_ion_str', '')
-            if ion_str.startswith("b"):
-                self.b_int[b] = peak.get('norm_intensity', 0.0)
-                b += 1
-            elif ion_str.startswith("y"):
-                self.y_int[y] = peak.get('norm_intensity', 0.0)
-                y += 1
+        # Initialize arrays directly from lists
+        self.b_int = np.array([ion['norm_intensity'] for ion in b_ions]) if b_ions else np.array([])
+        self.y_int = np.array([ion['norm_intensity'] for ion in y_ions]) if y_ions else np.array([])
+        self.pos_dist = np.array([ion['mass_diff'] for ion in matched_peaks]) if matched_peaks else np.array([])
         
-        # Fill distance data
-        p = 0
-        for peak in pos_peaks:
-            self.pos_dist[p] = peak.get('mass_diff', 0.0)
-            p += 1
+        # Handle negative peaks more efficiently
+        n_total = len(unmatched_peaks)
+        limit_n = min(len(b_ions) + len(y_ions) + 50000, n_total) if n_total > 0 else 0
         
-        # Limit negative distribution size
-        limit_n = b + y
-        if limit_n < 50000:  # constants.MIN_NUM_NEG_PKS
-            limit_n += 50000
-        
-        if limit_n > n:
-            limit_n = n
-        
-        self.n_int = np.zeros(limit_n)
-        np.random.shuffle(neg_peaks)
-        
-        for i in range(limit_n):
-            peak = neg_peaks[i]
-            self.n_int[i] = peak.get('norm_intensity', 0.0)
+        if limit_n > 0:
+            # Randomly sample negative peaks using NumPy
+            if limit_n < n_total:
+                selected_indices = np.random.choice(n_total, limit_n, replace=False)
+                self.n_int = np.array([unmatched_peaks[i] for i in selected_indices])
+            else:
+                self.n_int = np.array(unmatched_peaks)
+        else:
+            self.n_int = np.array([])
     
     def percentile_trim(self, ion_type: str, data_type: int, percent_trim: float) -> None:
         """
@@ -661,7 +628,7 @@ class ModelData_HCD:
     
     def get_log_np_density_int(self, ion_type: str, x: float) -> float:
         """
-        Get log non-parametric density of intensity
+        Get log non-parametric density of intensity using optimized lookup
         
         Args:
             ion_type: Ion type ('b', 'y', 'n')
@@ -670,61 +637,45 @@ class ModelData_HCD:
         Returns:
             Log density value
         """
-        a = 0.0
-        b = 0.0
-        tmp1 = 0.0
-        tmp2 = 0.0
-        fx = 0.0
-        N = 0
-        sum_val = 0.0
         tick_marks_int = None
         f_int = None
         
         if ion_type == 'b':
-            N = len(self.b_tick_marks_int) if self.b_tick_marks_int is not None else 0
             tick_marks_int = self.b_tick_marks_int
             f_int = self.f_int_b
         elif ion_type == 'y':
-            N = len(self.y_tick_marks_int) if self.y_tick_marks_int is not None else 0
             tick_marks_int = self.y_tick_marks_int
             f_int = self.f_int_y
         elif ion_type == 'n':
-            N = len(self.neg_tick_marks_int) if self.neg_tick_marks_int is not None else 0
             tick_marks_int = self.neg_tick_marks_int
             f_int = self.f_int_neg
         
-        if tick_marks_int is None or f_int is None or N == 0:
+        if tick_marks_int is None or f_int is None or len(tick_marks_int) == 0:
             return float('-inf')
         
-        start_tick = tick_marks_int[0]
-        end_tick = tick_marks_int[self.ntick - 1]
-        start_val = f_int[0]
-        end_val = f_int[self.ntick - 1]
-        
-        # Find interval containing x
-        for j in range(self.ntick - 1, 0, -1):
-            i = j - 1
-            a = tick_marks_int[i]
-            b = tick_marks_int[j]
+        # Use binary search for faster lookup
+        if x <= tick_marks_int[0]:
+            sum_val = f_int[0]
+        elif x >= tick_marks_int[-1]:
+            sum_val = f_int[-1]
+        else:
+            # Use NumPy searchsorted for faster interval finding
+            idx = np.searchsorted(tick_marks_int, x, side='right') - 1
+            idx = max(0, min(idx, len(tick_marks_int) - 2))
             
-            if a <= x < b:
-                # Calculate area under curve
-                tmp1 = (b - x) / (b - a)
-                tmp2 = (x - a) / (b - a)
-                fx = (tmp1 * f_int[i]) + (tmp2 * f_int[j])
-                sum_val = fx
-                break
-        
-        if x <= start_tick:
-            sum_val = start_val
-        elif x >= end_tick:
-            sum_val = end_val
+            # Linear interpolation
+            a, b = tick_marks_int[idx], tick_marks_int[idx + 1]
+            if b > a:  # Avoid division by zero
+                weight = (x - a) / (b - a)
+                sum_val = f_int[idx] * (1 - weight) + f_int[idx + 1] * weight
+            else:
+                sum_val = f_int[idx]
         
         return np.log(sum_val) if sum_val > 0 else float('-inf')
     
     def get_log_np_density_dist_pos(self, x: float) -> float:
         """
-        Get log non-parametric density of distance
+        Get log non-parametric density of distance using optimized lookup
         
         Args:
             x: Distance value
@@ -732,39 +683,26 @@ class ModelData_HCD:
         Returns:
             Log density value
         """
-        a = 0.0
-        b = 0.0
-        tmp1 = 0.0
-        tmp2 = 0.0
-        fx = 0.0
-        sum_val = 0.0
-        
-        if self.pos_tick_marks_dist is None or self.f_dist is None:
+        if self.pos_tick_marks_dist is None or self.f_dist is None or len(self.pos_tick_marks_dist) == 0:
             return float('-inf')
         
-        start_tick = self.pos_tick_marks_dist[0]
-        end_tick = self.pos_tick_marks_dist[self.ntick - 1]
-        start_val = self.f_dist[0]
-        end_val = self.f_dist[self.ntick - 1]
-        
-        # Find interval containing x
-        for j in range(self.ntick - 1, 0, -1):
-            i = j - 1
-            a = self.pos_tick_marks_dist[i]
-            b = self.pos_tick_marks_dist[j]
+        # Use binary search for faster lookup
+        if x <= self.pos_tick_marks_dist[0]:
+            sum_val = self.f_dist[0]
+        elif x >= self.pos_tick_marks_dist[-1]:
+            sum_val = self.f_dist[-1]
+        else:
+            # Use NumPy searchsorted for faster interval finding
+            idx = np.searchsorted(self.pos_tick_marks_dist, x, side='right') - 1
+            idx = max(0, min(idx, len(self.pos_tick_marks_dist) - 2))
             
-            if a <= x < b:
-                # Calculate area under curve
-                tmp1 = (b - x) / (b - a)
-                tmp2 = (x - a) / (b - a)
-                fx = (tmp1 * self.f_dist[i]) + (tmp2 * self.f_dist[j])
-                sum_val = fx
-                break
-        
-        if x <= start_tick:
-            sum_val = start_val
-        elif x >= end_tick:
-            sum_val = end_val
+            # Linear interpolation
+            a, b = self.pos_tick_marks_dist[idx], self.pos_tick_marks_dist[idx + 1]
+            if b > a:  # Avoid division by zero
+                weight = (x - a) / (b - a)
+                sum_val = self.f_dist[idx] * (1 - weight) + self.f_dist[idx + 1] * weight
+            else:
+                sum_val = self.f_dist[idx]
         
         return np.log(sum_val) if sum_val > 0 else float('-inf')
     
@@ -814,6 +752,28 @@ class CIDModel:
         for psm in psms:
             charge_psms[psm.charge].append(psm)
         
+        # Check if each charge state has sufficient PSMs for modeling
+        min_psms_per_charge = self.config.get('min_num_psms_model', 50)
+        bad_charges = set()
+        
+        logger.info("PSMs for modeling:")
+        logger.info("------------------")
+        for charge in sorted(charge_psms.keys()):
+            n_psms = len(charge_psms[charge])
+            logger.info(f"+{charge}: {n_psms} PSMs")
+            if n_psms < min_psms_per_charge:
+                bad_charges.add(charge)
+                logger.warning(f"Charge state +{charge} has insufficient PSMs for modeling (need {min_psms_per_charge}, got {n_psms})")
+        
+        # Remove charge states with insufficient PSMs
+        for bad_charge in bad_charges:
+            del charge_psms[bad_charge]
+        
+        if not charge_psms:
+            raise RuntimeError(f"No charge states have sufficient PSMs for modeling (minimum {min_psms_per_charge} PSMs per charge state required)")
+        
+        logger.info(f"Will build models for charge states: {sorted(charge_psms.keys())}")
+        
         # Get thread count configuration
         num_threads = self.config.get('num_threads', os.cpu_count() or 4)
         logger.info(f"Using {num_threads} threads for CID model training...")
@@ -851,8 +811,8 @@ class CIDModel:
         pos_peaks = []
         neg_peaks = []
         for psm in charge_psm_list:
-            # Get matched peaks
-            matched_peaks = psm._match_peaks(psm.peptide.peptide, psm.config.get('fragment_mass_tolerance', 0.5))
+            # Get matched peaks using modified peptide sequence
+            matched_peaks = psm._match_peaks(psm.peptide.mod_peptide, psm.config.get('fragment_mass_tolerance', 0.5))
             pos_peaks.extend(matched_peaks)
             
             # Get unmatched peaks (get all peaks from spectrum, then exclude matched peaks)
@@ -891,7 +851,20 @@ class CIDModel:
         Returns:
             ModelData_CID instance, returns None if not found
         """
-        return self.charge_models.get(charge)
+        # First try to get the exact charge model
+        if charge in self.charge_models:
+            return self.charge_models[charge]
+        
+        # If exact charge model not available, try to use a fallback model
+        # Prefer nearby charge states
+        available_charges = sorted(self.charge_models.keys())
+        if not available_charges:
+            return None
+        
+        # Find the closest charge state
+        closest_charge = min(available_charges, key=lambda x: abs(x - charge))
+        logger.debug(f"Using charge {closest_charge} model as fallback for charge {charge}")
+        return self.charge_models[closest_charge]
     
     def get_log_np_density_int(self, ion_type: str, x: float, charge: int = None) -> float:
         """
@@ -996,6 +969,28 @@ class HCDModel:
         for psm in psms:
             charge_psms[psm.charge].append(psm)
         
+        # Check if each charge state has sufficient PSMs for modeling
+        min_psms_per_charge = self.config.get('min_num_psms_model', 50)
+        bad_charges = set()
+        
+        logger.info("PSMs for modeling:")
+        logger.info("------------------")
+        for charge in sorted(charge_psms.keys()):
+            n_psms = len(charge_psms[charge])
+            logger.info(f"+{charge}: {n_psms} PSMs")
+            if n_psms < min_psms_per_charge:
+                bad_charges.add(charge)
+                logger.warning(f"Charge state +{charge} has insufficient PSMs for modeling (need {min_psms_per_charge}, got {n_psms})")
+        
+        # Remove charge states with insufficient PSMs
+        for bad_charge in bad_charges:
+            del charge_psms[bad_charge]
+        
+        if not charge_psms:
+            raise RuntimeError(f"No charge states have sufficient PSMs for modeling (minimum {min_psms_per_charge} PSMs per charge state required)")
+        
+        logger.info(f"Will build models for charge states: {sorted(charge_psms.keys())}")
+        
         num_threads = self.config.get('num_threads', os.cpu_count() or 4)
         logger.info(f"Using {num_threads} threads for HCD model training...")
         
@@ -1072,7 +1067,20 @@ class HCDModel:
         Returns:
             ModelData_HCD instance, returns None if not found
         """
-        return self.charge_models.get(charge)
+        # First try to get the exact charge model
+        if charge in self.charge_models:
+            return self.charge_models[charge]
+        
+        # If exact charge model not available, try to use a fallback model
+        # Prefer nearby charge states
+        available_charges = sorted(self.charge_models.keys())
+        if not available_charges:
+            return None
+        
+        # Find the closest charge state
+        closest_charge = min(available_charges, key=lambda x: abs(x - charge))
+        logger.debug(f"Using charge {closest_charge} model as fallback for charge {charge}")
+        return self.charge_models[closest_charge]
     
     def get_log_np_density_int(self, ion_type: str, x: float, charge: int = None) -> float:
         """

@@ -6,6 +6,7 @@ This module contains the Peptide class, which represents a peptide sequence.
 
 import logging
 import itertools
+import re
 from typing import Dict, List, Set, Tuple, Optional, Any, Union
 
 import numpy as np
@@ -19,6 +20,25 @@ from .globals import get_decoy_symbol
 from .peak import Peak
 
 logger = logging.getLogger(__name__)
+
+
+def extract_target_amino_acids(target_modifications: List[str]) -> Set[str]:
+    """
+    Extract amino acid letters from target modifications format.
+    
+    Args:
+        target_modifications: List of modification strings like ["Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)"]
+        
+    Returns:
+        Set of amino acid letters that can be modified
+    """
+    amino_acids = set()
+    for mod in target_modifications:
+        # Extract amino acid from format like "Phospho (S)" or "PhosphoDecoy (A)"
+        match = re.search(r'\(([A-Z])\)', mod)
+        if match:
+            amino_acids.add(match.group(1))
+    return amino_acids
 
 
 class Peptide:
@@ -93,6 +113,13 @@ class Peptide:
                         mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
                     i += 9
                     continue
+                # Check decoy phosphorylation modification (14 characters)
+                elif i + 14 <= len(self.peptide) and self.peptide[i:i+14] == "(PhosphoDecoy)":
+                    # Convert modified amino acid to lowercase (treat as phosphorylation)
+                    if len(mod_pep) > 0:
+                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
+                    i += 14
+                    continue
                 # Check oxidation modification (11 characters)
                 elif i + 11 <= len(self.peptide) and self.peptide[i:i+11] == "(Oxidation)":
                     # Convert modified amino acid to lowercase
@@ -121,6 +148,12 @@ class Peptide:
                     pos = len(mod_pep_pos) - 1
                     self.mod_pos_map[pos] = 79.966  # Phosphorylation mass
                 i += 9
+            elif i + 14 <= len(self.peptide) and self.peptide[i:i+14] == "(PhosphoDecoy)":
+                # Decoy phosphorylation modification - also treat as target modification
+                if len(mod_pep_pos) > 0:
+                    pos = len(mod_pep_pos) - 1
+                    self.mod_pos_map[pos] = 79.966  # Phosphorylation mass
+                i += 14
             elif i + 11 <= len(self.peptide) and self.peptide[i:i+11] == "(Oxidation)":
                 # Oxidation modification - non-target modification
                 if len(mod_pep_pos) > 0:
@@ -132,22 +165,29 @@ class Peptide:
                 i += 1
 
         # Calculate potential phosphorylation sites and reported phosphorylation sites
-        # Calculate potential phosphorylation sites from original sequence (including all STY sites)
+        # Extract target amino acids from target_modifications
+        target_modifications = self.config.get('target_modifications', [])
+        target_amino_acids = extract_target_amino_acids(target_modifications)
+        
+        # Calculate potential phosphorylation sites from original sequence (including all target amino acid sites)
         self.num_pps = 0
         i = 0
         while i < len(self.peptide):
             if self.peptide[i:i+9] == "(Phospho)":
                 # Skip modification markers
                 i += 9
-            elif self.peptide[i] in ['S', 'T', 'Y']:
+            elif self.peptide[i:i+14] == "(PhosphoDecoy)":
+                # Skip modification markers
+                i += 14
+            elif self.peptide[i] in target_amino_acids:
                 # This is a potential phosphorylation site
                 self.num_pps += 1
                 i += 1
             else:
                 i += 1
         
-        # Calculate reported phosphorylation sites (number of (Phospho))
-        self.num_rps = self.peptide.count("(Phospho)")
+        # Calculate reported phosphorylation sites (number of (Phospho) + (PhosphoDecoy))
+        self.num_rps = self.peptide.count("(Phospho)") + self.peptide.count("(PhosphoDecoy)")
         
         # Check if unambiguous (number of potential sites equals number of reported sites)
         self.is_unambiguous = self.num_pps == self.num_rps
@@ -547,11 +587,15 @@ class Peptide:
         else:
             cand_mod_sites = []
             
+            # Extract target amino acids from target_modifications
+            target_modifications = self.config.get('target_modifications', [])
+            target_amino_acids = extract_target_amino_acids(target_modifications)
+            
             for i in range(self.pep_len):
                 aa = self.peptide[i]
                 score = 0
                 
-                if aa not in self.config.get('target_modifications', {}):
+                if aa not in target_amino_acids:
                     score += 1
                 
                 if i not in self.non_target_mods:

@@ -26,46 +26,55 @@ class Spectrum:
         self.max_i_index = 0  # index of max intensity peak
         self.max_i = 0.0  # max intensity value
         
-        # Peak arrays
-        self.mz = []  # m/z values
-        self.raw_intensity = []  # raw intensity values
-        self.rel_intensity = []  # relative intensity values (0-100)
-        self.norm_intensity = []  # normalized intensity values (log scale)
+        # Peak arrays - use NumPy arrays for better performance
+        self.mz = np.array([])  # m/z values
+        self.raw_intensity = np.array([])  # raw intensity values
+        self.rel_intensity = np.array([])  # relative intensity values (0-100)
+        self.norm_intensity = np.array([])  # normalized intensity values (log scale)
+        
+        # Pre-computed indices for faster searching
+        self._mz_sorted_indices = None
+        self._mz_sorted = None
         
         if mz_array is not None and intensity_array is not None:
             self._init_peaks(mz_array, intensity_array)
     
     def _init_peaks(self, mz_array, intensity_array):
         """Initialize peak arrays from input data."""
+        # Convert to NumPy arrays if not already
+        mz_array = np.asarray(mz_array)
+        intensity_array = np.asarray(intensity_array)
+        
         # Ensure arrays have same length
         N = min(len(mz_array), len(intensity_array))
         
-        # Filter out zero intensity peaks
-        cand_peaks = []
-        for i in range(N):
-            if intensity_array[i] > 0:
-                cand_peaks.append(i)
+        # Filter out zero intensity peaks using vectorized operations
+        valid_mask = intensity_array[:N] > 0
         
-        self.N = len(cand_peaks)
+        if not np.any(valid_mask):
+            # No valid peaks
+            self.N = 0
+            return
         
-        # Initialize arrays
-        self.mz = np.zeros(self.N)
-        self.raw_intensity = np.zeros(self.N)
+        # Extract valid peaks
+        self.mz = mz_array[:N][valid_mask]
+        self.raw_intensity = intensity_array[:N][valid_mask]
+        self.N = len(self.mz)
+        
+        # Find max intensity
+        max_idx = np.argmax(self.raw_intensity)
+        self.max_i = self.raw_intensity[max_idx]
+        self.max_i_index = max_idx
+        
+        # Initialize other arrays
         self.rel_intensity = np.zeros(self.N)
         self.norm_intensity = np.zeros(self.N)
         
-        # Record peak data
-        for i, idx in enumerate(cand_peaks):
-            intensity = intensity_array[idx]
-            if intensity > self.max_i:
-                self.max_i = intensity
-                self.max_i_index = idx
-            
-            self.mz[i] = mz_array[idx]
-            self.raw_intensity[i] = intensity
-        
         # Calculate relative intensities
         self.calc_relative_intensity()
+        
+        # Pre-compute sorted indices for faster searching
+        self._update_sorted_indices()
     
     def calc_relative_intensity(self):
         """Calculate relative intensities (0-100) based on max intensity."""
@@ -80,25 +89,13 @@ class Spectrum:
         if self.N == 0:
             return
             
-        # Sort relative intensities
-        sorted_intensities = sorted(self.rel_intensity)
+        # Use NumPy median for better performance
+        median_i = np.median(self.rel_intensity)
         
-        # Calculate median
-        mid = self.N // 2
-        if self.N % 2 == 0:  # even number of peaks
-            a = sorted_intensities[mid - 1]
-            b = sorted_intensities[mid]
-            median_i = (a + b) / 2.0
-        else:  # odd number of peaks
-            median_i = sorted_intensities[mid]
-        
-        # Calculate normalized intensities
-        for i in range(self.N):
-            d = self.rel_intensity[i] / median_i
-            if d > 0:  # avoid log(0)
-                self.norm_intensity[i] = np.log(d)
-            else:
-                self.norm_intensity[i] = float('-inf')
+        # Vectorized calculation of normalized intensities
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d = self.rel_intensity / median_i
+            self.norm_intensity = np.where(d > 0, np.log(d), float('-inf'))
     
     def get_peaks(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -118,17 +115,73 @@ class Spectrum:
         """
         return self.N == 0
     
-    def find_index_by_mz(self, mz: float) -> int:
+    def _update_sorted_indices(self):
+        """Update sorted indices for faster searching."""
+        if self.N > 0:
+            self._mz_sorted_indices = np.argsort(self.mz)
+            self._mz_sorted = self.mz[self._mz_sorted_indices]
+    
+    def find_index_by_mz(self, mz: float, tolerance: float = 1e-6) -> int:
         """
-        Find peak index by m/z value.
+        Find peak index by m/z value using binary search for better performance.
         
         Args:
             mz: m/z value to find
+            tolerance: m/z tolerance for matching
             
         Returns:
             Index of peak with matching m/z, or -1 if not found
         """
-        for i in range(self.N):
-            if abs(self.mz[i] - mz) < 1e-6:  # floating point comparison
-                return i
-        return -1 
+        if self.N == 0:
+            return -1
+        
+        # Use binary search on sorted m/z values
+        if self._mz_sorted is None:
+            self._update_sorted_indices()
+        
+        # Find closest m/z using searchsorted
+        idx = np.searchsorted(self._mz_sorted, mz)
+        
+        # Check both adjacent positions
+        candidates = []
+        if idx > 0:
+            candidates.append(idx - 1)
+        if idx < len(self._mz_sorted):
+            candidates.append(idx)
+        
+        # Find the closest match within tolerance
+        best_idx = -1
+        best_diff = float('inf')
+        
+        for candidate_idx in candidates:
+            if candidate_idx < len(self._mz_sorted):
+                diff = abs(self._mz_sorted[candidate_idx] - mz)
+                if diff < tolerance and diff < best_diff:
+                    best_diff = diff
+                    best_idx = self._mz_sorted_indices[candidate_idx]
+        
+        return best_idx
+    
+    def find_peaks_in_range(self, mz_min: float, mz_max: float) -> np.ndarray:
+        """
+        Find all peak indices within a m/z range using binary search.
+        
+        Args:
+            mz_min: Minimum m/z value
+            mz_max: Maximum m/z value
+            
+        Returns:
+            Array of indices of peaks within the range
+        """
+        if self.N == 0:
+            return np.array([])
+        
+        if self._mz_sorted is None:
+            self._update_sorted_indices()
+        
+        # Use searchsorted to find range boundaries
+        start_idx = np.searchsorted(self._mz_sorted, mz_min, side='left')
+        end_idx = np.searchsorted(self._mz_sorted, mz_max, side='right')
+        
+        # Return original indices
+        return self._mz_sorted_indices[start_idx:end_idx] 

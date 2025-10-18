@@ -1,52 +1,44 @@
 """
-Test that all modules can be imported correctly.
+Test imports for OnSite package.
 """
 
 import pytest
+import sys
+import os
+import onsite
+from onsite import AScore
+from onsite import calculate_phospho_localization_compomics_style
+from onsite import lucxor
 
+# Add the parent directory to the path so we can import onsite
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def test_onsite_package_import():
-    """Test that the onsite package can be imported."""
-    try:
-        import onsite
-        assert onsite is not None
-        assert onsite.__version__ == "0.0.1"
-    except ImportError as e:
-        pytest.skip(f"onsite package import failed: {e}")
-
+def test_onsite_import():
+    """Test that the main onsite package can be imported."""
+    
+    assert hasattr(onsite, '__version__')
+    assert onsite.__version__ == "0.0.1"
 
 def test_ascore_import():
-    """Test that AScore can be imported from onsite package."""
-    try:
-        from onsite import AScore
-        assert AScore is not None
-    except ImportError as e:
-        pytest.skip(f"AScore import failed: {e}")
-
+    """Test that AScore can be imported."""
+    assert AScore is not None
 
 def test_phosphors_import():
-    """Test that phosphors functions can be imported from onsite package."""
-    try:
-        from onsite import calculate_phospho_localization_compomics_style
-        assert calculate_phospho_localization_compomics_style is not None
-    except ImportError as e:
-        pytest.skip(f"phosphors import failed: {e}")
-
-
-def test_phosphoscoring_import():
-    """Test that PhosphoScoring can be imported."""
-    try:
-        from PhosphoScoring import main
-        assert main is not None
-    except ImportError as e:
-        pytest.skip(f"PhosphoScoring import failed: {e}")
-
+    """Test that PhosphoRS can be imported."""
+    assert calculate_phospho_localization_compomics_style is not None
 
 def test_lucxor_import():
-    """Test that lucxor can be imported."""
+    """Test that LucXor components can be imported."""
     try:
-        import onsite.lucxor
-        assert onsite.lucxor is not None
-    except ImportError as e:
-        pytest.skip(f"lucxor import failed: {e}")
+        assert lucxor is not None
+        # Test that we can access PyLuciPHOr2 through the module
+        PyLuciPHOr2 = lucxor.PyLuciPHOr2
+        assert PyLuciPHOr2 is not None
+    except ImportError:
+        pytest.skip("LucXor components not available")
 
+def test_cli_import():
+    """Test that CLI can be imported."""
+    from onsite import onsitec
+    assert onsitec is not None
+    assert hasattr(onsitec, 'main')
