@@ -12,14 +12,13 @@ import json
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
-import numpy as np
 from pyopenms import (
     IdXMLFile,
     MzMLFile,
     MSExperiment,
-    PeptideIdentification, 
+    PeptideIdentification,
     ProteinIdentification,
-    IDFilter
+    IDFilter,
 )
 
 from .psm import PSM
@@ -31,7 +30,6 @@ from .flr import FLRCalculator
 from .parallel import parallel_psm_processing, get_optimal_thread_count
 
 logger = logging.getLogger(__name__)
-
 
 
 @click.command()
@@ -199,7 +197,7 @@ def lucxor(
     try:
         # Setup logging first
         setup_logging(debug, log_file, output)
-        
+
         # Create tool instance and run
         tool = PyLuciPHOr2()
         exit_code = tool.run(
@@ -226,7 +224,7 @@ def lucxor(
         )
         
         sys.exit(exit_code)
-        
+
     except KeyboardInterrupt:
         click.echo("\nOperation cancelled by user", err=True)
         sys.exit(1)
@@ -235,6 +233,7 @@ def lucxor(
         if debug:
             logger.error(f"Error: {str(e)}")
             import traceback
+
             logger.error(traceback.format_exc())
         sys.exit(1)
 
@@ -244,33 +243,33 @@ def setup_logging(debug, log_file, output):
     # Configure log format
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     formatter = logging.Formatter(log_format)
-    
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG if debug else logging.INFO)
-    
+
     # Clear existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+
     # Configure console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
-    
+
     # Only configure file handler in debug mode
     if debug:
         # Get output filename (without extension)
         output_base = os.path.splitext(output)[0]
         log_file_path = log_file or f"{output_base}_debug.log"
-        
+
         # Configure file handler
         file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
-    
+
     # Set third-party library log levels
     logging.getLogger("numpy").setLevel(logging.WARNING)
     logging.getLogger("scipy").setLevel(logging.WARNING)
@@ -278,7 +277,7 @@ def setup_logging(debug, log_file, output):
 
 class PyLuciPHOr2:
     """Main class for pyLuciPHOr2 command line tool"""
-    
+
     def __init__(self):
         """Initialize PyLuciPHOr2."""
         self.logger = logging.getLogger(__name__)
@@ -286,21 +285,23 @@ class PyLuciPHOr2:
         self.model = None
         self.psms = []
         self.config = {}
-        
-    def load_input_files(self, input_id: str, input_spectrum: str) -> Tuple[List[PeptideIdentification], List[ProteinIdentification], MSExperiment]:
+
+    def load_input_files(
+        self, input_id: str, input_spectrum: str
+    ) -> Tuple[List[PeptideIdentification], List[ProteinIdentification], MSExperiment]:
         """Load input files"""
         # Load identifications
         pep_ids = []
         prot_ids = []
         IdXMLFile().load(input_id, prot_ids, pep_ids)
-        
+
         if not pep_ids:
             self.logger.warning("No peptide identifications found in input file")
             return [], [], None
-            
+
         # Keep only best hits
         IDFilter().keepNBestHits(pep_ids, 1)
-        
+
         # Load spectra
         exp = MSExperiment()
         MzMLFile().load(input_spectrum, exp)
@@ -355,7 +356,7 @@ class PyLuciPHOr2:
         4. Exit with error if insufficient high-scoring PSMs.
         """
         config = DEFAULT_CONFIG.copy()
-        
+
         # Parse target_modifications to handle comma-separated format
         parsed_target_modifications = []
         for mod in target_modifications:
@@ -364,33 +365,35 @@ class PyLuciPHOr2:
                 parsed_target_modifications.extend([m.strip() for m in mod.split(",")])
             else:
                 parsed_target_modifications.append(mod.strip())
-        
-        config.update({
-            "fragment_method": fragment_method,
-            "fragment_mass_tolerance": fragment_mass_tolerance,
-            "fragment_error_units": fragment_error_units,
-            "min_mz": min_mz,
-            "target_modifications": parsed_target_modifications,
-            "neutral_losses": list(neutral_losses),
-            "decoy_mass": decoy_mass,
-            "decoy_neutral_losses": list(decoy_neutral_losses),
-            "max_charge_state": max_charge_state,
-            "max_peptide_length": max_peptide_length,
-            "max_num_perm": max_num_perm,
-            "modeling_score_threshold": modeling_score_threshold,
-            "scoring_threshold": scoring_threshold,
-            "min_num_psms_model": min_num_psms_model,
-            "num_threads": threads,
-            "rt_tolerance": rt_tolerance
-        })
-        
+
+        config.update(
+            {
+                "fragment_method": fragment_method,
+                "fragment_mass_tolerance": fragment_mass_tolerance,
+                "fragment_error_units": fragment_error_units,
+                "min_mz": min_mz,
+                "target_modifications": parsed_target_modifications,
+                "neutral_losses": list(neutral_losses),
+                "decoy_mass": decoy_mass,
+                "decoy_neutral_losses": list(decoy_neutral_losses),
+                "max_charge_state": max_charge_state,
+                "max_peptide_length": max_peptide_length,
+                "max_num_perm": max_num_perm,
+                "modeling_score_threshold": modeling_score_threshold,
+                "scoring_threshold": scoring_threshold,
+                "min_num_psms_model": min_num_psms_model,
+                "num_threads": threads,
+                "rt_tolerance": rt_tolerance,
+            }
+        )
+
         # Start timing
         start_time = time.time()
 
         self.logger.info("Loading input files...")
         self.logger.debug(f"Debug mode: {debug}")
         self.logger.debug(f"Log level: {logging.getLogger().level}")
-        
+
         pep_ids, prot_ids, exp = self.load_input_files(input_id, input_spectrum)
         if not pep_ids or exp is None:
             self.logger.error("No valid peptide identification or spectrum data found, process terminated.")
@@ -662,8 +665,6 @@ class PyLuciPHOr2:
 
         return 0
 
-
-
 def main():
     """Entry point for standalone LucXor CLI."""
     lucxor()
@@ -671,3 +672,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

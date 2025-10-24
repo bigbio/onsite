@@ -163,7 +163,6 @@ class AScore:
 
         second_best_score = ranking[-2][0]
         second_best_permutation_idx = ranking[-2][1]
-        seq2 = th_spectra[second_best_permutation_idx].getName()
         peptide2_score = second_best_score
 
         phospho_sites = []
@@ -195,7 +194,7 @@ class AScore:
                     or site_determining_ions[1].size() == 0
                 ):
                     self._get_logger().info(
-                        f"Debug: No site-determining ions found for site {phospho_site["first"]}"
+                        f"Debug: No site-determining ions found for site {phospho_site['first']}"
                     )
                     Ascore = 0.0
                 else:

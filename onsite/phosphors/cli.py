@@ -99,7 +99,7 @@ def phosphors(
         logger = log_debug(log_file, debug)
         if debug:
             logger.info("PhosphoRSScoring Debug Log")
-            logger.info(f"Start time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}")
+            logger.info(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info(f"Input file: {in_file}")
             logger.info(f"Identification file: {id_file}")
             logger.info(f"Output file: {out_file}")
@@ -125,7 +125,7 @@ def phosphors(
         # Sequential or parallel processing
         if max(1, int(threads)) == 1:
             click.echo(
-                f"[{time.strftime("%H:%M:%S")}] Processing {len(peptide_ids)} peptide identifications sequentially..."
+                f"[{time.strftime('%H:%M:%S')}] Processing {len(peptide_ids)} peptide identifications sequentially..."
             )
             
             for i, pid in enumerate(peptide_ids):
@@ -141,7 +141,7 @@ def phosphors(
                     else:
                         stats["errors"] += 1
                         if debug:
-                            logger.error(f"Error processing identification: {result["reason"]}")
+                            logger.error(f"Error processing identification: {result['reason']}")
                 except Exception as e:
                     stats["errors"] += 1
                     if debug:
@@ -150,7 +150,7 @@ def phosphors(
         else:
             workers = max(1, int(threads))
             click.echo(
-                f"[{time.strftime("%H:%M:%S")}] Parallel execution with {workers} processes"
+                f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} processes"
             )
             if debug:
                 logger.info(f"Starting parallel processing with {workers} workers")
@@ -249,18 +249,18 @@ def phosphors(
                     stats["errors"] += 1
                     if debug:
                         logger.error(
-                            f"Error processing identification: {res.get("reason", "unknown")}"
+                            f"Error processing identification: {res.get('reason', 'unknown')}"
                         )
 
         # Report
         elapsed = time.time() - start_time
         click.echo(f"\nProcessing Complete:")
-        click.echo(f"  Total identifications: {stats["total"]}")
-        click.echo(f"  Successfully processed: {stats["processed"]}")
-        click.echo(f"  Phosphorylated peptides: {stats["phospho"]}")
-        click.echo(f"  Processing errors: {stats["errors"]}")
+        click.echo(f"  Total identifications: {stats['total']}")
+        click.echo(f"  Successfully processed: {stats['processed']}")
+        click.echo(f"  Phosphorylated peptides: {stats['phospho']}")
+        click.echo(f"  Processing errors: {stats['errors']}")
         click.echo(f"  Time elapsed: {elapsed:.2f} seconds")
-        click.echo(f"  Processing speed: {stats["processed"]/elapsed:.2f} IDs/second")
+        click.echo(f"  Processing speed: {stats['processed']/elapsed:.2f} IDs/second")
         if debug:
             click.echo(f"  Debug log saved to: {log_file}")
             logger.info("Processing completed successfully")
@@ -284,7 +284,7 @@ def phosphors(
 
 def load_spectra(mzml_file):
     """Load MS/MS spectra with progress feedback"""
-    print(f"[{time.strftime("%H:%M:%S")}] Loading spectra from {mzml_file}")
+    print(f"[{time.strftime('%H:%M:%S')}] Loading spectra from {mzml_file}")
     exp = MSExperiment()
     FileHandler().loadExperiment(mzml_file, exp)
     print(f"Loaded {exp.size()} spectra")
@@ -293,7 +293,7 @@ def load_spectra(mzml_file):
 
 def load_identifications(idxml_file):
     """Load identification results with metadata validation"""
-    print(f"[{time.strftime("%H:%M:%S")}] Loading identifications from {idxml_file}")
+    print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
     protein_ids = []
     peptide_ids = []
     IdXMLFile().load(idxml_file, protein_ids, peptide_ids)
@@ -343,27 +343,29 @@ def save_identifications(out_file, protein_ids, peptide_ids):
 def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
     """Optimized spectrum matching with caching"""
     # Binary search for optimized spectrum matching
-    if not hasattr(find_spectrum_by_mz, "spectrum_cache"):
-        find_spectrum_by_mz.spectrum_cache = {}
-        find_spectrum_by_mz.spectrum_list = []
-
+    cache = getattr(find_spectrum_by_mz, "spectrum_cache", {})
+    exp_key = id(exp)
+    if exp_key not in cache:
+        cache[exp_key] = {"spectra": []}
+        find_spectrum_by_mz.spectrum_cache = cache
         # Preprocess all MS2 spectra
         for spec in exp:
             if spec.getMSLevel() == 2 and spec.getPrecursors():
                 mz = spec.getPrecursors()[0].getMZ()
-                find_spectrum_by_mz.spectrum_list.append((mz, spec))
+                cache[exp_key]["spectra"].append((mz, spec))
 
         # Sort by m/z
-        find_spectrum_by_mz.spectrum_list.sort(key=lambda x: x[0])
+        cache[exp_key]["spectra"].sort(key=lambda x: x[0])
 
     # Binary search for the closest m/z
-    left, right = 0, len(find_spectrum_by_mz.spectrum_list) - 1
+    spectra = cache[exp_key]["spectra"]
+    left, right = 0, len(spectra) - 1
     best_match = None
     min_diff = float("inf")
 
     while left <= right:
         mid = (left + right) // 2
-        mz, spec = find_spectrum_by_mz.spectrum_list[mid]
+        mz, spec = spectra[mid]
         diff = abs(mz - target_mz)
 
         if diff < min_diff:
@@ -375,6 +377,16 @@ def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
         else:
             right = mid - 1
 
+    if best_match is None:
+        return None
+    # Enforce ppm tolerance and optional RT tolerance (~0.1 s default behavior)
+    best_mz = best_match.getPrecursors()[0].getMZ()
+    ppm = abs(best_mz - target_mz) / max(target_mz, 1e-12) * 1e6
+    if ppm > ppm_tolerance:
+        return None
+    if rt is not None:
+        if abs(best_match.getRT() - rt) > 0.1:
+            return None
     return best_match
 
 

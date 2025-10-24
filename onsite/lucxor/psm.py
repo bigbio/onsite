@@ -468,13 +468,13 @@ class PSM:
         include_decoys = round_number == 0
         self.calculate_delta_score(include_decoys=include_decoys)
 
-        # Calculate FLR, only using PSM"s deltaScore
+        # Calculate FLR, only using PSM's deltaScore
         if (
             hasattr(self, "flr_calculator")
             and self.flr_calculator is not None
             and round_number == 0
         ):
-            # Only add current PSM"s deltaScore
+            # Only add current PSM's deltaScore
             if self.delta_score > self.flr_calculator.min_delta_score:
                 self.flr_calculator.add_psm(self.delta_score, self.is_decoy)
                 logger.debug(
@@ -572,7 +572,7 @@ class PSM:
             f"Second stage generated {len(real_permutations)} real permutations"
         )
 
-        # Store real permutations (don"t generate decoy permutations)
+        # Store real permutations (don't generate decoy permutations)
         for perm, sites in real_permutations:
             self.pos_permutation_score_map[perm] = (
                 0.0  # Score will be calculated in scoring stage
@@ -915,7 +915,7 @@ class PSM:
                 # Handle decoy amino acids
                 # In Java, decoy amino acids already have extra mass, no need to add modification mass
                 # Because decoy amino acid mass already includes DECOY_MASS in AA_MASSES
-                pass  # Don"t add extra modification mass
+                pass  # Don't add extra modification mass
 
         # Handle bracket format modifications (compatibility with old format)
         i = 0
@@ -1299,7 +1299,7 @@ class PSM:
                             aa.upper()
                         )  # Non-modification sites use uppercase letters
 
-                # Check if it"s a valid decoy sequence
+                # Check if it's a valid decoy sequence
                 if self._is_valid_decoy_sequence(mod_pep):
                     decoy_perms.append((mod_pep, list(sites)))
 
@@ -1364,7 +1364,7 @@ class PSM:
         temp_config = self.config.copy()
         temp_config["fragment_mass_tolerance"] = tolerance
 
-        # Call Peptide"s match_peaks method with modified configuration
+        # Call Peptide's match_peaks method with modified configuration
         matched_peaks = temp_peptide.match_peaks(self.spectrum, temp_config)
 
         # Clean up temporary object

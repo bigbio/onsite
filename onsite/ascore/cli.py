@@ -99,7 +99,7 @@ def ascore(
         logger = log_debug(log_file, debug)
         if debug:
             logger.info("PhosphoScoring Debug Log")
-            logger.info(f"Start time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}")
+            logger.info(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info(f"Input file: {in_file}")
             logger.info(f"Identification file: {id_file}")
             logger.info(f"Output file: {out_file}")
@@ -129,7 +129,7 @@ def ascore(
                 logger.info("Starting sequential processing")
             
             click.echo(
-                f"[{time.strftime("%H:%M:%S")}] Processing {len(peptide_ids)} peptide identifications sequentially..."
+                f"[{time.strftime('%H:%M:%S')}] Processing {len(peptide_ids)} peptide identifications sequentially..."
             )
             
             for i, pid in enumerate(peptide_ids):
@@ -153,7 +153,7 @@ def ascore(
                             logger.info(f"Successfully processed identification {i+1} with {phospho_count} phosphorylated hits")
                     else:
                         stats["errors"] += 1
-                        error_msg = f"Error processing identification: {result["reason"]}"
+                        error_msg = f"Error processing identification: {result['reason']}"
                         if debug:
                             logger.error(error_msg)
                 except Exception as e:
@@ -165,7 +165,7 @@ def ascore(
         else:
             workers = max(1, int(threads))
             click.echo(
-                f"[{time.strftime("%H:%M:%S")}] Parallel execution with {workers} processes"
+                f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} processes"
             )
             
             if debug:
@@ -264,19 +264,19 @@ def ascore(
                         logger.info(f"Rebuilt identification {idx+1} with {phospho_count} phosphorylated hits")
                 else:
                     stats["errors"] += 1
-                    error_msg = f"Error processing identification: {res.get("reason", "unknown")}"
+                    error_msg = f"Error processing identification: {res.get('reason', 'unknown')}"
                     if debug:
                         logger.error(error_msg)
         
         # Generate final report
         elapsed = time.time() - start_time
         click.echo(f"\nProcessing Complete:")
-        click.echo(f"  Total identifications: {stats["total"]}")
-        click.echo(f"  Successfully processed: {stats["processed"]}")
-        click.echo(f"  Phosphorylated peptides: {stats["phospho"]}")
-        click.echo(f"  Processing errors: {stats["errors"]}")
+        click.echo(f"  Total identifications: {stats['total']}")
+        click.echo(f"  Successfully processed: {stats['processed']}")
+        click.echo(f"  Phosphorylated peptides: {stats['phospho']}")
+        click.echo(f"  Processing errors: {stats['errors']}")
         click.echo(f"  Time elapsed: {elapsed:.2f} seconds")
-        click.echo(f"  Processing speed: {stats["processed"]/elapsed:.2f} IDs/second")
+        click.echo(f"  Processing speed: {stats['processed']/elapsed:.2f} IDs/second")
         if debug:
             click.echo(f"  Debug log saved to: {log_file}")
         
@@ -284,10 +284,10 @@ def ascore(
             logger.info("Processing completed successfully")
             logger.info(f"Final statistics: {stats}")
             logger.info(f"Total time: {elapsed:.2f} seconds")
-            logger.info(f"Processing speed: {stats["processed"]/elapsed:.2f} IDs/second")
+            logger.info(f"Processing speed: {stats['processed']/elapsed:.2f} IDs/second")
 
         # Save results
-        click.echo(f"[{time.strftime("%H:%M:%S")}] Saving results to {out_file}")
+        click.echo(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_file}")
         save_identifications(out_file, protein_ids, processed_peptide_ids)
 
     except KeyboardInterrupt:
@@ -304,7 +304,7 @@ def ascore(
 
 def load_spectra(mzml_file):
     """Load MS/MS spectra"""
-    print(f"[{time.strftime("%H:%M:%S")}] Loading spectra from {mzml_file}")
+    print(f"[{time.strftime('%H:%M:%S')}] Loading spectra from {mzml_file}")
     exp = MSExperiment()
     FileHandler().loadExperiment(mzml_file, exp)
     print(f"Loaded {exp.size()} spectra")
@@ -313,7 +313,7 @@ def load_spectra(mzml_file):
 
 def load_identifications(idxml_file):
     """Load identification results"""
-    print(f"[{time.strftime("%H:%M:%S")}] Loading identifications from {idxml_file}")
+    print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
     protein_ids = []
     peptide_ids = []
     IdXMLFile().load(idxml_file, protein_ids, peptide_ids)

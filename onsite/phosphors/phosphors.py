@@ -1099,11 +1099,11 @@ def calculate_phospho_localization_compomics_style(
                     )
             except Exception as e2:
                 raise ValueError(
-                    f'Could not determine number of modifications in sequence "{original_sequence}" by mass or string: {e2}'
+                    f"Could not determine number of modifications in sequence '{original_sequence}' by mass or string: {e2}"
                 ) from e
 
         if num_mods_present <= 0:
-            # print(f"Info: No phosphorylation found or inferred in sequence "{original_sequence}". Cannot localize.")
+            # print(f"Info: No phosphorylation found or inferred in sequence '{original_sequence}'. Cannot localize.")
             return None, None
 
         unmodified_sequence_str = original_sequence.toUnmodifiedString()
@@ -1417,7 +1417,7 @@ if __name__ == "__main__":
     print(f"Number of mods to place: {num_phospho_to_place}")
     print(f"Potential site indices (0-based): {target_phospho_sites_indices}")
     print(
-        f"Fragment Tolerance: {FRAGMENT_TOLERANCE} {"ppm" if FRAGMENT_METHOD_PPM else "Da"}"
+        f"Fragment Tolerance: {FRAGMENT_TOLERANCE} {'ppm' if FRAGMENT_METHOD_PPM else 'Da'}"
     )
     print("-" * 20)
 

@@ -543,7 +543,7 @@ class ModelData_HCD:
             logger.info(
                 f"+{self.charge_state}  Estimating NP Model for y-ion intensities (N={N})"
             )
-        else:  # "n"
+        else:  # 'n'
             N = len(self.n_int)
             norm_ints = self.n_int
             variance = self.neg_int_var
@@ -812,7 +812,7 @@ class CIDModel:
         """
         if not psms or len(psms) < self.config.get("min_num_psms_model", 50):
             raise RuntimeError(
-                f"Insufficient high-scoring PSMs to train CID model (need at least {self.config.get("min_num_psms_model", 50)}, actual {len(psms)})"
+                f"Insufficient high-scoring PSMs to train CID model (need at least {self.config.get('min_num_psms_model', 50)}, actual {len(psms)})"
             )
 
         # Group PSMs by charge state
@@ -1054,7 +1054,7 @@ class HCDModel:
         """
         if not psms or len(psms) < self.config.get("min_num_psms_model", 50):
             raise RuntimeError(
-                f"Insufficient high-scoring PSMs to train HCD model (need at least {self.config.get("min_num_psms_model", 50)}, actual {len(psms)})"
+                f"Insufficient high-scoring PSMs to train HCD model (need at least {self.config.get('min_num_psms_model', 50)}, actual {len(psms)})"
             )
 
         charge_psms = defaultdict(list)

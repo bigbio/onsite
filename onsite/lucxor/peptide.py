@@ -390,7 +390,7 @@ class Peptide:
 
         seq = ion[start:end]
 
-        # Check if it"s a decoy sequence
+        # Check if it's a decoy sequence
         if self._is_decoy_seq(seq):
             # Decoy sequence neutral loss handling
             decoy_nl_map = self.config.get("decoy_neutral_losses", [])
@@ -468,7 +468,7 @@ class Peptide:
 
         seq = ion_str[start:end]
 
-        # Check if it"s a decoy sequence
+        # Check if it's a decoy sequence
         if self._is_decoy_seq(seq):
             # Decoy sequence neutral loss handling
             decoy_nl_map = self.config.get("decoy_neutral_losses", {})
@@ -903,7 +903,7 @@ class Peptide:
             intensity_u = model.get_log_np_density_int("n", peak["norm_intensity"])
             dist_u = 0.0  # Log of uniform distribution is 0
 
-            ion_type = peak["matched_ion_str"][0]  # Take first character ("b" or "y")
+            ion_type = peak["matched_ion_str"][0]  # Take first character ('b' or 'y')
 
             intensity_m = model.get_log_np_density_int(ion_type, peak["norm_intensity"])
             dist_m = model.get_log_np_density_dist_pos(peak["mass_diff"])
