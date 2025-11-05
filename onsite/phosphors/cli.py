@@ -444,7 +444,7 @@ def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
 
 # ----------------------- Multiprocessing worker utilities -----------------------
 _WORKER_EXP = None
-
+_WORKER_SCAN_MAP = None
 
 def _worker_get_exp(mzml_file):
     global _WORKER_EXP
@@ -458,8 +458,16 @@ def _worker_get_exp(mzml_file):
             _ = find_spectrum_by_mz(exp, 0.0, None)
         _WORKER_EXP = exp
     return _WORKER_EXP
-
-
+    
+    
+def _worker_get_scan_map(exp):
+    """Get or build the scan map for the worker process. Cached per worker."""
+    global _WORKER_SCAN_MAP
+    if _WORKER_SCAN_MAP is None:
+        _WORKER_SCAN_MAP = build_scan_to_spectrum_map(exp)
+    return _WORKER_SCAN_MAP
+    
+    
 def _worker_process_pid(task):
     try:
         mzml_path = task["mzml_path"]
@@ -475,7 +483,7 @@ def _worker_process_pid(task):
         if pid_info.get("spectrum_reference"):
             scan_number = extract_scan_number_from_reference(pid_info["spectrum_reference"])
             if scan_number is not None:
-                scan_map = build_scan_to_spectrum_map(exp)
+                scan_map = _worker_get_scan_map(exp)
                 spectrum = find_spectrum_by_scan(exp, scan_number, scan_map)
         
         # Fallback to m/z and RT matching if scan number lookup failed
