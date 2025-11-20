@@ -251,15 +251,15 @@ SpectrumID,Peptide,ModifiedPeptide,Score,DeltaScore,GlobalFLR,LocalFLR,IsDecoy
 
 ### Original Publications
 
-#### LuciPHOr (2011)
-Fermin, D., Walmsley, S. J., Gingras, A. C., Nesvizhskii, A. I., & Choi, H. (2011). LuciPHOr: algorithm for phosphorylation site localization with false localization rate estimation using target-decoy approach. *Molecular & Cellular Proteomics*, 10(3), M110.003830.
+#### LuciPHOr (2013)
+Fermin, D., Walmsley, S. J., Gingras, A. C., Choi, H., & Nesvizhskii, A. I. (2013). LuciPHOr: algorithm for phosphorylation site localization with false localization rate estimation using modified target-decoy approach. *Molecular & Cellular Proteomics*, 12(11), 3409-3419.
 
-**DOI**: 10.1074/mcp.M110.003830
+**DOI**: 10.1074/mcp.M113.028928
 
-#### LuciPHOr2 (2013)
-Fermin, D., Walmsley, S. J., Gingras, A. C., Nesvizhskii, A. I., & Choi, H. (2013). LuciPHOr2: site identification of generic post-translational modifications from tandem mass spectrometry data. *Nature Methods*, 10(8), 744-746.
+#### LuciPHOr2 (2015)
+Fermin, D., Avtonomov, D., Choi, H., & Nesvizhskii, A. I. (2015). LuciPHOr2: site localization of generic post-translational modifications from tandem mass spectrometry data. *Bioinformatics*, 31(7), 1141-1143.
 
-**DOI**: 10.1038/nmeth.2557
+**DOI**: 10.1093/bioinformatics/btu788
 
 ### Key Features of Original Implementation
 

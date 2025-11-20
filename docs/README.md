@@ -20,6 +20,19 @@
 - 📈 **High Accuracy**: Confident site localization with statistical validation
 - 🧩 **Flexible API**: Both command-line and Python API support
 
+## 📊 Benchmark
+
+We benchmarked onsite algorithms on the PXD000138 dataset using unified mzML/idXML inputs and consistent filtering (FDR < 0.01, tool-specific localization thresholds). Key takeaways:
+
+| Tool | Total PSMs | Total phospho sites | Well-resolved sites | Uncertain sites | Global FLR |
+|---|---|---|---|---|---|
+| LuciPHOr | 111,588 | 118,625 | 48,186 | 37,337 | 0.0237 |
+| AScore | 111,747 | 101,382 | 52,906 | 23,628 | 0.0283 |
+| pyLucXor | 111,588 | 117,341 | 51,468 | 38,970 | 0.0304 |
+| PhosphoRS | 111,747 | 107,552 | 50,000 | 26,354 | 0.0142 |
+
+See [benchmark.md](benchmark.md) for methodology, full tables, and analysis details.
+
 ## 📋 Supported Algorithms
 
 onsite provides three complementary algorithms for PTM localization:
