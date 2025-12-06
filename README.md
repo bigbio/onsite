@@ -41,14 +41,16 @@ poetry shell
 ### Using pip
 
 ```bash
-# Install from PyPI (when available)
-pip install onsite
+# Install from PyPI (note: PyPI package name is 'pyonsite')
+pip install pyonsite
 
 # Or install from source
 git clone https://github.com/bigbio/onsite.git
 cd onsite
 pip install -e .
 ```
+
+**Note:** The package is published on PyPI as `pyonsite` due to a naming conflict, but the module is still imported as `onsite`.
 
 ### Development Installation
 
