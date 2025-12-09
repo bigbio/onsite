@@ -99,7 +99,7 @@ The cumulative FLR (False Localization Rate) curve shows the number of identifie
 | **pyLucXor** | 82,349 | 84,397 |
 | **PhosphoRS** | 80,618 | 81,473 |
 
-*At the recommended 1% FLR threshold, Ascore identifies the most phosphorylation sites (85,626), followed by pyLucXor (82,349), PhosphoRS (80,618), and LuciPHOr (75,626).*
+*At the recommended 1% FLR threshold, AScore identifies the most phosphorylation sites (85,626), followed by pyLucXor (82,349), PhosphoRS (80,618), and LuciPHOr (75,626).*
 
 ### Figure 2: FLR Curve for Non-Ambiguous Sites
 
