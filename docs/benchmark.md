@@ -95,7 +95,7 @@ The cumulative FLR (False Localization Rate) curve shows the number of identifie
 | Tool | Phospho Sites at 1% FLR | Phospho Sites at 5% FLR |
 |------|------------------------|------------------------|
 | **LuciPHOr** | 75,626 | 77,101 |
-| **Ascore** | 85,626 | 86,167 |
+| **AScore** | 85,626 | 86,167 |
 | **pyLucXor** | 82,349 | 84,397 |
 | **PhosphoRS** | 80,618 | 81,473 |
 
