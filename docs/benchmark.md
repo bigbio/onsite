@@ -34,7 +34,7 @@ The following thresholds were applied to ensure high-quality phosphorylation sit
 
 ### pAla Strategy
 
-**pAla** refers to phosphorylated Alanine (pAla), which serves as a decoy modification for False Localization Rate (FLR) estimation. Since Alanine cannot be phosphorylated in biological systems, any assignment of phosphorylation to Alanine residues represents a false localization event. This target-decoy approach enables statistical estimation of localization errors:
+**pAla** refers to phosphorylated Alanine (pAla), which serves as a decoy modification for FLR (False Localization Rate) estimation. Since Alanine cannot be phosphorylated in biological systems, any assignment of phosphorylation to Alanine residues represents a false localization event. This target-decoy approach enables statistical estimation of localization errors:
 
 - **Phospho**: True phosphorylation sites on S/T/Y residues (target)
 - **PhosphoDecoy**: Phosphorylation incorrectly assigned to Alanine (decoy/pAla)
@@ -83,6 +83,29 @@ Uncertain phosphorylation sites were identified using criteria from the respecti
 | **PhosphoRS** | 111747 | 107552 | 50000 | 26354 |
 
 *Total_PSMs: Number of PSMs after quality filtering. Total_Phospho_Sites: Sum of all phosphorylation sites from filtered PSMs.*
+
+### Figure 1: FLR-Controlled Cumulative Phosphorylation Sites
+
+![FLR Cumulative Curve](images/flr_cumulative_curve.png)
+
+The cumulative FLR (False Localization Rate) curve shows the number of identified phosphorylation sites as a function of the FLR threshold. **This analysis does not apply algorithm-specific filtering thresholds** (such as local_flr, Ascore, or site_prob), instead using only the unified pAla-based FLR control to enable fair cross-tool comparison. The analysis includes both well-resolved and ambiguous sites, providing a comprehensive view of tool performance across different FLR thresholds.
+
+#### Table 4: Phosphorylation Sites at Standard FLR Thresholds
+
+| Tool | Phospho Sites at 1% FLR | Phospho Sites at 5% FLR |
+|------|------------------------|------------------------|
+| **LuciPHOr** | 75,626 | 77,101 |
+| **Ascore** | 85,626 | 86,167 |
+| **pyLucXor** | 82,349 | 84,397 |
+| **PhosphoRS** | 80,618 | 81,473 |
+
+*At the recommended 1% FLR threshold, Ascore identifies the most phosphorylation sites (85,626), followed by pyLucXor (82,349), PhosphoRS (80,618), and LuciPHOr (75,626).*
+
+### Figure 2: FLR Curve for Non-Ambiguous Sites
+
+![FLR Cumulative Curve Non-Ambiguous](images/flr_cumulative_curve_non_ambiguous.png)
+
+This curve shows the FLR (False Localization Rate) performance when considering only non-ambiguous phosphorylation sites (where the number of potential sites equals the number of phosphorylation modifications). **Like Figure 1, this analysis does not apply algorithm-specific filtering**, relying solely on the pAla-based FLR threshold for unbiased comparison. This provides insight into tool performance on the most confident site assignments.
 
 ## Analysis
 
