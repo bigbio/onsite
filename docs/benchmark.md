@@ -26,7 +26,7 @@ The following thresholds were applied to ensure high-quality phosphorylation sit
 | Tool | Metric | Recommended Threshold | Description |
 |------|--------|----------------------|-------------|
 | **LuciPHOr** | local_flr | < 0.01 | Local False Localization Rate per charge state |
-| **Ascore** | Ascore_site | > 20 | Site-specific Ascore |
+| **AScore** | AScore_site | > 20 | Site-specific AScore |
 | **pyLucXor** | local_flr | < 0.01 | Local FLR per charge state |
 | **PhosphoRS** | site_prob | > 99% | Site probability percentage |
 
