@@ -96,6 +96,29 @@ Fermin, D., Avtonomov, D., Choi, H., & Nesvizhskii, A. I. (2015). LuciPHOr2: sit
 }
 ```
 
+**pAla (Phospho-Alanine Decoy Method) (2022)**:
+Ramsbottom, K. A., Prakash, A., Riverol, Y. P., Camacho, O. M., Martin, M. J., Vizcaíno, J. A., Deutsch, E. W., & Jones, A. R. (2022). Method for Independent Estimation of the False Localization Rate for Phosphoproteomics. *Journal of Proteome Research*, 21(7), 1603-1615.
+
+**DOI**: 10.1021/acs.jproteome.1c00827
+
+**PMID**: 35640880; **PMCID**: PMC9251759
+
+**BibTeX**:
+```bibtex
+@article{ramsbottom2022pala,
+  title={Method for Independent Estimation of the False Localization Rate for Phosphoproteomics},
+  author={Ramsbottom, Kirsty A and Prakash, Ananth and Riverol, Yasset Perez and Camacho, Oscar M and Martin, Maria J and Vizca{\'i}no, Juan Antonio and Deutsch, Eric W and Jones, Andrew R},
+  journal={Journal of Proteome Research},
+  volume={21},
+  number={7},
+  pages={1603--1615},
+  year={2022},
+  doi={10.1021/acs.jproteome.1c00827},
+  pmid={35640880},
+  pmcid={PMC9251759}
+}
+```
+
 #### Related Work
 - **Target-Decoy Approach**: Elias, J. E., & Gygi, S. P. (2007). Target-decoy search strategy for increased confidence in large-scale protein identifications by mass spectrometry. *Nature Methods*, 4(3), 207-214.
 - **FLR Estimation**: Käll, L., et al. (2008). Posterior error probabilities and false discovery rates: two sides of the same coin. *Journal of Proteome Research*, 7(1), 40-44.

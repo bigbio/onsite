@@ -10,13 +10,34 @@ This document presents the benchmark results of four phosphorylation site locali
 
 1. **Initial Processing**: LuciPHOr results were obtained using quantms workflow on PXD000138 dataset
 2. **Comparative Testing**: Ascore, pyLucXor, and PhosphoRS were tested using the same mzML and idXML files as LuciPHOr
-3. **Filtering Criteria**: 
+3. **Quality Filtering** (applied first to all PSMs):
    - **LuciPHOr & pyLucXor**: local_flr < 0.01
    - **Ascore**: Ascore_site > 20
    - **PhosphoRS**: site_prob > 99%
    - **All tools**: FDR < 0.01
 4. **Post-filtering**: Removed peptides with ambiguous sites and decoy peptides
-5. **Validation**: Matched filtered results from each tool against the ground truth/reference dataset (see line 102) to calculate True Positives (TP) and False Positives (FP)
+5. **Site Counting**: After filtering, phosphorylation sites (Phospho and PhosphoDecoy) were counted from the remaining high-quality PSMs
+6. **Validation**: Matched filtered results from each tool against the ground truth/reference dataset to calculate True Positives (TP) and False Positives (FP)
+
+### Quality Filtering Thresholds
+
+The following thresholds were applied to ensure high-quality phosphorylation site localization:
+
+| Tool | Metric | Recommended Threshold | Description |
+|------|--------|----------------------|-------------|
+| **LuciPHOr** | local_flr | < 0.01 | Local False Localization Rate per charge state |
+| **AScore** | AScore_site | > 20 | Site-specific AScore |
+| **pyLucXor** | local_flr | < 0.01 | Local FLR per charge state |
+| **PhosphoRS** | site_prob | > 99% | Site probability percentage |
+
+**Note**: All tools also require **FDR < 0.01** as a baseline quality filter.
+
+### pAla Strategy
+
+**pAla** refers to phosphorylated Alanine (pAla), which serves as a decoy modification for FLR (False Localization Rate) estimation. Since Alanine cannot be phosphorylated in biological systems, any assignment of phosphorylation to Alanine residues represents a false localization event. This target-decoy approach enables statistical estimation of localization errors:
+
+- **Phospho**: True phosphorylation sites on S/T/Y residues (target)
+- **PhosphoDecoy**: Phosphorylation incorrectly assigned to Alanine (decoy/pAla)
 
 ### Uncertainty Classification
 
@@ -28,23 +49,29 @@ Uncertain phosphorylation sites were identified using criteria from the respecti
 
 ## Results
 
+**Note**: All site counts below are obtained from PSMs that passed the quality filtering criteria described in the Methodology section.
+
 ### Table 1: Well-Resolved Phosphorylation Sites
 
-| Tool | Phospho_Count | PhosphoDecoy_Count | Total_Sites | Global_FLR |
-|------|---------------|-------------------|-------------|------------|
-| **LuciPHOr** | 48186 | 1168 | 49354 | 0.0237 |
-| **Ascore** | 52906 | 1541 | 54447 | 0.0283 |
-| **pyLucXor** | 51468 | 1616 | 53084 | 0.0304 |
-| **PhosphoRS** | 50000 | 722 | 50722 | 0.0142 |
+| Tool | Phospho_Count | PhosphoDecoy_Count | Total_Sites |
+|------|---------------|-------------------|-------------|
+| **LuciPHOr** | 48186 | 1168 | 49354 |
+| **Ascore** | 52906 | 1541 | 54447 |
+| **pyLucXor** | 51468 | 1616 | 53084 |
+| **PhosphoRS** | 50000 | 722 | 50722 |
+
+*Counts represent phosphorylation sites from filtered, high-quality PSMs only.*
 
 ### Table 2: Uncertain Phosphorylation Sites
 
-| Tool | Phospho_Count | PhosphoDecoy_Count | Total_Sites | Percentage_of_Total_PSMs | Global_FLR |
-|------|---------------|--------------------|-------------|--------------------------|------------|
-| **LuciPHOr** | 37337 | 5670 | 43007 | 9.977655 | 0.131839 |
-| **Ascore** | 23628 | 16921 | 40549 | 10.52425 | 0.417298 |
-| **pyLucXor** | 38970 | 6511 | 45481 | 10.74325 | 0.143159 |
-| **PhosphoRS** | 26354 | 4168 | 30522 | 6.614142 | 0.136557 |
+| Tool | Phospho_Count | PhosphoDecoy_Count | Total_Sites | Percentage_of_Total_PSMs |
+|------|---------------|--------------------|-------------|--------------------------|
+| **LuciPHOr** | 37337 | 5670 | 43007 | 9.977655 |
+| **Ascore** | 23628 | 16921 | 40549 | 10.52425 |
+| **pyLucXor** | 38970 | 6511 | 45481 | 10.74325 |
+| **PhosphoRS** | 26354 | 4168 | 30522 | 6.614142 |
+
+*Counts represent phosphorylation sites from filtered PSMs that meet quality thresholds but have uncertain localization.*
 
 ### Table 3: Site Localization Quality
 
@@ -54,6 +81,31 @@ Uncertain phosphorylation sites were identified using criteria from the respecti
 | **Ascore** | 111747 | 101382 | 52906 | 23628 |
 | **pyLucXor** | 111588 | 117341 | 51468 | 38970 |
 | **PhosphoRS** | 111747 | 107552 | 50000 | 26354 |
+
+*Total_PSMs: Number of PSMs after quality filtering. Total_Phospho_Sites: Sum of all phosphorylation sites from filtered PSMs.*
+
+### Figure 1: FLR-Controlled Cumulative Phosphorylation Sites
+
+![FLR Cumulative Curve](images/flr_cumulative_curve.png)
+
+The cumulative FLR (False Localization Rate) curve shows the number of identified phosphorylation sites as a function of the FLR threshold. **This analysis does not apply algorithm-specific filtering thresholds** (such as local_flr, Ascore, or site_prob), instead using only the unified pAla-based FLR control to enable fair cross-tool comparison. The analysis includes both well-resolved and ambiguous sites, providing a comprehensive view of tool performance across different FLR thresholds.
+
+#### Table 4: Phosphorylation Sites at Standard FLR Thresholds
+
+| Tool | Phospho Sites at 1% FLR | Phospho Sites at 5% FLR |
+|------|------------------------|------------------------|
+| **LuciPHOr** | 75,626 | 77,101 |
+| **AScore** | 85,626 | 86,167 |
+| **pyLucXor** | 82,349 | 84,397 |
+| **PhosphoRS** | 80,618 | 81,473 |
+
+*At the recommended 1% FLR threshold, AScore identifies the most phosphorylation sites (85,626), followed by pyLucXor (82,349), PhosphoRS (80,618), and LuciPHOr (75,626).*
+
+### Figure 2: FLR Curve for Non-Ambiguous Sites
+
+![FLR Cumulative Curve Non-Ambiguous](images/flr_cumulative_curve_non_ambiguous.png)
+
+This curve shows the FLR (False Localization Rate) performance when considering only non-ambiguous phosphorylation sites (where the number of potential sites equals the number of phosphorylation modifications). **Like Figure 1, this analysis does not apply algorithm-specific filtering**, relying solely on the pAla-based FLR threshold for unbiased comparison. This provides insight into tool performance on the most confident site assignments.
 
 ## Analysis
 

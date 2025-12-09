@@ -22,14 +22,33 @@
 
 ## 📊 Benchmark
 
-We benchmarked onsite algorithms on the PXD000138 dataset using unified mzML/idXML inputs and consistent filtering (FDR < 0.01, tool-specific localization thresholds). Key takeaways:
+We benchmarked onsite algorithms on the PXD000138 dataset using unified mzML/idXML inputs and consistent filtering (FDR < 0.01, tool-specific localization thresholds). The following results are obtained after applying algorithm-specific quality filters to ensure high-confidence site localization:
 
-| Tool | Total PSMs | Total phospho sites | Well-resolved sites | Uncertain sites | Global FLR |
-|---|---|---|---|---|---|
-| LuciPHOr | 111,588 | 118,625 | 48,186 | 37,337 | 0.0237 |
-| AScore | 111,747 | 101,382 | 52,906 | 23,628 | 0.0283 |
-| pyLucXor | 111,588 | 117,341 | 51,468 | 38,970 | 0.0304 |
-| PhosphoRS | 111,747 | 107,552 | 50,000 | 26,354 | 0.0142 |
+| Tool | Total PSMs | Total phospho sites | Well-resolved sites | Uncertain sites |
+|---|---|---|---|---|
+| LuciPHOr | 111,588 | 118,625 | 48,186 | 37,337 |
+| AScore | 111,747 | 101,382 | 52,906 | 23,628 |
+| pyLucXor | 111,588 | 117,341 | 51,468 | 38,970 |
+| PhosphoRS | 111,747 | 107,552 | 50,000 | 26,354 |
+
+*Note: These counts represent phosphorylation sites from PSMs that passed both FDR filtering and tool-specific quality thresholds (local_flr < 0.01 for LuciPHOr/pyLucXor, AScore > 20 for AScore, site_prob > 99% for PhosphoRS).*
+
+### FLR-Controlled Performance Comparison
+
+![FLR Cumulative Curve](images/flr_cumulative_curve.png)
+
+The cumulative FLR (False Localization Rate) curve demonstrates tool performance across different FLR thresholds without applying algorithm-specific filters, enabling unbiased cross-tool comparison. **This analysis uses the pAla (phosphorylated Alanine) decoy strategy**, where Alanine residues serve as decoy sites for FLR estimation, since Alanine cannot be biologically phosphorylated.
+
+**Phosphorylation Sites at Standard FLR Thresholds:**
+
+| Tool | Phospho_Count (1% FLR) | Phospho_Count (5% FLR) |
+|---|---|---|
+| **LuciPHOr** | 75,626 | 77,101 |
+| **AScore** | 85,626 | 86,167 |
+| **pyLucXor** | 82,349 | 84,397 |
+| **PhosphoRS** | 80,618 | 81,473 |
+
+At the recommended 1% FLR threshold, AScore identifies the most phosphorylation sites (85,626), followed by pyLucXor (82,349), PhosphoRS (80,618), and LuciPHOr (75,626).
 
 See [benchmark.md](benchmark.md) for methodology, full tables, and analysis details.
 
