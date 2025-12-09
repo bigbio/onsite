@@ -31,7 +31,7 @@ We benchmarked onsite algorithms on the PXD000138 dataset using unified mzML/idX
 | pyLucXor | 111,588 | 117,341 | 51,468 | 38,970 |
 | PhosphoRS | 111,747 | 107,552 | 50,000 | 26,354 |
 
-*Note: These counts represent phosphorylation sites from PSMs that passed both FDR filtering and tool-specific quality thresholds (local_flr < 0.01 for LuciPHOr/pyLucXor, Ascore > 20 for AScore, site_prob > 99% for PhosphoRS).*
+*Note: These counts represent phosphorylation sites from PSMs that passed both FDR filtering and tool-specific quality thresholds (local_flr < 0.01 for LuciPHOr/pyLucXor, AScore > 20 for AScore, site_prob > 99% for PhosphoRS).*
 
 ### FLR-Controlled Performance Comparison
 
