@@ -17,7 +17,7 @@ This document presents the benchmark results of four phosphorylation site locali
    - **All tools**: FDR < 0.01
 4. **Post-filtering**: Removed peptides with ambiguous sites and decoy peptides
 5. **Site Counting**: After filtering, phosphorylation sites (Phospho and PhosphoDecoy) were counted from the remaining high-quality PSMs
-6. **Validation**: Matched filtered results from each tool against the ground truth/reference dataset (see line 102) to calculate True Positives (TP) and False Positives (FP)
+6. **Validation**: Matched filtered results from each tool against the ground truth/reference dataset to calculate True Positives (TP) and False Positives (FP)
 
 ### Quality Filtering Thresholds
 
