@@ -1,9 +1,9 @@
 # onsite
 
 [![Python application](https://github.com/bigbio/onsite/actions/workflows/python-app.yml/badge.svg?branch=main)](https://github.com/bigbio/onsite/actions/workflows/python-app.yml)
-![PyPI - Version](https://img.shields.io/pypi/v/onsite?style=flat)
-![PyPI - Downloads](https://img.shields.io/pypi/dm/onsite)
-![Pepy Total Downloads](https://img.shields.io/pepy/dt/onsite)
+![PyPI - Version](https://img.shields.io/pypi/v/pyonsite?style=flat)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/ponsite)
+![Pepy Total Downloads](https://img.shields.io/pepy/dt/pyonsite)
 ![GitHub Repo stars](https://img.shields.io/github/stars/bigbio/onsite)
 
 ## What is onsite?
@@ -304,6 +304,7 @@ If you have questions or need assistance:
 onsite builds upon the excellent work of the original algorithm developers and the OpenMS community. We thank all contributors and users for their feedback and support.
 
 ---
+
 
 
 
