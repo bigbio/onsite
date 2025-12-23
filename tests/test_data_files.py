@@ -6,14 +6,7 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
-from pyopenms import (
-    IdXMLFile, 
-    MzMLFile, 
-    MSExperiment, 
-    PeptideIdentification, 
-    PeptideHit,
-    ProteinIdentification
-)
+from pyopenms import *
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
