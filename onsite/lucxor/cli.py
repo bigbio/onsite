@@ -165,6 +165,12 @@ logger = logging.getLogger(__name__)
     default=None,
     help="Log file path (only used in debug mode, default: {output_base}_debug.log)"
 )
+@click.option(
+    "--disable-split-by-charge",
+    is_flag=True,
+    default=False,
+    help="Disable splitting PSMs by charge state for model training (train a single global model)"
+)
 def lucxor(
     input_spectrum,
     input_id,
@@ -187,6 +193,7 @@ def lucxor(
     rt_tolerance,
     debug,
     log_file,
+    disable_split_by_charge,
 ):
     """
     Modification site localization using pyLuciPHOr2 algorithm.
@@ -222,6 +229,7 @@ def lucxor(
             threads=threads,
             rt_tolerance=rt_tolerance,
             debug=debug,
+            disable_split_by_charge=disable_split_by_charge,
         )
         
         sys.exit(exit_code)
@@ -348,6 +356,7 @@ class PyLuciPHOr2:
         threads: int,
         rt_tolerance: float,
         debug: bool,
+        disable_split_by_charge: bool = False,
     ) -> int:
         """
         LuciPHOr2 main workflow:
@@ -385,6 +394,7 @@ class PyLuciPHOr2:
                 "min_num_psms_model": min_num_psms_model,
                 "num_threads": threads,
                 "rt_tolerance": rt_tolerance,
+                "disable_split_by_charge": disable_split_by_charge,
             }
         )
 

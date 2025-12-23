@@ -815,59 +815,75 @@ class CIDModel:
                 f"Insufficient high-scoring PSMs to train CID model (need at least {self.config.get('min_num_psms_model', 50)}, actual {len(psms)})"
             )
 
-        # Group PSMs by charge state
-        charge_psms = defaultdict(list)
-        for psm in psms:
-            charge_psms[psm.charge].append(psm)
+        # Check if charge splitting is disabled
+        disable_split_by_charge = self.config.get("disable_split_by_charge", False)
 
-        # Check if each charge state has sufficient PSMs for modeling
-        min_psms_per_charge = self.config.get("min_num_psms_model", 50)
-        bad_charges = set()
+        if disable_split_by_charge:
+            # Train a single global model using all PSMs
+            logger.info("Training global CID model (charge splitting disabled)")
+            logger.info(f"Total PSMs for modeling: {len(psms)}")
 
-        logger.info("PSMs for modeling:")
-        logger.info("------------------")
-        for charge in sorted(charge_psms.keys()):
-            n_psms = len(charge_psms[charge])
-            logger.info(f"+{charge}: {n_psms} PSMs")
-            if n_psms < min_psms_per_charge:
-                bad_charges.add(charge)
-                logger.warning(
-                    f"Charge state +{charge} has insufficient PSMs for modeling (need {min_psms_per_charge}, got {n_psms})"
+            # Use a dummy charge state (e.g., 0) to represent the global model
+            global_charge = 0
+            charge, model_data = self._build_charge_model(global_charge, psms)
+            self.charge_models[global_charge] = model_data
+
+            logger.info(f"Global CID model trained with {len(psms)} PSMs")
+        else:
+            # Original behavior: split by charge state
+            # Group PSMs by charge state
+            charge_psms = defaultdict(list)
+            for psm in psms:
+                charge_psms[psm.charge].append(psm)
+
+            # Check if each charge state has sufficient PSMs for modeling
+            min_psms_per_charge = self.config.get("min_num_psms_model", 50)
+            bad_charges = set()
+
+            logger.info("PSMs for modeling:")
+            logger.info("------------------")
+            for charge in sorted(charge_psms.keys()):
+                n_psms = len(charge_psms[charge])
+                logger.info(f"+{charge}: {n_psms} PSMs")
+                if n_psms < min_psms_per_charge:
+                    bad_charges.add(charge)
+                    logger.warning(
+                        f"Charge state +{charge} has insufficient PSMs for modeling (need {min_psms_per_charge}, got {n_psms})"
+                    )
+
+            # Remove charge states with insufficient PSMs
+            for bad_charge in bad_charges:
+                del charge_psms[bad_charge]
+
+            if not charge_psms:
+                raise RuntimeError(
+                    f"No charge states have sufficient PSMs for modeling (minimum {min_psms_per_charge} PSMs per charge state required)"
                 )
 
-        # Remove charge states with insufficient PSMs
-        for bad_charge in bad_charges:
-            del charge_psms[bad_charge]
-
-        if not charge_psms:
-            raise RuntimeError(
-                f"No charge states have sufficient PSMs for modeling (minimum {min_psms_per_charge} PSMs per charge state required)"
+            logger.info(
+                f"Will build models for charge states: {sorted(charge_psms.keys())}"
             )
 
-        logger.info(
-            f"Will build models for charge states: {sorted(charge_psms.keys())}"
-        )
+            # Get thread count configuration
+            num_threads = self.config.get("num_threads", os.cpu_count() or 4)
+            logger.info(f"Using {num_threads} threads for CID model training...")
 
-        # Get thread count configuration
-        num_threads = self.config.get("num_threads", os.cpu_count() or 4)
-        logger.info(f"Using {num_threads} threads for CID model training...")
+            # Parallel processing for each charge state
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = []
+                for charge, charge_psm_list in charge_psms.items():
+                    future = executor.submit(
+                        self._build_charge_model, charge, charge_psm_list
+                    )
+                    futures.append(future)
 
-        # Parallel processing for each charge state
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = []
-            for charge, charge_psm_list in charge_psms.items():
-                future = executor.submit(
-                    self._build_charge_model, charge, charge_psm_list
-                )
-                futures.append(future)
-
-            # Wait for all tasks to complete
-            for future in as_completed(futures):
-                try:
-                    charge, model_data = future.result()
-                    self.charge_models[charge] = model_data
-                except Exception as e:
-                    logger.error(f"CID model training error: {str(e)}")
+                # Wait for all tasks to complete
+                for future in as_completed(futures):
+                    try:
+                        charge, model_data = future.result()
+                        self.charge_models[charge] = model_data
+                    except Exception as e:
+                        logger.error(f"CID model training error: {str(e)}")
 
     def _build_charge_model(
         self, charge: int, charge_psm_list: List
@@ -937,6 +953,11 @@ class CIDModel:
         Returns:
             ModelData_CID instance, returns None if not found
         """
+        # Check if using global model (charge splitting disabled)
+        if 0 in self.charge_models:
+            # Global model exists, use it for all charges
+            return self.charge_models[0]
+
         # First try to get the exact charge model
         if charge in self.charge_models:
             return self.charge_models[charge]
@@ -1057,47 +1078,63 @@ class HCDModel:
                 f"Insufficient high-scoring PSMs to train HCD model (need at least {self.config.get('min_num_psms_model', 50)}, actual {len(psms)})"
             )
 
-        charge_psms = defaultdict(list)
-        for psm in psms:
-            charge_psms[psm.charge].append(psm)
+        # Check if charge splitting is disabled
+        disable_split_by_charge = self.config.get("disable_split_by_charge", False)
 
-        # Check if each charge state has sufficient PSMs for modeling
-        min_psms_per_charge = self.config.get("min_num_psms_model", 50)
-        bad_charges = set()
+        if disable_split_by_charge:
+            # Train a single global model using all PSMs
+            logger.info("Training global HCD model (charge splitting disabled)")
+            logger.info(f"Total PSMs for modeling: {len(psms)}")
 
-        logger.info("PSMs for modeling:")
-        logger.info("------------------")
-        for charge in sorted(charge_psms.keys()):
-            n_psms = len(charge_psms[charge])
-            logger.info(f"+{charge}: {n_psms} PSMs")
-            if n_psms < min_psms_per_charge:
-                bad_charges.add(charge)
-                logger.warning(
-                    f"Charge state +{charge} has insufficient PSMs for modeling (need {min_psms_per_charge}, got {n_psms})"
+            # Use a dummy charge state (e.g., 0) to represent the global model
+            global_charge = 0
+            charge, model_data = self._build_charge_model(global_charge, psms)
+            self.charge_models[global_charge] = model_data
+
+            logger.info(f"Global HCD model trained with {len(psms)} PSMs")
+        else:
+            # Original behavior: split by charge state
+            charge_psms = defaultdict(list)
+            for psm in psms:
+                charge_psms[psm.charge].append(psm)
+
+            # Check if each charge state has sufficient PSMs for modeling
+            min_psms_per_charge = self.config.get("min_num_psms_model", 50)
+            bad_charges = set()
+
+            logger.info("PSMs for modeling:")
+            logger.info("------------------")
+            for charge in sorted(charge_psms.keys()):
+                n_psms = len(charge_psms[charge])
+                logger.info(f"+{charge}: {n_psms} PSMs")
+                if n_psms < min_psms_per_charge:
+                    bad_charges.add(charge)
+                    logger.warning(
+                        f"Charge state +{charge} has insufficient PSMs for modeling (need {min_psms_per_charge}, got {n_psms})"
+                    )
+
+            # Remove charge states with insufficient PSMs
+            for bad_charge in bad_charges:
+                del charge_psms[bad_charge]
+
+            if not charge_psms:
+                raise RuntimeError(
+                    f"No charge states have sufficient PSMs for modeling (minimum {min_psms_per_charge} PSMs per charge state required)"
                 )
 
-        # Remove charge states with insufficient PSMs
-        for bad_charge in bad_charges:
-            del charge_psms[bad_charge]
-
-        if not charge_psms:
-            raise RuntimeError(
-                f"No charge states have sufficient PSMs for modeling (minimum {min_psms_per_charge} PSMs per charge state required)"
+            logger.info(
+                f"Will build models for charge states: {sorted(charge_psms.keys())}"
             )
 
-        logger.info(
-            f"Will build models for charge states: {sorted(charge_psms.keys())}"
-        )
+            num_threads = self.config.get("num_threads", os.cpu_count() or 4)
+            logger.info(f"Using {num_threads} threads for HCD model training...")
 
-        num_threads = self.config.get("num_threads", os.cpu_count() or 4)
-        logger.info(f"Using {num_threads} threads for HCD model training...")
-
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = []
-            for charge, charge_psm_list in charge_psms.items():
-                future = executor.submit(
-                    self._build_charge_model, charge, charge_psm_list
-                )
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = []
+                for charge, charge_psm_list in charge_psms.items():
+                    future = executor.submit(
+                        self._build_charge_model, charge, charge_psm_list
+                    )
                 futures.append(future)
 
             for future in as_completed(futures):
@@ -1177,6 +1214,11 @@ class HCDModel:
         Returns:
             ModelData_HCD instance, returns None if not found
         """
+        # Check if using global model (charge splitting disabled)
+        if 0 in self.charge_models:
+            # Global model exists, use it for all charges
+            return self.charge_models[0]
+
         # First try to get the exact charge model
         if charge in self.charge_models:
             return self.charge_models[charge]
