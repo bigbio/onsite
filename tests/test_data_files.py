@@ -8,7 +8,8 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
-from pyopenms import IdXMLFile, MzMLFile, MSExperiment, PeptideIdentification, PeptideHit
+import pyopenms
+from pyopenms import MzMLFile, MSExperiment, PeptideIdentification, PeptideHit
 from click.testing import CliRunner
 
 # Add the parent directory to the path
@@ -21,17 +22,37 @@ from onsite.phosphors import calculate_phospho_localization_compomics_style
 
 def safe_load_idxml(idxml_file):
     """Load idXML file with proper handling for PyOpenMS cross-platform compatibility."""
-    if hasattr(idxml_file, '__fspath__'):
-        file_path = idxml_file.__fspath__()
-    elif isinstance(idxml_file, Path):
-        file_path = str(idxml_file)
-    else:
-        file_path = idxml_file
+    # Ensure we have a string path, not a Path object
+    file_path = str(idxml_file)
     
+    # Initialize empty lists
     protein_ids = []
     peptide_ids = []
-    id_xml_file = IdXMLFile()
-    id_xml_file.load(file_path, protein_ids, peptide_ids)
+    
+    # Try different approaches for pyOpenMS compatibility
+    try:
+        # Method 1: Standard approach (works on most platforms)
+        pyopenms.IdXMLFile().load(file_path, protein_ids, peptide_ids)
+    except Exception as e1:
+        try:
+            # Method 2: Create instance first
+            loader = pyopenms.IdXMLFile()
+            loader.load(file_path, protein_ids, peptide_ids)
+        except Exception as e2:
+            # Method 3: Try with explicit type conversion
+            try:
+                import pyopenms as poms
+                prot_ids_vec = poms.vector_ProteinIdentification()
+                pep_ids_vec = poms.vector_PeptideIdentification()
+                poms.IdXMLFile().load(file_path, prot_ids_vec, pep_ids_vec)
+                protein_ids = list(prot_ids_vec)
+                peptide_ids = list(pep_ids_vec)
+            except Exception as e3:
+                raise RuntimeError(
+                    f"Failed to load idXML file with all methods. "
+                    f"Method 1: {e1}, Method 2: {e2}, Method 3: {e3}"
+                )
+    
     return protein_ids, peptide_ids
 
 
