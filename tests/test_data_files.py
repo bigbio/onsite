@@ -1,6 +1,4 @@
-"""
-Test data file processing with real idXML and mzML files.
-"""
+"""Test data file processing with real idXML and mzML files."""
 
 import pytest
 import sys
@@ -18,7 +16,6 @@ from pyopenms import (
 )
 from click.testing import CliRunner
 
-# Add the parent directory to the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from onsite.onsitec import cli
@@ -26,26 +23,28 @@ from onsite.ascore import AScore
 from onsite.phosphors import calculate_phospho_localization_compomics_style
 
 
-# Helper function to safely load idXML files  
 def safe_load_idxml(idxml_file):
-    """
-    Load idXML file with proper handling for pyopenms.
+    """Load idXML file with proper handling for PyOpenMS cross-platform compatibility."""
+    if hasattr(idxml_file, '__fspath__'):
+        file_path = os.fspath(idxml_file)
+    elif isinstance(idxml_file, bytes):
+        file_path = idxml_file.decode('utf-8')
+    else:
+        file_path = str(idxml_file)
     
-    On Linux with pyopenms 3.4.0, there's a known issue with type handling.
-    This function uses the exact same pattern as the working CLI code.
+    file_path = os.path.normpath(file_path)
     
-    Returns:
-        tuple: (protein_ids, peptide_ids)
-    """
+    if not os.path.isabs(file_path):
+        file_path = os.path.abspath(file_path)
+    
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"idXML file not found: {file_path}")
+    
     protein_ids = []
     peptide_ids = []
     
-    # Convert Path to string - this is critical for pyopenms
-    # Use the same approach as in onsite/onsite/ascore/cli.py
-    file_str = str(idxml_file)
-    
-    # Call load with the string path
-    IdXMLFile().load(file_str, protein_ids, peptide_ids)
+    id_xml_file = IdXMLFile()
+    id_xml_file.load(file_path, protein_ids, peptide_ids)
     
     return protein_ids, peptide_ids
 
@@ -55,17 +54,14 @@ class TestDataFileLoading:
     
     @pytest.fixture
     def data_dir(self):
-        """Get the data directory path."""
         return Path(__file__).parent.parent / "data"
     
     @pytest.fixture
     def idxml_file(self, data_dir):
-        """Get the idXML file path."""
         return data_dir / "1_consensus_fdr_filter_pep.idXML"
     
     @pytest.fixture
     def mzml_file(self, data_dir):
-        """Get the mzML file path."""
         return data_dir / "1.mzML"
     
     def test_data_files_exist(self, data_dir, idxml_file, mzml_file):
@@ -78,7 +74,6 @@ class TestDataFileLoading:
         """Test loading idXML file."""
         assert idxml_file.exists(), "idXML file should exist"
         
-        # Test file can be read
         with open(idxml_file, 'r') as f:
             content = f.read()
             assert len(content) > 0, "idXML file should not be empty"
@@ -88,7 +83,6 @@ class TestDataFileLoading:
         """Test loading mzML file."""
         assert mzml_file.exists(), "mzML file should exist"
         
-        # Test file can be read
         with open(mzml_file, 'r') as f:
             content = f.read()
             assert len(content) > 0, "mzML file should not be empty"
@@ -96,26 +90,22 @@ class TestDataFileLoading:
     
     def test_idxml_parsing_with_pyopenms(self, idxml_file):
         """Test parsing idXML file with PyOpenMS."""
-        # Load idXML file using safe helper function
         protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         assert len(peptide_ids) > 0, "Should have peptide identifications"
         assert len(protein_ids) > 0, "Should have protein identifications"
         
-        # Check that we have some peptide hits
         total_hits = sum(len(pep_id.getHits()) for pep_id in peptide_ids)
         assert total_hits > 0, "Should have peptide hits"
     
     def test_mzml_parsing_with_pyopenms(self, mzml_file):
         """Test parsing mzML file with PyOpenMS."""
         try:
-            # Load mzML file
             exp = MSExperiment()
             MzMLFile().load(str(mzml_file), exp)
             
             assert exp.size() > 0, "Should have spectra"
             
-            # Check that we have some peaks
             total_peaks = sum(spectrum.size() for spectrum in exp)
             assert total_peaks > 0, "Should have peaks"
             
@@ -128,58 +118,49 @@ class TestAlgorithmExecution:
     
     @pytest.fixture
     def data_dir(self):
-        """Get the data directory path."""
         return Path(__file__).parent.parent / "data"
     
     @pytest.fixture
     def idxml_file(self, data_dir):
-        """Get the idXML file path."""
         return data_dir / "1_consensus_fdr_filter_pep.idXML"
     
     @pytest.fixture
     def mzml_file(self, data_dir):
-        """Get the mzML file path."""
         return data_dir / "1.mzML"
     
     def test_ascore_with_real_data(self, idxml_file, mzml_file):
         """Test AScore algorithm with real data files."""
-        # Load data using safe helper function
         protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         exp = MSExperiment()
         MzMLFile().load(str(mzml_file), exp)
         
-        # Initialize AScore
         ascore = AScore()
         
-        # Test with first few peptide hits
         tested_hits = 0
-        max_tests = 5  # Limit to avoid long test times
+        max_tests = 5
         
         for pep_id in peptide_ids[:max_tests]:
             for hit in pep_id.getHits():
                 if tested_hits >= max_tests:
                     break
                 
-                # Get corresponding spectrum
                 if pep_id.metaValueExists("spectrum_reference"):
                     spectrum_ref = pep_id.getMetaValue("spectrum_reference")
-                    # Parse spectrum reference like 'controllerType=0 controllerNumber=1 scan=15512'
                     if "scan=" in spectrum_ref:
                         spectrum_index = int(spectrum_ref.split("scan=")[1].split()[0])
                     else:
                         spectrum_index = -1
                 else:
                     spectrum_index = -1
+                    
                 if spectrum_index >= 0 and spectrum_index < exp.size():
                     spectrum = exp[spectrum_index]
                     
                     try:
-                        # This might fail for non-phosphorylated peptides, which is expected
                         result = ascore.compute(hit, spectrum)
                         assert result is not None, "AScore should return a result"
                     except Exception as e:
-                        # Expected for non-phosphorylated peptides
                         assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
                 
                 tested_hits += 1
@@ -191,42 +172,35 @@ class TestAlgorithmExecution:
     
     def test_phosphors_with_real_data(self, idxml_file, mzml_file):
         """Test PhosphoRS algorithm with real data files."""
-        # Load data using safe helper function
         protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         exp = MSExperiment()
         MzMLFile().load(str(mzml_file), exp)
         
-        # Test with first few peptide hits
         tested_hits = 0
-        max_tests = 5  # Limit to avoid long test times
+        max_tests = 5
         
         for pep_id in peptide_ids[:max_tests]:
             for hit in pep_id.getHits():
                 if tested_hits >= max_tests:
                     break
                 
-                # Get corresponding spectrum
                 if pep_id.metaValueExists("spectrum_reference"):
                     spectrum_ref = pep_id.getMetaValue("spectrum_reference")
-                    # Parse spectrum reference like 'controllerType=0 controllerNumber=1 scan=15512'
                     if "scan=" in spectrum_ref:
                         spectrum_index = int(spectrum_ref.split("scan=")[1].split()[0])
                     else:
                         spectrum_index = -1
                 else:
                     spectrum_index = -1
+                    
                 if spectrum_index >= 0 and spectrum_index < exp.size():
                     spectrum = exp[spectrum_index]
                     
                     try:
-                        # Test PhosphoRS calculation
-                        result = calculate_phospho_localization_compomics_style(
-                            hit, spectrum
-                        )
+                        result = calculate_phospho_localization_compomics_style(hit, spectrum)
                         assert result is not None, "PhosphoRS should return a result"
                     except Exception as e:
-                        # Expected for non-phosphorylated peptides
                         assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
                 
                 tested_hits += 1
@@ -241,17 +215,14 @@ class TestCLIWithRealData:
     
     @pytest.fixture
     def data_dir(self):
-        """Get the data directory path."""
         return Path(__file__).parent.parent / "data"
     
     @pytest.fixture
     def idxml_file(self, data_dir):
-        """Get the idXML file path."""
         return data_dir / "1_consensus_fdr_filter_pep.idXML"
     
     @pytest.fixture
     def mzml_file(self, data_dir):
-        """Get the mzML file path."""
         return data_dir / "1.mzML"
     
     def test_ascore_cli_with_real_data(self, idxml_file, mzml_file):
@@ -271,10 +242,8 @@ class TestCLIWithRealData:
                 ],
             )
             
-            # Check that command executed (may fail due to algorithm requirements)
             assert result.exit_code in [0, 1], f"AScore CLI should execute: {result.output}"
             
-            # If successful, check output file
             if result.exit_code == 0:
                 assert os.path.exists(output_file), "Output file should be created"
                 assert os.path.getsize(output_file) > 0, "Output file should not be empty"
@@ -296,10 +265,8 @@ class TestCLIWithRealData:
                 ],
             )
             
-            # Check that command executed (may fail due to algorithm requirements)
             assert result.exit_code in [0, 1], f"PhosphoRS CLI should execute: {result.output}"
             
-            # If successful, check output file
             if result.exit_code == 0:
                 assert os.path.exists(output_file), "Output file should be created"
                 assert os.path.getsize(output_file) > 0, "Output file should not be empty"
@@ -321,10 +288,8 @@ class TestCLIWithRealData:
                 ],
             )
             
-            # Check that command executed (may fail due to algorithm requirements)
             assert result.exit_code in [0, 1], f"LucXor CLI should execute: {result.output}"
             
-            # If successful, check output file
             if result.exit_code == 0:
                 assert os.path.exists(output_file), "Output file should be created"
                 assert os.path.getsize(output_file) > 0, "Output file should not be empty"
@@ -335,17 +300,14 @@ class TestLucXorWithRealData:
     
     @pytest.fixture
     def data_dir(self):
-        """Get the data directory path."""
         return Path(__file__).parent.parent / "data"
     
     @pytest.fixture
     def idxml_file(self, data_dir):
-        """Get the idXML file path."""
         return data_dir / "1_consensus_fdr_filter_pep.idXML"
     
     @pytest.fixture
     def mzml_file(self, data_dir):
-        """Get the mzML file path."""
         return data_dir / "1.mzML"
     
     def test_lucxor_import(self):
@@ -373,17 +335,14 @@ class TestLucXorWithRealData:
                 ],
             )
             
-            # Check that command executed (may fail due to algorithm requirements)
             assert result.exit_code in [0, 1], f"LucXor CLI should execute: {result.output}"
             
-            # If successful, check output file
             if result.exit_code == 0:
                 assert os.path.exists(output_file), "Output file should be created"
                 assert os.path.getsize(output_file) > 0, "Output file should not be empty"
     
     def test_lucxor_data_loading(self, idxml_file, mzml_file):
         """Test that LucXor can load the data files."""
-        # Load data using safe helper function
         protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         exp = MSExperiment()
@@ -393,7 +352,6 @@ class TestLucXorWithRealData:
         assert len(protein_ids) > 0, "Should have protein identifications"
         assert exp.size() > 0, "Should have spectra"
         
-        # Check that we have some peptide hits
         total_hits = sum(len(pep_id.getHits()) for pep_id in peptide_ids)
         assert total_hits > 0, "Should have peptide hits"
     
@@ -460,7 +418,6 @@ class TestDataFileValidation:
     
     @pytest.fixture
     def data_dir(self):
-        """Get the data directory path."""
         return Path(__file__).parent.parent / "data"
     
     def test_idxml_file_structure(self, data_dir):
@@ -469,11 +426,9 @@ class TestDataFileValidation:
         
         assert idxml_file.exists(), "idXML file should exist"
         
-        # Test file structure
         with open(idxml_file, 'r') as f:
             content = f.read()
             
-            # Check for required XML elements
             assert "<IdXML" in content, "Should contain IdXML root element"
             assert "<ProteinIdentification" in content, "Should contain protein identifications"
             assert "<PeptideIdentification" in content, "Should contain peptide identifications"
@@ -484,11 +439,9 @@ class TestDataFileValidation:
         
         assert mzml_file.exists(), "mzML file should exist"
         
-        # Test file structure
         with open(mzml_file, 'r') as f:
             content = f.read()
             
-            # Check for required XML elements
             assert "<mzML" in content, "Should contain mzML root element"
             assert "<spectrumList" in content, "Should contain spectrum list"
             assert "<spectrum" in content, "Should contain spectra"
@@ -498,11 +451,9 @@ class TestDataFileValidation:
         idxml_file = data_dir / "1_consensus_fdr_filter_pep.idXML"
         mzml_file = data_dir / "1.mzML"
         
-        # Check file sizes are reasonable (not empty, not too large)
         idxml_size = idxml_file.stat().st_size
         mzml_size = mzml_file.stat().st_size
         
         assert idxml_size > 1000, "idXML file should be larger than 1KB"
         assert mzml_size > 1000, "mzML file should be larger than 1KB"
         assert idxml_size < 100 * 1024 * 1024, "idXML file should be smaller than 100MB"
-        # Removed mzML file size limit as requested
