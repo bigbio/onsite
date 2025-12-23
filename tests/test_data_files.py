@@ -19,6 +19,22 @@ from onsite.ascore import AScore
 from onsite.phosphors import calculate_phospho_localization_compomics_style
 
 
+def safe_load_idxml(idxml_file):
+    """Load idXML file with proper handling for PyOpenMS cross-platform compatibility."""
+    if hasattr(idxml_file, '__fspath__'):
+        file_path = idxml_file.__fspath__()
+    elif isinstance(idxml_file, Path):
+        file_path = str(idxml_file)
+    else:
+        file_path = idxml_file
+    
+    protein_ids = []
+    peptide_ids = []
+    id_xml_file = IdXMLFile()
+    id_xml_file.load(file_path, protein_ids, peptide_ids)
+    return protein_ids, peptide_ids
+
+
 class TestDataFileLoading:
     """Test loading and parsing of data files."""
     
@@ -67,9 +83,7 @@ class TestDataFileLoading:
         """Test parsing idXML file with PyOpenMS."""
         try:
             # Load idXML file
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+            protein_ids, peptide_ids = safe_load_idxml(idxml_file)
             
             assert len(peptide_ids) > 0, "Should have peptide identifications"
             assert len(protein_ids) > 0, "Should have protein identifications"
@@ -120,9 +134,7 @@ class TestAlgorithmExecution:
         """Test AScore algorithm with real data files."""
         try:
             # Load data
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+            protein_ids, peptide_ids = safe_load_idxml(idxml_file)
             
             exp = MSExperiment()
             MzMLFile().load(str(mzml_file), exp)
@@ -174,9 +186,7 @@ class TestAlgorithmExecution:
         """Test PhosphoRS algorithm with real data files."""
         try:
             # Load data
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+            protein_ids, peptide_ids = safe_load_idxml(idxml_file)
             
             exp = MSExperiment()
             MzMLFile().load(str(mzml_file), exp)
@@ -372,9 +382,7 @@ class TestLucXorWithRealData:
         """Test that LucXor can load the data files."""
         try:
             # Load data
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+            protein_ids, peptide_ids = safe_load_idxml(idxml_file)
             
             exp = MSExperiment()
             MzMLFile().load(str(mzml_file), exp)
