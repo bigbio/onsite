@@ -8,7 +8,14 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
-from pyopenms import IdXMLFile, MzMLFile, MSExperiment, PeptideIdentification, PeptideHit
+from pyopenms import (
+    IdXMLFile, 
+    MzMLFile, 
+    MSExperiment, 
+    PeptideIdentification, 
+    PeptideHit,
+    ProteinIdentification
+)
 from click.testing import CliRunner
 
 # Add the parent directory to the path
@@ -65,21 +72,17 @@ class TestDataFileLoading:
     
     def test_idxml_parsing_with_pyopenms(self, idxml_file):
         """Test parsing idXML file with PyOpenMS."""
-        try:
-            # Load idXML file
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
-            
-            assert len(peptide_ids) > 0, "Should have peptide identifications"
-            assert len(protein_ids) > 0, "Should have protein identifications"
-            
-            # Check that we have some peptide hits
-            total_hits = sum(len(pep_id.getHits()) for pep_id in peptide_ids)
-            assert total_hits > 0, "Should have peptide hits"
-            
-        except Exception as e:
-            pytest.fail(f"Failed to parse idXML file: {e}")
+        # Load idXML file - note the parameter order: (filename, protein_ids, peptide_ids)
+        protein_ids = []
+        peptide_ids = []
+        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        
+        assert len(peptide_ids) > 0, "Should have peptide identifications"
+        assert len(protein_ids) > 0, "Should have protein identifications"
+        
+        # Check that we have some peptide hits
+        total_hits = sum(len(pep_id.getHits()) for pep_id in peptide_ids)
+        assert total_hits > 0, "Should have peptide hits"
     
     def test_mzml_parsing_with_pyopenms(self, mzml_file):
         """Test parsing mzML file with PyOpenMS."""
@@ -118,110 +121,102 @@ class TestAlgorithmExecution:
     
     def test_ascore_with_real_data(self, idxml_file, mzml_file):
         """Test AScore algorithm with real data files."""
-        try:
-            # Load data
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
-            
-            exp = MSExperiment()
-            MzMLFile().load(str(mzml_file), exp)
-            
-            # Initialize AScore
-            ascore = AScore()
-            
-            # Test with first few peptide hits
-            tested_hits = 0
-            max_tests = 5  # Limit to avoid long test times
-            
-            for pep_id in peptide_ids[:max_tests]:
-                for hit in pep_id.getHits():
-                    if tested_hits >= max_tests:
-                        break
-                    
-                    # Get corresponding spectrum
-                    if pep_id.metaValueExists("spectrum_reference"):
-                        spectrum_ref = pep_id.getMetaValue("spectrum_reference")
-                        # Parse spectrum reference like 'controllerType=0 controllerNumber=1 scan=15512'
-                        if "scan=" in spectrum_ref:
-                            spectrum_index = int(spectrum_ref.split("scan=")[1].split()[0])
-                        else:
-                            spectrum_index = -1
-                    else:
-                        spectrum_index = -1
-                    if spectrum_index >= 0 and spectrum_index < exp.size():
-                        spectrum = exp[spectrum_index]
-                        
-                        try:
-                            # This might fail for non-phosphorylated peptides, which is expected
-                            result = ascore.compute(hit, spectrum)
-                            assert result is not None, "AScore should return a result"
-                        except Exception as e:
-                            # Expected for non-phosphorylated peptides
-                            assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
-                    
-                    tested_hits += 1
-                
+        # Load data - note the parameter order: (filename, protein_ids, peptide_ids)
+        protein_ids = []
+        peptide_ids = []
+        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        
+        exp = MSExperiment()
+        MzMLFile().load(str(mzml_file), exp)
+        
+        # Initialize AScore
+        ascore = AScore()
+        
+        # Test with first few peptide hits
+        tested_hits = 0
+        max_tests = 5  # Limit to avoid long test times
+        
+        for pep_id in peptide_ids[:max_tests]:
+            for hit in pep_id.getHits():
                 if tested_hits >= max_tests:
                     break
+                
+                # Get corresponding spectrum
+                if pep_id.metaValueExists("spectrum_reference"):
+                    spectrum_ref = pep_id.getMetaValue("spectrum_reference")
+                    # Parse spectrum reference like 'controllerType=0 controllerNumber=1 scan=15512'
+                    if "scan=" in spectrum_ref:
+                        spectrum_index = int(spectrum_ref.split("scan=")[1].split()[0])
+                    else:
+                        spectrum_index = -1
+                else:
+                    spectrum_index = -1
+                if spectrum_index >= 0 and spectrum_index < exp.size():
+                    spectrum = exp[spectrum_index]
+                    
+                    try:
+                        # This might fail for non-phosphorylated peptides, which is expected
+                        result = ascore.compute(hit, spectrum)
+                        assert result is not None, "AScore should return a result"
+                    except Exception as e:
+                        # Expected for non-phosphorylated peptides
+                        assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
+                
+                tested_hits += 1
             
-            assert tested_hits > 0, "Should have tested at least one hit"
-            
-        except Exception as e:
-            pytest.fail(f"AScore test failed: {e}")
+            if tested_hits >= max_tests:
+                break
+        
+        assert tested_hits > 0, "Should have tested at least one hit"
     
     def test_phosphors_with_real_data(self, idxml_file, mzml_file):
         """Test PhosphoRS algorithm with real data files."""
-        try:
-            # Load data
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
-            
-            exp = MSExperiment()
-            MzMLFile().load(str(mzml_file), exp)
-            
-            # Test with first few peptide hits
-            tested_hits = 0
-            max_tests = 5  # Limit to avoid long test times
-            
-            for pep_id in peptide_ids[:max_tests]:
-                for hit in pep_id.getHits():
-                    if tested_hits >= max_tests:
-                        break
-                    
-                    # Get corresponding spectrum
-                    if pep_id.metaValueExists("spectrum_reference"):
-                        spectrum_ref = pep_id.getMetaValue("spectrum_reference")
-                        # Parse spectrum reference like 'controllerType=0 controllerNumber=1 scan=15512'
-                        if "scan=" in spectrum_ref:
-                            spectrum_index = int(spectrum_ref.split("scan=")[1].split()[0])
-                        else:
-                            spectrum_index = -1
-                    else:
-                        spectrum_index = -1
-                    if spectrum_index >= 0 and spectrum_index < exp.size():
-                        spectrum = exp[spectrum_index]
-                        
-                        try:
-                            # Test PhosphoRS calculation
-                            result = calculate_phospho_localization_compomics_style(
-                                hit, spectrum
-                            )
-                            assert result is not None, "PhosphoRS should return a result"
-                        except Exception as e:
-                            # Expected for non-phosphorylated peptides
-                            assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
-                    
-                    tested_hits += 1
-                
+        # Load data - note the parameter order: (filename, protein_ids, peptide_ids)
+        protein_ids = []
+        peptide_ids = []
+        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        
+        exp = MSExperiment()
+        MzMLFile().load(str(mzml_file), exp)
+        
+        # Test with first few peptide hits
+        tested_hits = 0
+        max_tests = 5  # Limit to avoid long test times
+        
+        for pep_id in peptide_ids[:max_tests]:
+            for hit in pep_id.getHits():
                 if tested_hits >= max_tests:
                     break
+                
+                # Get corresponding spectrum
+                if pep_id.metaValueExists("spectrum_reference"):
+                    spectrum_ref = pep_id.getMetaValue("spectrum_reference")
+                    # Parse spectrum reference like 'controllerType=0 controllerNumber=1 scan=15512'
+                    if "scan=" in spectrum_ref:
+                        spectrum_index = int(spectrum_ref.split("scan=")[1].split()[0])
+                    else:
+                        spectrum_index = -1
+                else:
+                    spectrum_index = -1
+                if spectrum_index >= 0 and spectrum_index < exp.size():
+                    spectrum = exp[spectrum_index]
+                    
+                    try:
+                        # Test PhosphoRS calculation
+                        result = calculate_phospho_localization_compomics_style(
+                            hit, spectrum
+                        )
+                        assert result is not None, "PhosphoRS should return a result"
+                    except Exception as e:
+                        # Expected for non-phosphorylated peptides
+                        assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
+                
+                tested_hits += 1
             
-            assert tested_hits > 0, "Should have tested at least one hit"
-            
-        except Exception as e:
-            pytest.fail(f"PhosphoRS test failed: {e}")
+            if tested_hits >= max_tests:
+                break
+        
+        assert tested_hits > 0, "Should have tested at least one hit"
 
 class TestCLIWithRealData:
     """Test CLI execution with real data files."""
@@ -370,25 +365,21 @@ class TestLucXorWithRealData:
     
     def test_lucxor_data_loading(self, idxml_file, mzml_file):
         """Test that LucXor can load the data files."""
-        try:
-            # Load data
-            peptide_ids = []
-            protein_ids = []
-            IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
-            
-            exp = MSExperiment()
-            MzMLFile().load(str(mzml_file), exp)
-            
-            assert len(peptide_ids) > 0, "Should have peptide identifications"
-            assert len(protein_ids) > 0, "Should have protein identifications"
-            assert exp.size() > 0, "Should have spectra"
-            
-            # Check that we have some peptide hits
-            total_hits = sum(len(pep_id.getHits()) for pep_id in peptide_ids)
-            assert total_hits > 0, "Should have peptide hits"
-            
-        except Exception as e:
-            pytest.fail(f"Failed to load data for LucXor: {e}")
+        # Load data - note the parameter order: (filename, protein_ids, peptide_ids)
+        protein_ids = []
+        peptide_ids = []
+        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        
+        exp = MSExperiment()
+        MzMLFile().load(str(mzml_file), exp)
+        
+        assert len(peptide_ids) > 0, "Should have peptide identifications"
+        assert len(protein_ids) > 0, "Should have protein identifications"
+        assert exp.size() > 0, "Should have spectra"
+        
+        # Check that we have some peptide hits
+        total_hits = sum(len(pep_id.getHits()) for pep_id in peptide_ids)
+        assert total_hits > 0, "Should have peptide hits"
     
     def test_lucxor_algorithm_availability(self):
         """Test that LucXor algorithm components are available."""
