@@ -26,6 +26,30 @@ from onsite.ascore import AScore
 from onsite.phosphors import calculate_phospho_localization_compomics_style
 
 
+# Helper function to safely load idXML files  
+def safe_load_idxml(idxml_file):
+    """
+    Load idXML file with proper handling for pyopenms.
+    
+    On Linux with pyopenms 3.4.0, there's a known issue with type handling.
+    This function uses the exact same pattern as the working CLI code.
+    
+    Returns:
+        tuple: (protein_ids, peptide_ids)
+    """
+    protein_ids = []
+    peptide_ids = []
+    
+    # Convert Path to string - this is critical for pyopenms
+    # Use the same approach as in onsite/onsite/ascore/cli.py
+    file_str = str(idxml_file)
+    
+    # Call load with the string path
+    IdXMLFile().load(file_str, protein_ids, peptide_ids)
+    
+    return protein_ids, peptide_ids
+
+
 class TestDataFileLoading:
     """Test loading and parsing of data files."""
     
@@ -72,10 +96,8 @@ class TestDataFileLoading:
     
     def test_idxml_parsing_with_pyopenms(self, idxml_file):
         """Test parsing idXML file with PyOpenMS."""
-        # Load idXML file - note the parameter order: (filename, protein_ids, peptide_ids)
-        protein_ids = []
-        peptide_ids = []
-        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        # Load idXML file using safe helper function
+        protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         assert len(peptide_ids) > 0, "Should have peptide identifications"
         assert len(protein_ids) > 0, "Should have protein identifications"
@@ -121,10 +143,8 @@ class TestAlgorithmExecution:
     
     def test_ascore_with_real_data(self, idxml_file, mzml_file):
         """Test AScore algorithm with real data files."""
-        # Load data - note the parameter order: (filename, protein_ids, peptide_ids)
-        protein_ids = []
-        peptide_ids = []
-        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        # Load data using safe helper function
+        protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         exp = MSExperiment()
         MzMLFile().load(str(mzml_file), exp)
@@ -171,10 +191,8 @@ class TestAlgorithmExecution:
     
     def test_phosphors_with_real_data(self, idxml_file, mzml_file):
         """Test PhosphoRS algorithm with real data files."""
-        # Load data - note the parameter order: (filename, protein_ids, peptide_ids)
-        protein_ids = []
-        peptide_ids = []
-        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        # Load data using safe helper function
+        protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         exp = MSExperiment()
         MzMLFile().load(str(mzml_file), exp)
@@ -365,10 +383,8 @@ class TestLucXorWithRealData:
     
     def test_lucxor_data_loading(self, idxml_file, mzml_file):
         """Test that LucXor can load the data files."""
-        # Load data - note the parameter order: (filename, protein_ids, peptide_ids)
-        protein_ids = []
-        peptide_ids = []
-        IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
+        # Load data using safe helper function
+        protein_ids, peptide_ids = safe_load_idxml(idxml_file)
         
         exp = MSExperiment()
         MzMLFile().load(str(mzml_file), exp)
