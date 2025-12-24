@@ -70,6 +70,13 @@ from .ascore import AScore
     default=False,
     help="Include A (PhosphoDecoy) as potential phosphorylation site",
 )
+@click.option(
+    "--compute-all-scores",
+    "compute_all_scores",
+    is_flag=True,
+    default=False,
+    help="Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results",
+)
 def ascore(
     in_file,
     id_file,
@@ -79,6 +86,7 @@ def ascore(
     threads,
     debug,
     add_decoys,
+    compute_all_scores,
 ):
     """
     Phosphorylation site localization scoring tool using AScore algorithm.
@@ -86,6 +94,20 @@ def ascore(
     This tool processes MS/MS spectra and peptide identifications to localize
     phosphorylation sites using the AScore algorithm.
     """
+    # If compute_all_scores is enabled, delegate to the unified handler
+    if compute_all_scores:
+        from onsite.onsitec import run_all_algorithms_from_single_cli
+        return run_all_algorithms_from_single_cli(
+            in_file=in_file,
+            id_file=id_file,
+            out_file=out_file,
+            fragment_mass_tolerance=fragment_mass_tolerance,
+            fragment_mass_unit=fragment_mass_unit,
+            threads=threads,
+            debug=debug,
+            add_decoys=add_decoys,
+        )
+    
     try:
         # Initialize processing pipeline
         exp = load_spectra(in_file)

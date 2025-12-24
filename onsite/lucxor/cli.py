@@ -171,6 +171,13 @@ logger = logging.getLogger(__name__)
     default=False,
     help="Disable splitting PSMs by charge state for model training (train a single global model)"
 )
+@click.option(
+    "--compute-all-scores",
+    "compute_all_scores",
+    is_flag=True,
+    default=False,
+    help="Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results",
+)
 def lucxor(
     input_spectrum,
     input_id,
@@ -194,6 +201,7 @@ def lucxor(
     debug,
     log_file,
     disable_split_by_charge,
+    compute_all_scores,
 ):
     """
     Modification site localization using pyLuciPHOr2 algorithm.
@@ -202,6 +210,22 @@ def lucxor(
     post-translational modifications using the LuciPHOr2 algorithm with
     false localization rate (FLR) calculation.
     """
+    # If compute_all_scores is enabled, delegate to the unified handler
+    if compute_all_scores:
+        from onsite.onsitec import run_all_algorithms_from_single_cli
+        # Determine if add_decoys should be True based on target_modifications
+        add_decoys = any("PhosphoDecoy" in mod for mod in target_modifications)
+        return run_all_algorithms_from_single_cli(
+            in_file=input_spectrum,
+            id_file=input_id,
+            out_file=output,
+            fragment_mass_tolerance=fragment_mass_tolerance,
+            fragment_mass_unit=fragment_error_units,
+            threads=threads,
+            debug=debug,
+            add_decoys=add_decoys,
+        )
+    
     try:
         # Setup logging first
         setup_logging(debug, log_file, output)
@@ -232,7 +256,10 @@ def lucxor(
             disable_split_by_charge=disable_split_by_charge,
         )
         
-        sys.exit(exit_code)
+        # Only call sys.exit if not being called from compute_all_scores
+        if not compute_all_scores:
+            sys.exit(exit_code)
+        return exit_code
 
     except KeyboardInterrupt:
         click.echo("\nOperation cancelled by user", err=True)

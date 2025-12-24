@@ -1,6 +1,6 @@
 [project]
 name = "pyonsite"
-version = "0.0.2"
+version = "0.0.1"
 description = "onsite: mass spectrometry post-translational localization tool"
 authors = [
     {name = "BigBio Stack"}
@@ -21,7 +21,7 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "pyopenms==3.4.0",
+    "pyopenms>=3.4.0",
     "numpy>=2.3.2",
     "scipy>=1.16.1",
     "click>=8.0.0",
@@ -58,5 +58,3 @@ addopts = "-v --tb=short"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
-
-
