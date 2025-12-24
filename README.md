@@ -110,6 +110,7 @@ onsite phosphors -in spectra.mzML -id identifications.idXML -out results.idXML
 
 # LucXor algorithm
 onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
+```
 
 #### Individual Pipeline Tools
 
@@ -212,7 +213,6 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | `--disable-split-by-charge` | False | Disable splitting PSMs by charge state for model training |
 | `--compute-all-scores` | False | Run all three algorithms and merge results |
 | `--debug` | False | Enable debug logging |
-| `--log-file` | None | Log file path (only used in debug mode) |
 
 ## Algorithm Details
 
@@ -308,6 +308,7 @@ If you have questions or need assistance:
 onsite builds upon the excellent work of the original algorithm developers and the OpenMS community. We thank all contributors and users for their feedback and support.
 
 ---
+
 
 
 
