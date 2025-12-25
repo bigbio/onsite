@@ -170,6 +170,7 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | `--fragment-mass-unit` | Da | Tolerance unit (Da or ppm) |
 | `--threads` | 1 | Number of threads for parallel processing |
 | `--add-decoys` | False | Include decoy sites for validation |
+| `--compute-all-scores` | False | Run all three algorithms and merge results |
 | `--debug` | False | Enable debug logging |
 
 #### PhosphoRS Options
@@ -183,6 +184,7 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | `--fragment-mass-unit` | Da | Tolerance unit (Da or ppm) |
 | `--threads` | 1 | Number of threads for parallel processing |
 | `--add-decoys` | False | Include decoy sites for validation |
+| `--compute-all-scores` | False | Run all three algorithms and merge results |
 | `--debug` | False | Enable debug logging |
 
 #### LucXor Options
@@ -208,6 +210,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | `--min-num-psms-model` | 50 | Minimum number of high-scoring PSMs required for modeling |
 | `--threads` | 1 | Number of threads for parallel processing |
 | `--rt-tolerance` | 0.01 | RT tolerance used when matching spectra by retention time |
+| `--disable-split-by-charge` | False | Disable splitting PSMs by charge state for model training |
+| `--compute-all-scores` | False | Run all three algorithms and merge results |
 | `--debug` | False | Enable debug logging |
 
 ## Algorithm Details
@@ -304,6 +308,7 @@ If you have questions or need assistance:
 onsite builds upon the excellent work of the original algorithm developers and the OpenMS community. We thank all contributors and users for their feedback and support.
 
 ---
+
 
 
 
