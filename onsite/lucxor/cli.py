@@ -32,6 +32,22 @@ from .parallel import parallel_psm_processing, get_optimal_thread_count
 
 logger = logging.getLogger(__name__)
 
+# Preferred score types for LucXor (higher-is-better preferred)
+# Order matters: we prefer scores that are already normalized and higher-is-better
+# Format: (name, higher_better, is_normalized)
+PREFERRED_SCORE_TYPES = [
+    ("q-value", False, True),
+    ("Posterior Error Probability", False, True),
+    ("E-value", False, False),
+    ("Percolator:score", True, False),
+    ("XTandem:expect", False, False),
+    ("MS:1002252", True, False),  # Comet:xcorr
+    ("MS:1002257", False, False),  # Comet:expectation value
+]
+
+# Minimum E-value threshold to avoid log(0) issues
+MIN_EVALUE_THRESHOLD = 1e-100
+
 
 @click.command()
 @click.option(
@@ -376,18 +392,6 @@ class PyLuciPHOr2:
             hit: PeptideHit object
             preferred_score_type: Specific score type to use (optional)
         """
-        # Preferred score types for LuciPHOr (higher-is-better preferred)
-        # Order matters: we prefer scores that are already normalized and higher-is-better
-        PREFERRED_SCORES = [
-            ("q-value", False, True),  # (name, higher_better, is_normalized)
-            ("Posterior Error Probability", False, True),
-            ("E-value", False, False),
-            ("Percolator:score", True, False),
-            ("XTandem:expect", False, False),
-            ("MS:1002252", True, False),  # Comet:xcorr
-            ("MS:1002257", False, False),  # Comet:expectation value
-        ]
-        
         score_value = None
         score_type = None
         higher_better = True
@@ -422,7 +426,7 @@ class PyLuciPHOr2:
         if score_value is None:
             # First try the primary score type
             current_score_type = pep_id.getScoreType() if hasattr(pep_id, "getScoreType") else ""
-            for pref_name, pref_higher_better, pref_normalized in PREFERRED_SCORES:
+            for pref_name, pref_higher_better, pref_normalized in PREFERRED_SCORE_TYPES:
                 if pref_name.lower() in current_score_type.lower():
                     score_value = hit.getScore()
                     score_type = current_score_type
@@ -434,7 +438,7 @@ class PyLuciPHOr2:
             if score_value is None:
                 keys = []
                 hit.getKeys(keys)
-                for pref_name, pref_higher_better, pref_normalized in PREFERRED_SCORES:
+                for pref_name, pref_higher_better, pref_normalized in PREFERRED_SCORE_TYPES:
                     for key in keys:
                         key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
                         if pref_name.lower() in key_str.lower():
@@ -462,12 +466,13 @@ class PyLuciPHOr2:
             else:
                 # For unnormalized lower-is-better scores (like E-value), use -log10 transformation
                 # This converts them to higher-is-better scale
-                if score_value > 0:
+                # Use a minimum threshold to avoid log(0) or precision issues
+                if score_value > MIN_EVALUE_THRESHOLD:
                     normalized_score = -np.log10(score_value)
                     # Cap at reasonable value to avoid extremely large scores
                     normalized_score = min(normalized_score, 100.0)
                 else:
-                    # If score is 0 or negative, assign a high value
+                    # If score is very small or zero, assign maximum value
                     normalized_score = 100.0
                 # Note: after this transformation, the score is no longer in 0-1 range
                 is_normalized = False

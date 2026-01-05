@@ -138,5 +138,34 @@ def test_score_higher_better():
     assert is_normalized is False  # XCorr is not normalized
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_score_evalue_edge_cases():
+    """Test E-value handling for edge cases (very small values)"""
+    from onsite.lucxor.cli import PyLuciPHOr2
+    
+    tool = PyLuciPHOr2()
+    
+    # Test with very small E-value (should not overflow)
+    pep_id = PeptideIdentification()
+    pep_id.setScoreType("E-value")
+    pep_id.setHigherScoreBetter(False)
+    
+    hit = PeptideHit()
+    hit.setScore(1e-150)  # Very small E-value
+    hit.setSequence(AASequence.fromString("PEPTIDE"))
+    
+    # Test score selection
+    normalized_score, score_type, is_normalized = tool.get_score_for_psm(pep_id, hit)
+    
+    # Should be capped at 100.0
+    assert normalized_score == pytest.approx(100.0)
+    assert "e-value" in score_type.lower()
+    assert is_normalized is False
+    
+    # Test with zero E-value (edge case)
+    hit.setScore(0.0)
+    normalized_score, score_type, is_normalized = tool.get_score_for_psm(pep_id, hit)
+    
+    # Should be assigned maximum value
+    assert normalized_score == pytest.approx(100.0)
+    assert is_normalized is False
+
