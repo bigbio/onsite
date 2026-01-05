@@ -51,10 +51,32 @@ LucXor implements a sophisticated two-stage approach:
 | `max_charge_state` | 5 | Maximum charge state |
 | `max_peptide_length` | 40 | Maximum peptide length |
 | `max_num_perm` | 16384 | Maximum permutations |
-| `modeling_score_threshold` | 0.95 | Minimum score for modeling |
+| `modeling_score_threshold` | 0.95 | Minimum score for modeling (for normalized scores) or percentile threshold for unnormalized scores |
 | `min_num_psms_model` | 50 | Minimum PSMs for modeling |
 | `threads` | 4 | Number of threads |
 | `rt_tolerance` | 0.01 | Retention time tolerance |
+| `se_score_type` | Auto | Search engine score type to use (e.g., "q-value", "Posterior Error Probability"). If not specified, automatically selects from preferred scores |
+
+### Score Selection and Normalization
+
+LucXor intelligently selects and normalizes search engine scores for PSM filtering during model training:
+
+- **Automatic Score Selection**: If `se_score_type` is not specified, LucXor automatically selects the best available score from a prioritized list:
+  1. q-value (lower-is-better, normalized)
+  2. Posterior Error Probability (lower-is-better, normalized)
+  3. E-value (lower-is-better, unnormalized)
+  4. Other search engine scores
+
+- **Score Normalization**: 
+  - For normalized lower-is-better scores (e.g., PEP, q-value in 0-1 range): converts to `1 - score`
+  - For unnormalized lower-is-better scores (e.g., E-values): applies `-log10(score)` transformation
+  - For higher-is-better scores: no transformation needed
+
+- **Threshold Handling**:
+  - For normalized scores: uses the `modeling_score_threshold` value (default 0.95)
+  - For unnormalized scores: uses 95th percentile threshold to select high-scoring PSMs
+
+This ensures proper score handling regardless of the search engine used, preventing bugs with unnormalized scores.
 
 ### Workflow
 
@@ -141,6 +163,16 @@ onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML \
     --fragment-error-units Da \
     --threads 8 \
     --debug
+
+# Specify a specific search engine score type
+onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML \
+    --se-score-type "q-value" \
+    --modeling-score-threshold 0.01
+
+# Use with Posterior Error Probability scores
+onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML \
+    --se-score-type "Posterior Error Probability" \
+    --fragment-method HCD
 ```
 
 ### Python API
