@@ -51,7 +51,7 @@ LucXor implements a sophisticated two-stage approach:
 | `max_charge_state` | 5 | Maximum charge state |
 | `max_peptide_length` | 40 | Maximum peptide length |
 | `max_num_perm` | 16384 | Maximum permutations |
-| `modeling_score_threshold` | 0.95 | Minimum score for modeling (for normalized scores) or percentile threshold for unnormalized scores |
+| `modeling_score_threshold` | 0.95 | Minimum score for modeling. For normalized scores (0-1 range), PSMs with score >= threshold are selected. For unnormalized scores, the top 5% (95th percentile) of PSMs are used instead |
 | `min_num_psms_model` | 50 | Minimum PSMs for modeling |
 | `threads` | 4 | Number of threads |
 | `rt_tolerance` | 0.01 | Retention time tolerance |

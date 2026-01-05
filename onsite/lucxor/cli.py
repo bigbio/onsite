@@ -45,6 +45,9 @@ PREFERRED_SCORE_TYPES = [
     ("MS:1002257", False, False),  # Comet:expectation value
 ]
 
+# Keywords to identify lower-is-better scores from score names
+LOWER_BETTER_KEYWORDS = ['pep', 'probability', 'error', 'e-value', 'expect', 'q-value', 'fdr']
+
 # Minimum E-value threshold to avoid log(0) issues
 MIN_EVALUE_THRESHOLD = 1e-100
 
@@ -417,8 +420,7 @@ class PyLuciPHOr2:
                         score_value = float(hit.getMetaValue(key))
                         score_type = key_str
                         # Infer if lower is better from common score names
-                        lower_better_keywords = ['pep', 'probability', 'error', 'e-value', 'expect', 'q-value', 'fdr']
-                        higher_better = not any(keyword in key_str.lower() for keyword in lower_better_keywords)
+                        higher_better = not any(keyword in key_str.lower() for keyword in LOWER_BETTER_KEYWORDS)
                         is_normalized = 0.0 <= score_value <= 1.0
                         break
         
