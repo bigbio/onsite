@@ -173,3 +173,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 *.lock
+
+# Large data files
+data/*.mzML
+data/*_combined.zip

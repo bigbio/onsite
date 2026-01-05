@@ -178,6 +178,13 @@ logger = logging.getLogger(__name__)
     default=False,
     help="Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results",
 )
+@click.option(
+    "--se-score-type",
+    "se_score_type",
+    type=str,
+    default=None,
+    help="Search engine score type to use (e.g., 'q-value', 'Posterior Error Probability'). If not specified, automatically selects from preferred scores.",
+)
 def lucxor(
     input_spectrum,
     input_id,
@@ -202,6 +209,7 @@ def lucxor(
     log_file,
     disable_split_by_charge,
     compute_all_scores,
+    se_score_type,
 ):
     """
     Modification site localization using pyLuciPHOr2 algorithm.
@@ -254,6 +262,7 @@ def lucxor(
             rt_tolerance=rt_tolerance,
             debug=debug,
             disable_split_by_charge=disable_split_by_charge,
+            se_score_type=se_score_type,
         )
         
         # Only call sys.exit if not being called from compute_all_scores
@@ -347,6 +356,123 @@ class PyLuciPHOr2:
             return [], [], None
             
         return pep_ids, prot_ids, exp
+    
+    def get_score_for_psm(
+        self, 
+        pep_id: PeptideIdentification, 
+        hit,
+        preferred_score_type: Optional[str] = None
+    ) -> Tuple[float, str, bool]:
+        """
+        Get score for PSM with proper handling of different score types.
+        
+        Returns a tuple of (normalized_score, score_type, is_normalized) where:
+        - normalized_score: Score converted to higher-is-better scale (0-1 range if possible)
+        - score_type: The name of the score type used
+        - is_normalized: True if score is in 0-1 range, False otherwise
+        
+        Args:
+            pep_id: PeptideIdentification object
+            hit: PeptideHit object
+            preferred_score_type: Specific score type to use (optional)
+        """
+        # Preferred score types for LuciPHOr (higher-is-better preferred)
+        # Order matters: we prefer scores that are already normalized and higher-is-better
+        PREFERRED_SCORES = [
+            ("q-value", False, True),  # (name, higher_better, is_normalized)
+            ("Posterior Error Probability", False, True),
+            ("E-value", False, False),
+            ("Percolator:score", True, False),
+            ("XTandem:expect", False, False),
+            ("MS:1002252", True, False),  # Comet:xcorr
+            ("MS:1002257", False, False),  # Comet:expectation value
+        ]
+        
+        score_value = None
+        score_type = None
+        higher_better = True
+        is_normalized = False
+        
+        # If preferred_score_type is specified, try to use it
+        if preferred_score_type:
+            # Try primary score
+            current_score_type = pep_id.getScoreType() if hasattr(pep_id, "getScoreType") else ""
+            if preferred_score_type.lower() in current_score_type.lower():
+                score_value = hit.getScore()
+                score_type = current_score_type
+                higher_better = pep_id.isHigherScoreBetter() if hasattr(pep_id, "isHigherScoreBetter") else True
+                # Check if score is normalized (between 0 and 1)
+                is_normalized = 0.0 <= score_value <= 1.0
+            else:
+                # Try meta values
+                keys = []
+                hit.getKeys(keys)
+                for key in keys:
+                    key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
+                    if preferred_score_type.lower() in key_str.lower():
+                        score_value = float(hit.getMetaValue(key))
+                        score_type = key_str
+                        # Infer if lower is better from common score names
+                        lower_better_keywords = ['pep', 'probability', 'error', 'e-value', 'expect', 'q-value', 'fdr']
+                        higher_better = not any(keyword in key_str.lower() for keyword in lower_better_keywords)
+                        is_normalized = 0.0 <= score_value <= 1.0
+                        break
+        
+        # If no score found yet, try preferred scores in order
+        if score_value is None:
+            # First try the primary score type
+            current_score_type = pep_id.getScoreType() if hasattr(pep_id, "getScoreType") else ""
+            for pref_name, pref_higher_better, pref_normalized in PREFERRED_SCORES:
+                if pref_name.lower() in current_score_type.lower():
+                    score_value = hit.getScore()
+                    score_type = current_score_type
+                    higher_better = pep_id.isHigherScoreBetter() if hasattr(pep_id, "isHigherScoreBetter") else pref_higher_better
+                    is_normalized = pref_normalized and (0.0 <= score_value <= 1.0)
+                    break
+            
+            # If still no match, try meta values
+            if score_value is None:
+                keys = []
+                hit.getKeys(keys)
+                for pref_name, pref_higher_better, pref_normalized in PREFERRED_SCORES:
+                    for key in keys:
+                        key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
+                        if pref_name.lower() in key_str.lower():
+                            score_value = float(hit.getMetaValue(key))
+                            score_type = key_str
+                            higher_better = pref_higher_better
+                            is_normalized = pref_normalized and (0.0 <= score_value <= 1.0)
+                            break
+                    if score_value is not None:
+                        break
+            
+            # Fallback to primary score
+            if score_value is None:
+                score_value = hit.getScore()
+                score_type = current_score_type or "unknown"
+                higher_better = pep_id.isHigherScoreBetter() if hasattr(pep_id, "isHigherScoreBetter") else True
+                is_normalized = 0.0 <= score_value <= 1.0
+        
+        # Convert score to higher-is-better if needed
+        normalized_score = score_value
+        if not higher_better:
+            if is_normalized:
+                # For normalized lower-is-better scores (like PEP, q-value), convert to 1-score
+                normalized_score = 1.0 - score_value
+            else:
+                # For unnormalized lower-is-better scores (like E-value), use -log10 transformation
+                # This converts them to higher-is-better scale
+                if score_value > 0:
+                    normalized_score = -np.log10(score_value)
+                    # Cap at reasonable value to avoid extremely large scores
+                    normalized_score = min(normalized_score, 100.0)
+                else:
+                    # If score is 0 or negative, assign a high value
+                    normalized_score = 100.0
+                # Note: after this transformation, the score is no longer in 0-1 range
+                is_normalized = False
+        
+        return normalized_score, score_type, is_normalized
         
     def initialize_model(self, config: Dict) -> None:
         """Initialize scoring model"""
@@ -384,6 +510,7 @@ class PyLuciPHOr2:
         rt_tolerance: float,
         debug: bool,
         disable_split_by_charge: bool = False,
+        se_score_type: Optional[str] = None,
     ) -> int:
         """
         LuciPHOr2 main workflow:
@@ -501,22 +628,18 @@ class PyLuciPHOr2:
                 # Set search_engine_sequence to the original sequence
                 psm.search_engine_sequence = sequence
                 
-                # Automatically determine score type and assign values
-                score_type = pep_id.getScoreType() if hasattr(pep_id, "getScoreType") else None
-                score = hit.getScore()
-                higher_score_better = True
-                if hasattr(pep_id, "isHigherScoreBetter"):
-                    higher_score_better = pep_id.isHigherScoreBetter()
-                elif hasattr(pep_id, "getHigherScoreBetter"):
-                    higher_score_better = pep_id.getHigherScoreBetter()
+                # Use the new score selection method
+                normalized_score, score_type_used, is_normalized = self.get_score_for_psm(
+                    pep_id, hit, preferred_score_type=se_score_type
+                )
                 
-                # If it"s a PEP score (lower is better), convert to 1-PEP
-                if (score_type and "posterior error probability" in score_type.lower()) or (higher_score_better is False):
-                    psm.psm_score = 1.0 - score
-                    peptide.score = 1.0 - score
-                else:
-                    psm.psm_score = score
-                    peptide.score = score
+                psm.psm_score = normalized_score
+                peptide.score = normalized_score
+                
+                # Store score metadata for debugging/logging
+                psm.score_type_used = score_type_used
+                psm.score_is_normalized = is_normalized
+                
                 all_psms.append(psm)
             else:
                 self.logger.warning(f'No matching spectrum found - RT: {rt}, Scan: {scan_num if scan_num else "N/A"}')
@@ -527,6 +650,22 @@ class PyLuciPHOr2:
 
         # 3. Train model with high-scoring PSMs
         modeling_score_threshold_val = config.get("modeling_score_threshold", 0.95)
+        
+        # Log score information for first PSM to help with debugging
+        if all_psms:
+            sample_psm = all_psms[0]
+            score_type_used = getattr(sample_psm, 'score_type_used', 'unknown')
+            is_normalized = getattr(sample_psm, 'score_is_normalized', False)
+            self.logger.info(f"Using score type: {score_type_used}")
+            self.logger.info(f"Score is normalized (0-1 range): {is_normalized}")
+            
+            # Adjust threshold based on score normalization
+            if not is_normalized:
+                # For unnormalized scores, we need to use a percentile-based approach
+                # Instead of a fixed threshold
+                self.logger.info("Scores are unnormalized, using top percentile for model training")
+                # Use top 5% of scores (equivalent to 0.95 threshold for normalized scores)
+                modeling_score_threshold_val = None  # Will use percentile instead
         
         # First filter PSMs with modification sites
         phospho_psms = []
@@ -541,9 +680,30 @@ class PyLuciPHOr2:
                     phospho_psms.append(psm)
         
         # Then filter high-scoring PSMs from PSMs with modification sites
-        high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "psm_score") and psm.psm_score >= modeling_score_threshold_val]
-        if not high_score_psms:
-            high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "peptide") and hasattr(psm.peptide, "score") and psm.peptide.score >= modeling_score_threshold_val]
+        if modeling_score_threshold_val is not None:
+            # Use threshold-based filtering for normalized scores
+            high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "psm_score") and psm.psm_score >= modeling_score_threshold_val]
+            if not high_score_psms:
+                high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "peptide") and hasattr(psm.peptide, "score") and psm.peptide.score >= modeling_score_threshold_val]
+        else:
+            # Use percentile-based filtering for unnormalized scores
+            # Get scores from all phospho PSMs
+            scores = []
+            for psm in phospho_psms:
+                if hasattr(psm, "psm_score"):
+                    scores.append(psm.psm_score)
+                elif hasattr(psm, "peptide") and hasattr(psm.peptide, "score"):
+                    scores.append(psm.peptide.score)
+            
+            if scores:
+                # Use top 5% (95th percentile)
+                threshold = np.percentile(scores, 95)
+                self.logger.info(f"Using 95th percentile threshold: {threshold:.4f}")
+                high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "psm_score") and psm.psm_score >= threshold]
+                if not high_score_psms:
+                    high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "peptide") and hasattr(psm.peptide, "score") and psm.peptide.score >= threshold]
+            else:
+                high_score_psms = []
         
         self.logger.info(f"Total PSMs: {len(all_psms)}")
         self.logger.info(f"PSMs with modification sites: {len(phospho_psms)}")
