@@ -348,7 +348,10 @@ for i in range(n):
 | Optimization | Estimated Speedup | Implementation Effort | Status |
 |--------------|-------------------|----------------------|--------|
 | ThreadPoolExecutor (shared spectrum) | 2-5x overall | Low | ✅ DONE |
-| Vectorized KDE | 3-10x for FLR | Medium | Pending |
+| Vectorized KDE | 3-10x for FLR | Medium | ✅ DONE |
+| Binary search RT matching | 10-100x for RT lookup | Low | ✅ DONE |
+| O(n) minorization lookup | 100-1000x for FLR | Low | ✅ DONE |
+| NumPy mean/var operations | 10-100x for stats | Low | ✅ DONE |
 | NumPy histogram for mode | 10-100x for mode calc | Low | Pending |
 | Ion ladder caching | 2-5x for scoring | Medium | Pending |
 | Binary search peak matching | 2-10x for matching | Low | Pending |
@@ -359,7 +362,7 @@ for i in range(n):
 
 ### Changes Implemented
 
-The following optimization has been implemented in this commit:
+The following optimizations have been implemented:
 
 1. **AScore CLI** (`onsite/ascore/cli.py`):
    - Switched from `ProcessPoolExecutor` to `ThreadPoolExecutor`
@@ -370,6 +373,18 @@ The following optimization has been implemented in this commit:
    - Switched from `ProcessPoolExecutor` to `ThreadPoolExecutor`
    - Workers now receive both `exp` and `scan_map` objects directly
    - Eliminated per-worker file reloading and scan map rebuilding
+
+3. **LucXor CLI** (`onsite/lucxor/cli.py`):
+   - Added RT-sorted index for binary search spectrum lookup
+   - Replaced O(N×M) RT matching loop with O(log N) binary search
+   - Pre-builds sorted RT array at startup for fast lookups
+
+4. **FLR Calculator** (`onsite/lucxor/flr.py`):
+   - Vectorized KDE calculation using NumPy broadcasting with chunking for memory efficiency
+   - Replaced Python loops for mean/variance with `np.mean()` and `np.var()`
+   - Vectorized tick mark initialization using `np.linspace()`
+   - Replaced O(n²) lookup in `perform_minorization()` with O(n) dictionary lookup
+   - Vectorized minor point marking using NumPy slicing
 
 ---
 

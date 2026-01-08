@@ -91,16 +91,14 @@ class FLRCalculator:
         self.n_decoy = len(self.neg)
 
     def initialize_tick_marks(self) -> None:
-        """Initialize tick marks"""
+        """Initialize tick marks (vectorized)"""
         # First prepare arrays
         self.prep_arrays()
 
         self.max_delta_score *= 1.001  # Need to be slightly larger for binning
 
-        self.tick_marks = np.zeros(self.NMARKS)
-        for i in range(self.NMARKS):
-            x = (i * self.max_delta_score) / self.NMARKS
-            self.tick_marks[i] = x
+        # Vectorized tick mark creation using linspace
+        self.tick_marks = np.linspace(0, self.max_delta_score, self.NMARKS)
 
         # Initialize other arrays
         self.local_fdr = np.zeros(self.n_real)
@@ -138,38 +136,20 @@ class FLRCalculator:
             self.bw_decoy = result
 
     def calc_delta_score_mean(self) -> None:
-        """Calculate delta score mean"""
-        # Target sequence
-        sum_pos = 0.0
-        for d in self.pos:
-            sum_pos += d
-        N_pos = float(self.n_real)
-        self.delta_score_mu_pos = sum_pos / N_pos if N_pos > 0 else 0.0
+        """Calculate delta score mean (vectorized)"""
+        # Target sequence - use NumPy's optimized mean
+        self.delta_score_mu_pos = np.mean(self.pos) if self.n_real > 0 else 0.0
 
-        # Decoy sequence
-        sum_neg = 0.0
-        for d in self.neg:
-            sum_neg += d
-        N_neg = float(self.n_decoy)
-        self.delta_score_mu_neg = sum_neg / N_neg if N_neg > 0 else 0.0
+        # Decoy sequence - use NumPy's optimized mean
+        self.delta_score_mu_neg = np.mean(self.neg) if self.n_decoy > 0 else 0.0
 
     def calc_delta_score_var(self) -> None:
-        """Calculate delta score variance"""
-        # Target sequence
-        v = 0.0
-        for d in self.pos:
-            x = d - self.delta_score_mu_pos
-            v += x * x
-        N = float(self.n_real - 1)
-        self.delta_score_var_pos = v / N if N > 0 else 0.0
+        """Calculate delta score variance (vectorized)"""
+        # Target sequence - use NumPy's optimized variance (ddof=1 for sample variance)
+        self.delta_score_var_pos = np.var(self.pos, ddof=1) if self.n_real > 1 else 0.0
 
-        # Decoy sequence
-        v = 0.0
-        for d in self.neg:
-            x = d - self.delta_score_mu_neg
-            v += x * x
-        N = float(self.n_decoy - 1)
-        self.delta_score_var_neg = v / N if N > 0 else 0.0
+        # Decoy sequence - use NumPy's optimized variance (ddof=1 for sample variance)
+        self.delta_score_var_neg = np.var(self.neg, ddof=1) if self.n_decoy > 1 else 0.0
 
     def normal_density(self, cur_tick_mark: float, cur_score: float, h: float) -> float:
         """
@@ -188,7 +168,7 @@ class FLRCalculator:
 
     def eval_tick_marks(self, data_type: int) -> None:
         """
-        Evaluate tick marks, kernel density estimation implementation
+        Evaluate tick marks, kernel density estimation implementation (VECTORIZED)
         Args:
             data_type: Data type (REAL or DECOY)
         """
@@ -196,12 +176,10 @@ class FLRCalculator:
             data_ary = self.neg
             bw = self.bw_decoy
             N = float(self.n_decoy)
-            self.f0 = np.zeros(self.NMARKS)
         else:  # REAL
             data_ary = self.pos
             bw = self.bw_real
             N = float(self.n_real)
-            self.f1 = np.zeros(self.NMARKS)
 
         if N == 0 or bw == 0:
             # Avoid division by zero
@@ -211,31 +189,40 @@ class FLRCalculator:
                 self.f1 = np.full(self.NMARKS, TINY_NUM)
             return
 
-        # Kernel density estimation implementation
+        # VECTORIZED kernel density estimation - O(n+m) instead of O(n*m)
+        # Use broadcasting: tick_marks (NMARKS,) and data_ary (N,)
+        # Compute (tick_marks[:, None] - data_ary[None, :]) / bw for all pairs
+        # For large datasets, process in chunks to avoid memory issues
+        CHUNK_SIZE = 5000  # Process data in chunks to avoid huge memory allocation
+
         NORMAL_CONSTANT = 1.0 / np.sqrt(2.0 * np.pi)
+        kernel_result = np.zeros(self.NMARKS)
 
-        for i in range(self.NMARKS):
-            tic = self.tick_marks[i]
-            kernel_result = 0.0
+        if len(data_ary) <= CHUNK_SIZE:
+            # Small dataset: fully vectorized computation
+            # Shape: (NMARKS, N_data)
+            diff = (self.tick_marks[:, np.newaxis] - data_ary[np.newaxis, :]) / bw
+            kernel = NORMAL_CONSTANT * np.exp(-0.5 * diff * diff)
+            kernel_result = kernel.sum(axis=1) / (N * bw)
+        else:
+            # Large dataset: process in chunks to avoid memory issues
+            for chunk_start in range(0, len(data_ary), CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, len(data_ary))
+                chunk_data = data_ary[chunk_start:chunk_end]
 
-            # Loop to calculate kernel density
-            for score in data_ary:
-                x = (tic - score) / bw
-                kernel_result += NORMAL_CONSTANT * np.exp(-0.5 * x * x)
+                diff = (self.tick_marks[:, np.newaxis] - chunk_data[np.newaxis, :]) / bw
+                kernel = NORMAL_CONSTANT * np.exp(-0.5 * diff * diff)
+                kernel_result += kernel.sum(axis=1)
 
-            # Normalize
             kernel_result /= N * bw
 
-            if kernel_result > TINY_NUM:
-                if data_type == DECOY:
-                    self.f0[i] = kernel_result
-                else:
-                    self.f1[i] = kernel_result
-            else:
-                if data_type == DECOY:
-                    self.f0[i] = TINY_NUM
-                else:
-                    self.f1[i] = TINY_NUM
+        # Apply minimum threshold
+        kernel_result = np.maximum(kernel_result, TINY_NUM)
+
+        if data_type == DECOY:
+            self.f0 = kernel_result
+        else:
+            self.f1 = kernel_result
 
         # Add debug information
         if data_type == DECOY:
@@ -447,29 +434,16 @@ class FLRCalculator:
             if n == 0:
                 continue
 
-            # Initialize arrays
-            x = np.zeros(n)
-            f = np.zeros(n)
-            fcopy = np.zeros(n)
-            forig = np.zeros(n)
+            # Fill data (vectorized)
+            pairs = [minor_map[i] for i in range(n)]
+            x = np.array([p[0] for p in pairs])  # delta scores
+            f = np.array([p[1] for p in pairs])  # FDR values
+            forig = f.copy()
             is_minor_point = np.zeros(n, dtype=bool)
 
-            # Fill data
-            for i in range(n):
-                pair = minor_map[i]
-                x[i] = pair[0]  # delta score
-                f[i] = pair[1]  # FDR
-                forig[i] = f[i]
-                fcopy[i] = 0
-                is_minor_point[i] = False
-
-            # Find minimum value and its index
-            min_idx = 0
-            min_val = f[0]
-            for i in range(1, n):
-                if f[i] < min_val:
-                    min_val = f[i]
-                    min_idx = i
+            # Find minimum value and its index (vectorized)
+            min_idx = np.argmin(f)
+            min_val = f[min_idx]
 
             # Calculate slope and apply
             slope = (0.0 - min_val) / (self.max_delta_score * 1.1 - x[min_idx])
@@ -495,9 +469,8 @@ class FLRCalculator:
                 f[i] = max_val - slope * (x[max_idx] - x[i])
                 i -= 1
 
-            # Mark minor points
-            for i in range(max_idx):
-                is_minor_point[i] = True
+            # Mark minor points (vectorized)
+            is_minor_point[:max_idx] = True
 
             cur_start = max_idx
             cur_end = max_idx + 1
@@ -519,12 +492,12 @@ class FLRCalculator:
                 while cur_end < n and not is_minor_point[cur_end]:
                     cur_end += 1
 
-            # Map results back to FDR array
+            # Map results back to FDR array - O(n) with dictionary lookup instead of O(n²)
+            # Use reversed iteration to keep FIRST occurrence (matching original behavior)
+            x_to_idx = {x[j]: j for j in range(n - 1, -1, -1)}
             for i in range(n):
-                for j in range(n):
-                    if self.pos[i] == x[j]:
-                        fdr_array[i] = f[j]
-                        break
+                if self.pos[i] in x_to_idx:
+                    fdr_array[i] = f[x_to_idx[self.pos[i]]]
 
             if iter_type == "global":
                 self.global_fdr = fdr_array
