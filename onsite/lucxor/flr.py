@@ -203,7 +203,7 @@ class FLRCalculator:
             # Shape: (NMARKS, N_data)
             diff = (self.tick_marks[:, np.newaxis] - data_ary[np.newaxis, :]) / bw
             kernel = NORMAL_CONSTANT * np.exp(-0.5 * diff * diff)
-            kernel_result = kernel.sum(axis=1) / (N * bw)
+            kernel_result = kernel.sum(axis=1)  # Accumulate only, normalize later
         else:
             # Large dataset: process in chunks to avoid memory issues
             for chunk_start in range(0, len(data_ary), CHUNK_SIZE):
@@ -214,7 +214,10 @@ class FLRCalculator:
                 kernel = NORMAL_CONSTANT * np.exp(-0.5 * diff * diff)
                 kernel_result += kernel.sum(axis=1)
 
-            kernel_result /= N * bw
+        # Single normalization after accumulation for both branches
+        # This is critical for numerical stability - normalizing once at the end
+        # preserves precision better than normalizing during accumulation
+        kernel_result /= N * bw
 
         # Apply minimum threshold
         kernel_result = np.maximum(kernel_result, TINY_NUM)
@@ -438,7 +441,6 @@ class FLRCalculator:
             pairs = [minor_map[i] for i in range(n)]
             x = np.array([p[0] for p in pairs])  # delta scores
             f = np.array([p[1] for p in pairs])  # FDR values
-            forig = f.copy()
             is_minor_point = np.zeros(n, dtype=bool)
 
             # Find minimum value and its index (vectorized)
