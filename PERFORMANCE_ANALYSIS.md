@@ -233,16 +233,33 @@ diff_matrix = tick_marks_array - norm_ints_array  # (N, ntick) - LARGE!
 
 ### Priority 1: Critical (Immediate Implementation Recommended)
 
-#### 1.1 Shared Memory for Spectrum Data
-```python
-# Use multiprocessing.shared_memory for spectrum data
-from multiprocessing import shared_memory
+#### 1.1 Switch from ProcessPoolExecutor to ThreadPoolExecutor ✅ IMPLEMENTED
 
-# Load once in main process
-spectra = load_spectra(spectra_file)
-shm = shared_memory.SharedMemory(create=True, size=spectra.nbytes)
-# Workers access via shared memory - no reloading
+The simplest and most effective fix: use threads instead of processes. Since spectrum
+data is read-only during processing, threads naturally share memory without any
+special libraries or complexity.
+
+```python
+# OLD: ProcessPoolExecutor - each process reloads the file
+from concurrent.futures import ProcessPoolExecutor
+with ProcessPoolExecutor(max_workers=workers) as executor:
+    futures = {executor.submit(_worker, task): task for task in tasks}
+    # Each worker calls: exp = load_spectra(mzml_path)  # REDUNDANT!
+
+# NEW: ThreadPoolExecutor - threads share the spectrum object directly
+from concurrent.futures import ThreadPoolExecutor
+exp = load_spectra(mzml_path)  # Load once
+tasks = [{"exp": exp, ...} for pid in peptide_ids]  # Pass object directly
+with ThreadPoolExecutor(max_workers=workers) as executor:
+    futures = {executor.submit(_worker_threaded, task): task for task in tasks}
+    # Workers use: exp = task["exp"]  # Shared memory - no reload!
 ```
+
+**Why this works:**
+- Spectrum data is read-only during scoring - thread-safe by nature
+- NumPy releases the GIL during array operations
+- PyOpenMS C++ calls also release the GIL
+- No serialization overhead, no file I/O redundancy
 
 #### 1.2 Vectorized KDE Calculation
 ```python
@@ -328,17 +345,31 @@ for i in range(n):
 
 ## 5. Estimated Impact Summary
 
-| Optimization | Estimated Speedup | Implementation Effort |
-|--------------|-------------------|----------------------|
-| Shared memory for spectra | 2-5x overall | High |
-| Vectorized KDE | 3-10x for FLR | Medium |
-| NumPy histogram for mode | 10-100x for mode calc | Low |
-| Ion ladder caching | 2-5x for scoring | Medium |
-| Binary search peak matching | 2-10x for matching | Low |
-| Batch worker processing | 1.5-3x overall | Low |
-| LRU cache for binomials | 1.2-2x for PhosphoRS | Low |
+| Optimization | Estimated Speedup | Implementation Effort | Status |
+|--------------|-------------------|----------------------|--------|
+| ThreadPoolExecutor (shared spectrum) | 2-5x overall | Low | ✅ DONE |
+| Vectorized KDE | 3-10x for FLR | Medium | Pending |
+| NumPy histogram for mode | 10-100x for mode calc | Low | Pending |
+| Ion ladder caching | 2-5x for scoring | Medium | Pending |
+| Binary search peak matching | 2-10x for matching | Low | Pending |
+| Batch worker processing | 1.5-3x overall | Low | Pending |
+| LRU cache for binomials | 1.2-2x for PhosphoRS | Low | Pending |
 
 **Total Estimated Improvement: 5-20x faster overall runtime**
+
+### Changes Implemented
+
+The following optimization has been implemented in this commit:
+
+1. **AScore CLI** (`onsite/ascore/cli.py`):
+   - Switched from `ProcessPoolExecutor` to `ThreadPoolExecutor`
+   - Workers now receive the `exp` spectrum object directly
+   - Eliminated per-worker file reloading
+
+2. **PhosphoRS CLI** (`onsite/phosphors/cli.py`):
+   - Switched from `ProcessPoolExecutor` to `ThreadPoolExecutor`
+   - Workers now receive both `exp` and `scan_map` objects directly
+   - Eliminated per-worker file reloading and scan map rebuilding
 
 ---
 
