@@ -695,8 +695,12 @@ class PSM:
                     if len(parts) >= 3:
                         nl_masses.append(float(parts[2]))
 
-            # Pre-compute neutral loss eligibility
-            b_can_nl, y_can_nl = self._precompute_nl_eligibility(unmod_seq)
+            # Pre-compute oxidation mass contributions (fixed mods, same for all permutations)
+            ox_positions = sorted(self.non_target_mods.keys()) if self.non_target_mods else []
+            ox_prefix = np.zeros(n + 1, dtype=int)
+            for p in ox_positions:
+                if 0 <= p < n:
+                    ox_prefix[p + 1:] += 1
 
             # ═══════════════════════════════════════════════════════════════
             # PHASE 2: Score each permutation using backbone + delta approach
@@ -720,15 +724,16 @@ class PSM:
                         # b-ion: prefix contains positions 0..i-1
                         # Count mods in prefix (positions < i)
                         b_mod_count = sum(1 for p in all_mod_positions if p < i)
-                        b_mass = cumsum[i] + b_mod_count * PHOSPHO_MOD_MASS + PROTON_MASS * z
+                        b_ox_count = int(ox_prefix[i])
+                        b_mass = cumsum[i] + b_mod_count * PHOSPHO_MOD_MASS + b_ox_count * OXIDATION_MASS + PROTON_MASS * z
                         b_mz = b_mass / z
 
                         if b_mz > min_mz:
                             theo_mz_list.append(b_mz)
                             ion_types.append('b')
 
-                            # Neutral losses for b-ions
-                            if b_can_nl[i]:
+                            # Neutral losses for b-ions (only if fragment has phospho mods)
+                            if b_mod_count > 0:
                                 for nl_mass in nl_masses:
                                     nl_mz = (b_mass + nl_mass) / z
                                     if nl_mz > min_mz:
@@ -739,15 +744,16 @@ class PSM:
                         # y-ion: suffix contains positions i..n-1
                         # Count mods in suffix (positions >= i)
                         y_mod_count = sum(1 for p in all_mod_positions if p >= i)
-                        y_mass = (total_unmod_mass - cumsum[i]) + y_mod_count * PHOSPHO_MOD_MASS + WATER_MASS + PROTON_MASS * z
+                        y_ox_count = int(ox_prefix[n] - ox_prefix[i])
+                        y_mass = (total_unmod_mass - cumsum[i]) + y_mod_count * PHOSPHO_MOD_MASS + y_ox_count * OXIDATION_MASS + WATER_MASS + PROTON_MASS * z
                         y_mz = y_mass / z
 
                         if y_mz > min_mz:
                             theo_mz_list.append(y_mz)
                             ion_types.append('y')
 
-                            # Neutral losses for y-ions
-                            if y_can_nl[i]:
+                            # Neutral losses for y-ions (only if fragment has phospho mods)
+                            if y_mod_count > 0:
                                 for nl_mass in nl_masses:
                                     nl_mz = (y_mass + nl_mass) / z
                                     if nl_mz > min_mz:
@@ -1602,7 +1608,7 @@ class PSM:
 
         # Pass tolerance directly instead of copying entire config
         # Create minimal config override for tolerance
-        if tolerance != self.config.get("fragment_mass_tolerance", 0.5):
+        if tolerance != self.config.get("fragment_mass_tolerance", 0.1):
             temp_config = {
                 **self.config,
                 "fragment_mass_tolerance": tolerance,
