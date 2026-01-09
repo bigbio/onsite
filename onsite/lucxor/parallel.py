@@ -164,6 +164,18 @@ def parallel_process(
     if num_threads is None:
         num_threads = os.cpu_count() or DEFAULT_NUM_THREADS
 
+    # Skip threading overhead for single thread
+    if num_threads == 1:
+        results = []
+        for item in data:
+            try:
+                result = worker_class.process_all([item])
+                results.extend(result)
+            except Exception as e:
+                logging.error(f"Processing error: {str(e)}")
+                results.append(None)
+        return results
+
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
         for item in data:
@@ -202,11 +214,16 @@ def parallel_psm_processing(
     if num_threads is None:
         num_threads = os.cpu_count() or DEFAULT_NUM_THREADS
 
+    worker = PSMProcessingWorker(model, flr_calculator, round_number)
+
+    # Skip threading overhead for single thread
+    if num_threads == 1:
+        worker.process_psm_batch(psms)
+        return
+
     # Split PSM list into chunks
     chunk_size = max(1, len(psms) // num_threads)
     psm_chunks = [psms[i : i + chunk_size] for i in range(0, len(psms), chunk_size)]
-
-    worker = PSMProcessingWorker(model, flr_calculator, round_number)
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
@@ -239,11 +256,15 @@ def parallel_spectrum_matching(
     if num_threads is None:
         num_threads = os.cpu_count() or DEFAULT_NUM_THREADS
 
+    worker = SpectrumMatchingWorker(config)
+
+    # Skip threading overhead for single thread
+    if num_threads == 1:
+        return worker.process_psm_batch(psms)
+
     # Split PSM list into chunks
     chunk_size = max(1, len(psms) // num_threads)
     psm_chunks = [psms[i : i + chunk_size] for i in range(0, len(psms), chunk_size)]
-
-    worker = SpectrumMatchingWorker(config)
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
