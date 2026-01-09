@@ -576,17 +576,21 @@ class Peptide:
         Check if sequence is a decoy sequence.
         Uses cached result - if the full peptide is not a decoy,
         no fragment can be a decoy either (since fragments are substrings).
+
+        Decoy residues are identified by membership in DECOY_AA_MAP (special
+        characters like '2', '@', '#', etc.), not by lowercase letters which
+        indicate modifications.
         """
         # Cache the decoy status of the full peptide on first call
         if self._cached_is_decoy is None:
-            self._cached_is_decoy = any(aa.islower() for aa in self.mod_peptide)
+            self._cached_is_decoy = any(aa in DECOY_AA_MAP for aa in self.mod_peptide)
 
         # If full peptide is not a decoy, no fragment can be
         if not self._cached_is_decoy:
             return False
 
         # Full peptide is a decoy - check if this specific fragment contains decoy residues
-        return any(aa.islower() for aa in seq)
+        return any(aa in DECOY_AA_MAP for aa in seq)
 
     def calc_theoretical_masses(self, perm: str) -> List[float]:
         """

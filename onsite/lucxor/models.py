@@ -868,22 +868,31 @@ class CIDModel:
             num_threads = self.config.get("num_threads", os.cpu_count() or 4)
             logger.info(f"Using {num_threads} threads for CID model training...")
 
-            # Parallel processing for each charge state
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = []
+            # Skip threading overhead for single thread
+            if num_threads == 1:
                 for charge, charge_psm_list in charge_psms.items():
-                    future = executor.submit(
-                        self._build_charge_model, charge, charge_psm_list
-                    )
-                    futures.append(future)
-
-                # Wait for all tasks to complete
-                for future in as_completed(futures):
                     try:
-                        charge, model_data = future.result()
+                        charge, model_data = self._build_charge_model(charge, charge_psm_list)
                         self.charge_models[charge] = model_data
                     except Exception as e:
                         logger.error(f"CID model training error: {str(e)}")
+            else:
+                # Parallel processing for each charge state
+                with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                    futures = []
+                    for charge, charge_psm_list in charge_psms.items():
+                        future = executor.submit(
+                            self._build_charge_model, charge, charge_psm_list
+                        )
+                        futures.append(future)
+
+                    # Wait for all tasks to complete
+                    for future in as_completed(futures):
+                        try:
+                            charge, model_data = future.result()
+                            self.charge_models[charge] = model_data
+                        except Exception as e:
+                            logger.error(f"CID model training error: {str(e)}")
 
     def _build_charge_model(
         self, charge: int, charge_psm_list: List
@@ -1129,20 +1138,29 @@ class HCDModel:
             num_threads = self.config.get("num_threads", os.cpu_count() or 4)
             logger.info(f"Using {num_threads} threads for HCD model training...")
 
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = []
+            # Skip threading overhead for single thread
+            if num_threads == 1:
                 for charge, charge_psm_list in charge_psms.items():
-                    future = executor.submit(
-                        self._build_charge_model, charge, charge_psm_list
-                    )
-                futures.append(future)
+                    try:
+                        charge, model_data = self._build_charge_model(charge, charge_psm_list)
+                        self.charge_models[charge] = model_data
+                    except Exception as e:
+                        logger.error(f"HCD model training error: {str(e)}")
+            else:
+                with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                    futures = []
+                    for charge, charge_psm_list in charge_psms.items():
+                        future = executor.submit(
+                            self._build_charge_model, charge, charge_psm_list
+                        )
+                        futures.append(future)
 
-            for future in as_completed(futures):
-                try:
-                    charge, model_data = future.result()
-                    self.charge_models[charge] = model_data
-                except Exception as e:
-                    logger.error(f"HCD model training error: {str(e)}")
+                    for future in as_completed(futures):
+                        try:
+                            charge, model_data = future.result()
+                            self.charge_models[charge] = model_data
+                        except Exception as e:
+                            logger.error(f"HCD model training error: {str(e)}")
 
     def _build_charge_model(
         self, charge: int, charge_psm_list: List
