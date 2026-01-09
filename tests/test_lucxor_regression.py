@@ -227,6 +227,95 @@ class TestPSMScoring:
         )
 
 
+class TestFLRCalculation:
+    """Test FLR calculation accuracy."""
+
+    def test_flr_interpolation_accuracy(self):
+        """Test that vectorized density interpolation matches expected values."""
+        from onsite.lucxor.flr import FLRCalculator
+
+        # Create a simple FLR calculator with known density
+        calc = FLRCalculator()
+        calc.NMARKS = 101
+        calc.tick_marks = np.linspace(0, 10, calc.NMARKS)
+
+        # Simple triangular density for testing
+        calc.f0 = np.maximum(0, 1 - np.abs(calc.tick_marks - 3) / 3)
+        calc.f1 = np.maximum(0, 1 - np.abs(calc.tick_marks - 7) / 3)
+
+        # Test interpolation at various points
+        test_points = np.array([0.0, 1.5, 3.0, 5.0, 7.0, 8.5, 10.0])
+
+        for x in test_points:
+            # Find expected value by linear interpolation
+            idx = np.searchsorted(calc.tick_marks, x, side='right') - 1
+            idx = np.clip(idx, 0, calc.NMARKS - 2)
+            a, b = calc.tick_marks[idx], calc.tick_marks[idx + 1]
+            t = (x - a) / (b - a)
+            expected_f0 = calc.f0[idx] * (1 - t) + calc.f0[idx + 1] * t
+            expected_f1 = calc.f1[idx] * (1 - t) + calc.f1[idx + 1] * t
+
+            # Get vectorized result
+            result_f0 = calc._interpolate_density_vectorized(np.array([x]), calc.f0)[0]
+            result_f1 = calc._interpolate_density_vectorized(np.array([x]), calc.f1)[0]
+
+            assert abs(result_f0 - expected_f0) < 1e-10, f"f0 interpolation failed at x={x}"
+            assert abs(result_f1 - expected_f1) < 1e-10, f"f1 interpolation failed at x={x}"
+
+    def test_flr_boundary_conditions(self):
+        """Test FLR handling of boundary conditions."""
+        from onsite.lucxor.flr import FLRCalculator
+
+        calc = FLRCalculator()
+        calc.NMARKS = 101
+        calc.tick_marks = np.linspace(0, 10, calc.NMARKS)
+        calc.f0 = np.ones(calc.NMARKS) * 0.1
+        calc.f1 = np.ones(calc.NMARKS) * 0.2
+
+        # Test below minimum
+        result = calc._interpolate_density_vectorized(np.array([-5.0]), calc.f0)[0]
+        assert result == calc.f0[0], "Should return first value for x < min"
+
+        # Test above maximum
+        result = calc._interpolate_density_vectorized(np.array([15.0]), calc.f0)[0]
+        assert result == calc.f0[-1], "Should return last value for x > max"
+
+        # Test global AUC at boundaries
+        cumulative_auc = calc._compute_cumulative_auc_from_end(calc.f0)
+
+        # At x=0, should get total area
+        result = calc._global_auc_vectorized(np.array([0.0]), calc.f0, cumulative_auc)[0]
+        expected_total = np.sum(np.diff(calc.tick_marks) * 0.5 * (calc.f0[:-1] + calc.f0[1:]))
+        assert abs(result - expected_total) < 1e-10, "Should return total area at x=0"
+
+        # At x=max, should get 0
+        result = calc._global_auc_vectorized(np.array([10.0]), calc.f0, cumulative_auc)[0]
+        assert result == 0.0, "Should return 0 at x=max"
+
+    def test_flr_cumulative_auc_correctness(self):
+        """Test that cumulative AUC is computed correctly."""
+        from onsite.lucxor.flr import FLRCalculator
+
+        calc = FLRCalculator()
+        calc.NMARKS = 11
+        calc.tick_marks = np.linspace(0, 10, calc.NMARKS)
+        calc.f0 = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0])
+
+        cumulative = calc._compute_cumulative_auc_from_end(calc.f0)
+
+        # Verify cumulative[i] = sum of trapezoid areas from i to end
+        for i in range(calc.NMARKS - 1):
+            expected = 0.0
+            for j in range(i, calc.NMARKS - 1):
+                dx = calc.tick_marks[j + 1] - calc.tick_marks[j]
+                area = dx * 0.5 * (calc.f0[j] + calc.f0[j + 1])
+                expected += area
+            assert abs(cumulative[i] - expected) < 1e-10, f"Cumulative AUC wrong at index {i}"
+
+        # Last element should be 0
+        assert cumulative[-1] == 0.0, "Cumulative AUC at end should be 0"
+
+
 class TestEndToEndRegression:
     """End-to-end regression tests using real data."""
 
