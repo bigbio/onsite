@@ -112,6 +112,12 @@ class Peptide:
         # Add permutations attribute
         self.permutations = []
 
+        # Cache for performance optimization - parse neutral losses once
+        self._cached_nl_map = None  # Parsed neutral losses
+        self._cached_decoy_nl_map = None  # Parsed decoy neutral losses
+        self._cached_min_mz = config.get("min_mz", 0.0)
+        self._cached_is_decoy = None  # Cached decoy status
+
         # Initialize the peptide
         self._initialize(skip_expensive_init=skip_expensive_init)
 
@@ -394,7 +400,8 @@ class Peptide:
 
     def _record_nl_ions(self, ion, z, orig_ion_mass, ion_type="b"):
         """
-        Handle neutral loss ions
+        Handle neutral loss ions.
+        Uses cached neutral loss config and pre-computed uppercase residues.
         """
         # Extract sequence part from ion string
         start = ion.find(":") + 1
@@ -405,44 +412,39 @@ class Peptide:
         seq = ion[start:end]
 
         # Check if it's a decoy sequence
-        if self._is_decoy_seq(seq):
-            # Decoy sequence neutral loss handling
-            decoy_nl_map = self.config.get("decoy_neutral_losses", [])
-            if isinstance(decoy_nl_map, list):
-                decoy_nl_map = self._parse_neutral_losses_list(decoy_nl_map)
+        is_decoy = self._is_decoy_seq(seq)
 
-            for nl_key, nl_mass in decoy_nl_map.items():
-                # Extract neutral loss tag from key, format: X-H3PO4 -> -H3PO4
-                nl_tag = "-" + nl_key.split("-", 1)[1]  # Split once, take second part
+        # Get cached neutral loss map (with pre-computed uppercase residues)
+        nl_entries = self._get_cached_nl_map(is_decoy)
+
+        # Use cached min_mz
+        min_mz = self._cached_min_mz
+
+        if is_decoy:
+            # Decoy sequence - no residue check needed
+            for residues_upper, nl_tag, nl_mass in nl_entries:
                 nl_str = ion + nl_tag
                 mass = orig_ion_mass + nl_mass
                 mz = round(mass / z, 4)
 
-                if mz > self.config.get("min_mz", 0.0):
+                if mz > min_mz:
                     if ion_type == "b":
                         self.b_ions[nl_str] = mz
                     else:
                         self.y_ions[nl_str] = mz
         else:
-            # Normal sequence neutral loss handling
-            nl_map = self.config.get("neutral_losses", [])
-            if isinstance(nl_map, list):
-                nl_map = self._parse_neutral_losses_list(nl_map)
+            # Normal sequence - check if contains matching residues
+            # Pre-compute uppercase sequence once
+            seq_upper = seq.upper()
 
-            for nl_key, nl_mass in nl_map.items():
-                # Parse format: sty-H3PO4 -> check if sequence contains any amino acid in sty
-                residues = nl_key.split("-")[0]
-                # Extract neutral loss tag from key, format: sty-H3PO4 -> -H3PO4
-                nl_tag = "-" + nl_key.split("-", 1)[1]  # Split once, take second part
-
-                # Check if sequence contains amino acids that can produce neutral losses
-                num_cand_res = sum(1 for aa in seq if aa.upper() in residues.upper())
-                if num_cand_res > 0:
+            for residues_upper, nl_tag, nl_mass in nl_entries:
+                # Check if sequence contains any amino acid from residues
+                if any(aa in residues_upper for aa in seq_upper):
                     nl_str = ion + nl_tag
                     mass = orig_ion_mass + nl_mass
                     mz = round(mass / z, 4)
 
-                    if mz > self.config.get("min_mz", 0.0):
+                    if mz > min_mz:
                         if ion_type == "b":
                             self.b_ions[nl_str] = mz
                         else:
@@ -532,10 +534,58 @@ class Peptide:
                 nl_dict[nl_key] = nl_mass
         return nl_dict
 
+    def _get_cached_nl_map(self, is_decoy: bool):
+        """
+        Get cached neutral loss map with pre-computed uppercase residues.
+        Parses config once and caches the result for reuse.
+
+        Returns:
+            List of tuples: (residues_upper, nl_tag, nl_mass)
+        """
+        if is_decoy:
+            if self._cached_decoy_nl_map is None:
+                decoy_nl_list = self.config.get("decoy_neutral_losses", [])
+                if isinstance(decoy_nl_list, list):
+                    nl_dict = self._parse_neutral_losses_list(decoy_nl_list)
+                else:
+                    nl_dict = decoy_nl_list
+                # Pre-compute uppercase residues and split nl_tag
+                self._cached_decoy_nl_map = []
+                for nl_key, nl_mass in nl_dict.items():
+                    residues_upper = nl_key.split("-")[0].upper()
+                    nl_tag = "-" + nl_key.split("-", 1)[1]
+                    self._cached_decoy_nl_map.append((residues_upper, nl_tag, nl_mass))
+            return self._cached_decoy_nl_map
+        else:
+            if self._cached_nl_map is None:
+                nl_list = self.config.get("neutral_losses", [])
+                if isinstance(nl_list, list):
+                    nl_dict = self._parse_neutral_losses_list(nl_list)
+                else:
+                    nl_dict = nl_list
+                # Pre-compute uppercase residues and split nl_tag
+                self._cached_nl_map = []
+                for nl_key, nl_mass in nl_dict.items():
+                    residues_upper = nl_key.split("-")[0].upper()
+                    nl_tag = "-" + nl_key.split("-", 1)[1]
+                    self._cached_nl_map.append((residues_upper, nl_tag, nl_mass))
+            return self._cached_nl_map
+
     def _is_decoy_seq(self, seq):
         """
-        Check if sequence is a decoy sequence
+        Check if sequence is a decoy sequence.
+        Uses cached result - if the full peptide is not a decoy,
+        no fragment can be a decoy either (since fragments are substrings).
         """
+        # Cache the decoy status of the full peptide on first call
+        if self._cached_is_decoy is None:
+            self._cached_is_decoy = any(aa.islower() for aa in self.mod_peptide)
+
+        # If full peptide is not a decoy, no fragment can be
+        if not self._cached_is_decoy:
+            return False
+
+        # Full peptide is a decoy - check if this specific fragment contains decoy residues
         return any(aa.islower() for aa in seq)
 
     def calc_theoretical_masses(self, perm: str) -> List[float]:
