@@ -1090,7 +1090,8 @@ class PSM:
                 i += 14
             elif perm[i:i+11] == "(Oxidation)":
                 i += 11
-            elif perm[i] == '(' or perm[i] == ')':
+            elif perm[i] in '()[]':
+                # Skip parentheses and brackets (N-term/C-term modification markers)
                 i += 1
             else:
                 # Convert to uppercase (handles lowercase phospho markers)
@@ -1154,7 +1155,8 @@ class PSM:
                 i += 14
             elif perm[i:i+11] == "(Oxidation)":
                 i += 11
-            elif perm[i] == '(' or perm[i] == ')':
+            elif perm[i] in '()[]':
+                # Skip parentheses and brackets (N-term/C-term modification markers)
                 i += 1
             else:
                 aa = perm[i]
