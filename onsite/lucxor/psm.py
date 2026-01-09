@@ -636,97 +636,212 @@ class PSM:
 
     def score_permutations(self, model: Optional[object]) -> None:
         """
-        Score all permutations of the peptide sequence
+        Score all permutations using shared backbone mass computation.
+
+        This optimized version computes the unmodified backbone cumulative masses
+        once, then for each permutation just adjusts for modification positions.
+        This avoids redundant string parsing and mass lookups.
 
         Args:
             model: Optional scoring model
         """
         try:
-            # Get all permutations from pos_permutation_score_map and neg_permutation_score_map
+            # Get all permutations
             all_perms = list(self.pos_permutation_score_map.keys()) + list(
                 self.neg_permutation_score_map.keys()
             )
-            base_tolerance = self.config.get(
-                "fragment_mass_tolerance", 0.1
-            )  # Read from config, default 0.1
 
-            # Score each permutation
+            if not all_perms:
+                return
+
+            # Get charge model early
+            charge_model = model.get_charge_model(self.charge) if model else None
+            if charge_model is None:
+                logger.debug(f"No charge model found for charge {self.charge}")
+                return
+
+            # Get spectrum data once
+            mz_values, intensities = self.spectrum.get_peaks()
+            if len(mz_values) == 0:
+                return
+
+            norm_intensity = self.spectrum.norm_intensity
+
+            # Ensure spectrum has sorted indices for binary search
+            if self.spectrum._mz_sorted is None:
+                self.spectrum._update_sorted_indices()
+            mz_sorted = self.spectrum._mz_sorted
+            sort_indices = self.spectrum._mz_sorted_indices
+
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1: Compute shared backbone data (ONCE for all permutations)
+            # ═══════════════════════════════════════════════════════════════
+            unmod_seq = self._get_unmodified_sequence()
+            n = len(unmod_seq)
+            cumsum = self._compute_backbone_cumsum(unmod_seq)
+            total_unmod_mass = cumsum[n]
+
+            # Config values
+            base_tolerance = self.config.get("fragment_mass_tolerance", 0.1)
+            is_ppm = self.config.get("ms2_tolerance_units", "Da") == "ppm"
+            min_mz = self.config.get("min_mz", 0.0)
+
+            # Neutral loss masses
+            nl_masses = []
+            nl_list = self.config.get("neutral_losses", [])
+            if isinstance(nl_list, list):
+                for item in nl_list:
+                    parts = item.strip().split()
+                    if len(parts) >= 3:
+                        nl_masses.append(float(parts[2]))
+
+            # Pre-compute neutral loss eligibility
+            b_can_nl, y_can_nl = self._precompute_nl_eligibility(unmod_seq)
+
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2: Score each permutation using backbone + delta approach
+            # ═══════════════════════════════════════════════════════════════
             for perm in all_perms:
-                # Check if it"s a decoy sequence
-                is_decoy = self._is_decoy_sequence(perm)
+                # Get modification positions for this permutation
+                phospho_pos, decoy_pos, is_decoy = self._get_mod_positions_from_perm(perm)
+                all_mod_positions = phospho_pos + decoy_pos
 
-                if is_decoy:
-                    tolerance = base_tolerance * 2.0  # decoyPadding = 2.0
-                else:
-                    tolerance = base_tolerance
+                # Tolerance adjustment for decoys
+                tolerance = base_tolerance * 2.0 if is_decoy else base_tolerance
 
-                # Calculate score
-                final_score = 0.0
-                matched_peaks = self._match_peaks(perm, tolerance)
+                # ─────────────────────────────────────────────────────────
+                # Compute all theoretical ion m/z values for this permutation
+                # ─────────────────────────────────────────────────────────
+                theo_mz_list = []
+                ion_types = []  # 'b' or 'y'
 
-                # Get charge model
-                charge_model = model.get_charge_model(self.charge) if model else None
+                for z in range(1, self.charge):
+                    for i in range(2, n):  # b-ions from position 2 to n-1
+                        # b-ion: prefix contains positions 0..i-1
+                        # Count mods in prefix (positions < i)
+                        b_mod_count = sum(1 for p in all_mod_positions if p < i)
+                        b_mass = cumsum[i] + b_mod_count * PHOSPHO_MOD_MASS + PROTON_MASS * z
+                        b_mz = b_mass / z
 
-                if charge_model is None:
-                    logger.debug(f"No charge model found for charge {self.charge}")
+                        if b_mz > min_mz:
+                            theo_mz_list.append(b_mz)
+                            ion_types.append('b')
+
+                            # Neutral losses for b-ions
+                            if b_can_nl[i]:
+                                for nl_mass in nl_masses:
+                                    nl_mz = (b_mass + nl_mass) / z
+                                    if nl_mz > min_mz:
+                                        theo_mz_list.append(nl_mz)
+                                        ion_types.append('b')
+
+                    for i in range(1, n - 1):  # y-ions from position 1 to n-2
+                        # y-ion: suffix contains positions i..n-1
+                        # Count mods in suffix (positions >= i)
+                        y_mod_count = sum(1 for p in all_mod_positions if p >= i)
+                        y_mass = (total_unmod_mass - cumsum[i]) + y_mod_count * PHOSPHO_MOD_MASS + WATER_MASS + PROTON_MASS * z
+                        y_mz = y_mass / z
+
+                        if y_mz > min_mz:
+                            theo_mz_list.append(y_mz)
+                            ion_types.append('y')
+
+                            # Neutral losses for y-ions
+                            if y_can_nl[i]:
+                                for nl_mass in nl_masses:
+                                    nl_mz = (y_mass + nl_mass) / z
+                                    if nl_mz > min_mz:
+                                        theo_mz_list.append(nl_mz)
+                                        ion_types.append('y')
+
+                if not theo_mz_list:
+                    if is_decoy:
+                        self.neg_permutation_score_map[perm] = 0.0
+                    else:
+                        self.pos_permutation_score_map[perm] = 0.0
                     continue
 
-                # Calculate score for each peak
-                for peak in matched_peaks:
-                    # Get ion type
-                    ion_type = peak.get("matched_ion_str", "")
+                # Convert to numpy arrays
+                theo_mz_array = np.array(theo_mz_list)
 
-                    # Calculate intensity score
-                    intensity_m = 0.0
-                    intensity_u = 0.0
+                # ─────────────────────────────────────────────────────────
+                # Vectorized peak matching using binary search
+                # ─────────────────────────────────────────────────────────
+                if is_ppm:
+                    ppm_err = tolerance / 1000000.0
+                    match_errs = theo_mz_array * ppm_err * 0.5
+                else:
+                    match_errs = np.full(len(theo_mz_array), tolerance * 0.5)
 
-                    if ion_type.startswith("b"):
-                        intensity_m = model.get_log_np_density_int(
-                            "b", peak["norm_intensity"], self.charge
-                        )
-                    elif ion_type.startswith("y"):
-                        intensity_m = model.get_log_np_density_int(
-                            "y", peak["norm_intensity"], self.charge
-                        )
+                lower_bounds = theo_mz_array - match_errs
+                upper_bounds = theo_mz_array + match_errs
 
+                # Binary search for all theoretical masses at once
+                left_indices = np.searchsorted(mz_sorted, lower_bounds, side='left')
+                right_indices = np.searchsorted(mz_sorted, upper_bounds, side='right')
+
+                # Track best match for each spectrum peak
+                best_match_by_peak = {}  # orig_idx -> (ion_idx, mass_diff)
+
+                for ion_idx in range(len(theo_mz_array)):
+                    left = left_indices[ion_idx]
+                    right = right_indices[ion_idx]
+
+                    if left >= right:
+                        continue
+
+                    # Get candidates
+                    sorted_candidate_indices = np.arange(left, right)
+                    original_indices = sort_indices[sorted_candidate_indices]
+                    candidate_intensities = intensities[original_indices]
+
+                    # Find most intense peak
+                    best_local_idx = np.argmax(candidate_intensities)
+                    best_orig_idx = original_indices[best_local_idx]
+                    mass_diff = mz_values[best_orig_idx] - theo_mz_array[ion_idx]
+
+                    # Keep best match per peak
+                    if best_orig_idx in best_match_by_peak:
+                        _, old_mass_diff = best_match_by_peak[best_orig_idx]
+                        if abs(mass_diff) < abs(old_mass_diff):
+                            best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff)
+                    else:
+                        best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff)
+
+                # ─────────────────────────────────────────────────────────
+                # Score matched peaks
+                # ─────────────────────────────────────────────────────────
+                final_score = 0.0
+
+                for orig_idx, (ion_idx, mass_diff) in best_match_by_peak.items():
+                    ion_type = ion_types[ion_idx]
+                    peak_norm_intensity = norm_intensity[orig_idx]
+
+                    # Intensity score
+                    intensity_m = model.get_log_np_density_int(
+                        ion_type, peak_norm_intensity, self.charge
+                    )
                     intensity_u = model.get_log_np_density_int(
-                        "n", peak["norm_intensity"], self.charge
+                        "n", peak_norm_intensity, self.charge
                     )
 
-                    # Calculate distance score
-                    dist_m = 0.0
-                    dist_u = 0.0
-
-                    if ion_type.startswith("b"):
-                        dist_m = model.get_log_np_density_dist_pos(
-                            peak["mass_diff"], self.charge
-                        )
-                    elif ion_type.startswith("y"):
-                        dist_m = model.get_log_np_density_dist_pos(
-                            peak["mass_diff"], self.charge
-                        )
-
-                    # For unmatched ions, use uniform distribution
+                    # Distance score
+                    dist_m = model.get_log_np_density_dist_pos(mass_diff, self.charge)
                     dist_u = 0.0
 
                     # Calculate score
                     intensity_score = intensity_m - intensity_u
                     distance_score = dist_m - dist_u
 
-                    # Handle invalid values
                     if np.isnan(intensity_score) or np.isinf(intensity_score):
                         intensity_score = 0.0
                     if np.isnan(distance_score) or np.isinf(distance_score):
                         distance_score = 0.0
 
-                    # Calculate final score: direct addition
                     peak_score = intensity_score + distance_score
-
-                    # If score is negative, set to 0
                     if peak_score < 0:
                         peak_score = 0.0
 
-                    # Add to total score
                     final_score += peak_score
 
                 logger.debug(
@@ -736,10 +851,8 @@ class PSM:
                 # Store scores
                 if is_decoy:
                     self.neg_permutation_score_map[perm] = final_score
-                    logger.debug(f"Stored decoy score: {perm} -> {final_score:.6f}")
                 else:
                     self.pos_permutation_score_map[perm] = final_score
-                    logger.debug(f"Stored real score: {perm} -> {final_score:.6f}")
 
             # Collect all scores into a list
             all_scores = []
@@ -952,6 +1065,134 @@ class PSM:
         if aa_upper in AA_MASSES:
             return AA_MASSES[aa_upper]
         return 110.0  # Default mass
+
+    def _get_unmodified_sequence(self) -> str:
+        """
+        Get the unmodified amino acid sequence (uppercase, no brackets).
+        This is the same for all permutations of a PSM.
+
+        Returns:
+            str: Unmodified sequence like "AAASPEPTIDEK"
+        """
+        # Use the first permutation or original peptide sequence
+        if self.pos_permutation_score_map:
+            perm = next(iter(self.pos_permutation_score_map.keys()))
+        else:
+            perm = self.peptide.mod_peptide
+
+        # Extract unmodified sequence
+        unmod_seq = []
+        i = 0
+        while i < len(perm):
+            if perm[i:i+9] == "(Phospho)":
+                i += 9
+            elif perm[i:i+14] == "(PhosphoDecoy)":
+                i += 14
+            elif perm[i:i+11] == "(Oxidation)":
+                i += 11
+            elif perm[i] == '(' or perm[i] == ')':
+                i += 1
+            else:
+                # Convert to uppercase (handles lowercase phospho markers)
+                unmod_seq.append(perm[i].upper())
+                i += 1
+
+        return ''.join(unmod_seq)
+
+    def _compute_backbone_cumsum(self, unmod_seq: str) -> np.ndarray:
+        """
+        Compute cumulative masses of unmodified backbone sequence.
+        cumsum[i] = mass of first i residues (unmodified).
+
+        Args:
+            unmod_seq: Unmodified sequence like "AAASPEPTIDEK"
+
+        Returns:
+            np.ndarray: Cumulative mass array of length n+1
+        """
+        n = len(unmod_seq)
+        cumsum = np.zeros(n + 1)
+        for i, aa in enumerate(unmod_seq):
+            if aa in AA_MASSES:
+                cumsum[i + 1] = cumsum[i] + AA_MASSES[aa]
+            elif aa in DECOY_AA_MAP:
+                # Decoy amino acid - use the mapped real AA mass
+                real_aa = DECOY_AA_MAP[aa]
+                if real_aa in AA_MASSES:
+                    cumsum[i + 1] = cumsum[i] + AA_MASSES[real_aa]
+                else:
+                    logger.warning(f"Unknown decoy amino acid mapping: {aa} -> {real_aa}")
+                    cumsum[i + 1] = cumsum[i]
+            else:
+                logger.warning(f"Unknown amino acid in sequence: '{aa}' at position {i}")
+                cumsum[i + 1] = cumsum[i]
+        return cumsum
+
+    def _get_mod_positions_from_perm(self, perm: str) -> Tuple[List[int], List[int], bool]:
+        """
+        Extract modification positions from a permutation string.
+
+        Args:
+            perm: Permutation string like "AAAsPEPTIDEK" or with decoy markers
+
+        Returns:
+            Tuple of (phospho_positions, decoy_positions, is_decoy)
+            - phospho_positions: list of positions with phospho mods (lowercase s/t/y)
+            - decoy_positions: list of positions with decoy mods
+            - is_decoy: True if this is a decoy permutation
+        """
+        phospho_positions = []
+        decoy_positions = []
+        is_decoy = False
+
+        pos = 0  # Position in unmodified sequence
+        i = 0
+        while i < len(perm):
+            if perm[i:i+9] == "(Phospho)":
+                i += 9
+            elif perm[i:i+14] == "(PhosphoDecoy)":
+                i += 14
+            elif perm[i:i+11] == "(Oxidation)":
+                i += 11
+            elif perm[i] == '(' or perm[i] == ')':
+                i += 1
+            else:
+                aa = perm[i]
+                if aa.islower() and aa.upper() in "STY":
+                    phospho_positions.append(pos)
+                elif aa in DECOY_AA_MAP:
+                    decoy_positions.append(pos)
+                    is_decoy = True
+                pos += 1
+                i += 1
+
+        return phospho_positions, decoy_positions, is_decoy
+
+    def _precompute_nl_eligibility(self, unmod_seq: str) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Pre-compute which cleavage positions can have neutral losses.
+        Based on presence of S, T, Y in the fragment.
+
+        Args:
+            unmod_seq: Unmodified sequence
+
+        Returns:
+            Tuple of (b_can_nl, y_can_nl) boolean arrays
+            - b_can_nl[i]: True if b-ion at cleavage i can have neutral loss
+            - y_can_nl[i]: True if y-ion at cleavage i can have neutral loss
+        """
+        n = len(unmod_seq)
+        b_can_nl = np.zeros(n + 1, dtype=bool)
+        y_can_nl = np.zeros(n + 1, dtype=bool)
+
+        # Check each cleavage position
+        for i in range(1, n):
+            prefix = unmod_seq[:i]
+            suffix = unmod_seq[i:]
+            b_can_nl[i] = any(aa in "STY" for aa in prefix)
+            y_can_nl[i] = any(aa in "STY" for aa in suffix)
+
+        return b_can_nl, y_can_nl
 
     def _calc_theoretical_masses(self, perm: str) -> List[float]:
         """
