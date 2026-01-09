@@ -62,6 +62,7 @@ class Peptide:
         config: Dict,
         mod_pep: Optional[str] = None,
         charge: Optional[int] = None,
+        skip_expensive_init: bool = False,
     ):
         """
         Initialize a new Peptide instance.
@@ -71,6 +72,10 @@ class Peptide:
             config: Configuration dictionary
             mod_pep: Modified peptide sequence (optional)
             charge: Charge state (optional)
+            skip_expensive_init: If True, skip permutation generation and ion ladder
+                building during initialization. Use this when creating temporary
+                Peptide objects for peak matching where mod_pos_map will be set
+                externally and ion ladders built afterward.
         """
         self.peptide = peptide  # Original sequence
         self.mod_peptide = mod_pep if mod_pep else peptide  # Modified sequence
@@ -108,10 +113,15 @@ class Peptide:
         self.permutations = []
 
         # Initialize the peptide
-        self._initialize()
+        self._initialize(skip_expensive_init=skip_expensive_init)
 
-    def _initialize(self) -> None:
-        """Initialize the peptide."""
+    def _initialize(self, skip_expensive_init: bool = False) -> None:
+        """Initialize the peptide.
+
+        Args:
+            skip_expensive_init: If True, skip permutation generation and ion ladder
+                building. Used for temporary Peptide objects in peak matching.
+        """
         # Convert modified sequence to Java style (lowercase letters represent modifications)
         if self.mod_peptide and self.mod_peptide != self.peptide:
             # If modified peptide is provided, use it directly
@@ -223,6 +233,10 @@ class Peptide:
 
         # Check if unambiguous (number of potential sites equals number of reported sites)
         self.is_unambiguous = self.num_pps == self.num_rps
+
+        # Skip expensive operations for temporary Peptide objects used in peak matching
+        if skip_expensive_init:
+            return
 
         # Generate all possible permutations
         perms = self.get_permutations()
@@ -682,6 +696,9 @@ class Peptide:
         """
         Match peaks in the spectrum to theoretical fragment ions.
 
+        Uses vectorized NumPy operations with searchsorted for O(log n)
+        binary search instead of O(n) linear search per ion.
+
         Args:
             spectrum: Spectrum object
             config: Optional configuration dictionary (if None, uses self.config)
@@ -691,101 +708,118 @@ class Peptide:
         """
         use_config = config if config is not None else self.config
 
-        matched_peaks = []
-        best_match_map = {}  # mz -> peak
+        # Get spectrum data once (avoid repeated calls)
+        mz_values, intensities = spectrum.get_peaks()
+        if len(mz_values) == 0:
+            return []
+
+        # Pre-compute spectrum arrays for vectorized access
+        norm_intensity = spectrum.norm_intensity
+        max_i = spectrum.max_i
+
+        # Ensure m/z values are sorted and get sort indices
+        # Most spectra are already sorted, but we need indices for lookups
+        if spectrum._mz_sorted is None:
+            spectrum._update_sorted_indices()
+        mz_sorted = spectrum._mz_sorted
+        sort_indices = spectrum._mz_sorted_indices
 
         tolerance = use_config.get("fragment_mass_tolerance", 0.5)
+        is_ppm = use_config.get("ms2_tolerance_units", "Da") == "ppm"
 
+        # Combine y and b ions for batch processing
         y_ions = self.get_ion_ladder("y")
-        for ion_str, theo_mz in y_ions.items():
-            if use_config.get("ms2_tolerance_units", "Da") == "ppm":
-                ppm_err = tolerance / 1000000.0
-                match_err = theo_mz * ppm_err
-            else:
-                match_err = tolerance
-
-            match_err *= 0.5  # Split tolerance window
-            a = theo_mz - match_err
-            b = theo_mz + match_err
-
-            cand_matches = []
-            mz_values, intensities = spectrum.get_peaks()
-            for i in range(len(mz_values)):
-                if a <= mz_values[i] <= b:
-                    peak = {
-                        "mz": mz_values[i],
-                        "intensity": intensities[i],
-                        "rel_intensity": (intensities[i] / spectrum.max_i) * 100.0,
-                        "norm_intensity": spectrum.norm_intensity[i],
-                        "mass_diff": mz_values[i] - theo_mz,  # obs - expected
-                        "matched": True,
-                        "matched_ion_str": ion_str,
-                        "matched_ion_mz": theo_mz,
-                        "ion_type": "y",
-                    }
-                    cand_matches.append(peak)
-
-            if cand_matches:
-                cand_matches.sort(key=lambda x: x["intensity"], reverse=True)
-                best_peak = cand_matches[0]
-
-                if best_peak["mz"] in best_match_map:
-                    old_peak = best_match_map[best_peak["mz"]]
-                    if abs(old_peak["mass_diff"]) > abs(best_peak["mass_diff"]):
-                        best_match_map[best_peak["mz"]] = best_peak
-                else:
-                    best_match_map[best_peak["mz"]] = best_peak
-
         b_ions = self.get_ion_ladder("b")
+
+        # Build arrays of theoretical m/z values and metadata
+        all_ion_strs = []
+        all_theo_mz = []
+        all_ion_types = []
+
+        for ion_str, theo_mz in y_ions.items():
+            all_ion_strs.append(ion_str)
+            all_theo_mz.append(theo_mz)
+            all_ion_types.append("y")
+
         for ion_str, theo_mz in b_ions.items():
-            if use_config.get("ms2_tolerance_units", "Da") == "ppm":
-                ppm_err = tolerance / 1000000.0
-                match_err = theo_mz * ppm_err
+            all_ion_strs.append(ion_str)
+            all_theo_mz.append(theo_mz)
+            all_ion_types.append("b")
+
+        if not all_theo_mz:
+            return []
+
+        # Convert to numpy array for vectorized operations
+        theo_mz_array = np.array(all_theo_mz)
+
+        # Vectorized tolerance calculation
+        if is_ppm:
+            ppm_err = tolerance / 1000000.0
+            match_errs = theo_mz_array * ppm_err * 0.5
+        else:
+            match_errs = np.full(len(theo_mz_array), tolerance * 0.5)
+
+        # Calculate search bounds for all ions at once
+        lower_bounds = theo_mz_array - match_errs
+        upper_bounds = theo_mz_array + match_errs
+
+        # Use searchsorted for O(log n) binary search to find candidate ranges
+        left_indices = np.searchsorted(mz_sorted, lower_bounds, side='left')
+        right_indices = np.searchsorted(mz_sorted, upper_bounds, side='right')
+
+        # Track best match for each spectrum peak (by original index)
+        # Store: original_idx -> (ion_idx, mass_diff, intensity)
+        best_match_by_peak = {}
+
+        # Process each ion's candidate matches
+        for ion_idx in range(len(all_theo_mz)):
+            left = left_indices[ion_idx]
+            right = right_indices[ion_idx]
+
+            if left >= right:
+                continue  # No candidates in range
+
+            # Get candidate indices in sorted array
+            sorted_candidate_indices = np.arange(left, right)
+
+            # Map back to original indices
+            original_indices = sort_indices[sorted_candidate_indices]
+
+            # Get intensities for candidates
+            candidate_intensities = intensities[original_indices]
+
+            # Find the most intense peak among candidates
+            best_local_idx = np.argmax(candidate_intensities)
+            best_orig_idx = original_indices[best_local_idx]
+            best_intensity = candidate_intensities[best_local_idx]
+
+            theo_mz = all_theo_mz[ion_idx]
+            mass_diff = mz_values[best_orig_idx] - theo_mz
+
+            # Check if this peak was already matched to another ion
+            if best_orig_idx in best_match_by_peak:
+                _, old_mass_diff, _ = best_match_by_peak[best_orig_idx]
+                # Keep the match with smaller mass error
+                if abs(mass_diff) < abs(old_mass_diff):
+                    best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff, best_intensity)
             else:
-                match_err = tolerance
+                best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff, best_intensity)
 
-            match_err *= 0.5  # Split tolerance window
-            a = theo_mz - match_err
-            b = theo_mz + match_err
-
-            cand_matches = []
-            mz_values, intensities = spectrum.get_peaks()
-            for i in range(len(mz_values)):
-                if a <= mz_values[i] <= b:
-                    peak = {
-                        "mz": mz_values[i],
-                        "intensity": intensities[i],
-                        "rel_intensity": (intensities[i] / spectrum.max_i) * 100.0,
-                        "norm_intensity": spectrum.norm_intensity[i],
-                        "mass_diff": mz_values[i] - theo_mz,  # obs - expected
-                        "matched": True,
-                        "matched_ion_str": ion_str,
-                        "matched_ion_mz": theo_mz,
-                        "ion_type": "b",
-                    }
-                    cand_matches.append(peak)
-
-            if cand_matches:
-                cand_matches.sort(key=lambda x: x["intensity"], reverse=True)
-                best_peak = cand_matches[0]
-
-                if best_peak["mz"] in best_match_map:
-                    old_peak = best_match_map[best_peak["mz"]]
-                    if abs(old_peak["mass_diff"]) > abs(best_peak["mass_diff"]):
-                        best_match_map[best_peak["mz"]] = best_peak
-                else:
-                    best_match_map[best_peak["mz"]] = best_peak
-
-        matched_peaks = list(best_match_map.values())
-
-        if use_config.get("debug", False):
-            output_data = {
-                "matched_peaks": matched_peaks,
-                "theoretical_ions": {"y_ions": y_ions, "b_ions": b_ions},
-                "peptide": self.peptide,
-                "modified_peptide": self.mod_peptide,
-                "charge": self.charge,
+        # Build final matched peaks list (only create dicts for final matches)
+        matched_peaks = []
+        for orig_idx, (ion_idx, mass_diff, _) in best_match_by_peak.items():
+            peak = {
+                "mz": mz_values[orig_idx],
+                "intensity": intensities[orig_idx],
+                "rel_intensity": (intensities[orig_idx] / max_i) * 100.0,
+                "norm_intensity": norm_intensity[orig_idx],
+                "mass_diff": mass_diff,
+                "matched": True,
+                "matched_ion_str": all_ion_strs[ion_idx],
+                "matched_ion_mz": all_theo_mz[ion_idx],
+                "ion_type": all_ion_types[ion_idx],
             }
+            matched_peaks.append(peak)
 
         return matched_peaks
 

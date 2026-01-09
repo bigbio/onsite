@@ -1345,30 +1345,30 @@ class PSM:
         Returns:
             List of matched peaks
         """
-        # Create temporary Peptide object
-
         # Get modification site mapping
         mod_map = self._get_mod_map(perm)
 
-        # Use the input sequence directly, no format conversion needed
-        # Because generate_real_permutations now generates correct lowercase format
-        processed_perm = perm
-
-        # Create temporary Peptide object and initialize
-        temp_peptide = Peptide(processed_perm, self.config, charge=self.charge)
+        # Create temporary Peptide object with skip_expensive_init=True
+        # This avoids redundant permutation generation and ion ladder building
+        # since we'll set mod_pos_map externally and build ion ladders once
+        temp_peptide = Peptide(
+            perm, self.config, charge=self.charge, skip_expensive_init=True
+        )
         temp_peptide.mod_pos_map = mod_map
-        temp_peptide.build_ion_ladders()  # Build ion ladders
+        temp_peptide.build_ion_ladders()  # Build ion ladders with correct mod_pos_map
 
-        # Temporarily modify configuration to use input tolerance
-        original_tolerance = self.config.get("fragment_mass_tolerance", 0.1)
-        temp_config = self.config.copy()
-        temp_config["fragment_mass_tolerance"] = tolerance
+        # Pass tolerance directly instead of copying entire config
+        # Create minimal config override for tolerance
+        if tolerance != self.config.get("fragment_mass_tolerance", 0.5):
+            temp_config = {
+                **self.config,
+                "fragment_mass_tolerance": tolerance,
+            }
+        else:
+            temp_config = self.config
 
-        # Call Peptide's match_peaks method with modified configuration
+        # Call Peptide's match_peaks method
         matched_peaks = temp_peptide.match_peaks(self.spectrum, temp_config)
-
-        # Clean up temporary object
-        temp_peptide = None
 
         return matched_peaks
 
