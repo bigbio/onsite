@@ -47,7 +47,7 @@ onsite provides three complementary algorithms for PTM localization:
 ### Prerequisites
 
 - Python 3.11+
-- PyOpenMS 3.4.0+
+- PyOpenMS 3.5.0+
 - NumPy 2.3.2+
 - SciPy 1.16.1+
 

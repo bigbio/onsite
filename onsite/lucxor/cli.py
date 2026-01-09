@@ -18,6 +18,7 @@ from pyopenms import (
     MzMLFile,
     MSExperiment,
     PeptideIdentification,
+    PeptideIdentificationList,
     ProteinIdentification,
     IDFilter,
 )
@@ -324,16 +325,16 @@ class PyLuciPHOr2:
 
     def load_input_files(
         self, input_id: str, input_spectrum: str
-    ) -> Tuple[List[PeptideIdentification], List[ProteinIdentification], MSExperiment]:
+    ) -> Tuple[PeptideIdentificationList, List[ProteinIdentification], MSExperiment]:
         """Load input files"""
         # Load identifications
-        pep_ids = []
+        pep_ids = PeptideIdentificationList()
         prot_ids = []
         IdXMLFile().load(input_id, prot_ids, pep_ids)
 
         if not pep_ids:
             self.logger.warning("No peptide identifications found in input file")
-            return [], [], None
+            return PeptideIdentificationList(), [], None
 
         # Keep only best hits
         IDFilter().keepNBestHits(pep_ids, 1)
@@ -641,7 +642,7 @@ class PyLuciPHOr2:
         self.logger.info("Second round calculation completed")
 
         # 6. Write results to output file (using second round calculation results)
-        new_pep_ids = []
+        new_pep_ids = PeptideIdentificationList()
         phospho_count = 0
         for psm in all_psms:
             idx = all_psms.index(psm)
@@ -681,7 +682,6 @@ class PyLuciPHOr2:
                 new_pep_id.setScoreType("Luciphor_delta_score")
                 new_pep_id.setHigherScoreBetter(True)
                 new_pep_id.setHits([hit])
-                new_pep_id.assignRanks()
                 new_pep_ids.append(new_pep_id)
 
                 # Count phosphorylated peptides

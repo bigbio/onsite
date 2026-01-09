@@ -1,4 +1,4 @@
 # Core dependencies
-pyopenms==3.4.0
+pyopenms>=3.5.0
 numpy>=2.3.2
 scipy>=1.16.1
