@@ -143,7 +143,7 @@ def ascore(
 
         # Main processing loop
         start_time = time.time()
-        processed_peptide_ids = []
+        processed_peptide_ids = PeptideIdentificationList()
 
         # Process each PeptideIdentification (optionally in parallel)
         if max(1, int(threads)) == 1:
@@ -337,7 +337,7 @@ def load_identifications(idxml_file):
     """Load identification results"""
     print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
     protein_ids = []
-    peptide_ids = []
+    peptide_ids = PeptideIdentificationList()
     IdXMLFile().load(idxml_file, protein_ids, peptide_ids)
     print(f"Loaded {len(peptide_ids)} peptide identifications")
     return protein_ids, peptide_ids
