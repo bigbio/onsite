@@ -682,7 +682,7 @@ class PyLuciPHOr2:
                 new_pep_id.setScoreType("Luciphor_delta_score")
                 new_pep_id.setHigherScoreBetter(True)
                 new_pep_id.setHits([hit])
-                new_pep_ids.append(new_pep_id)
+                new_pep_ids.push_back(new_pep_id)
 
                 # Count phosphorylated peptides
                 try:

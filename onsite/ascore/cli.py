@@ -165,7 +165,7 @@ def ascore(
                     )
                     
                     if result["status"] == "success":
-                        processed_peptide_ids.append(result["new_pid"])
+                        processed_peptide_ids.push_back(result["new_pid"])
                         stats["processed"] += 1
                         phospho_count = len([h for h in result["new_pid"].getHits() 
                                           if "(Phospho)" in h.getSequence().toString()])
@@ -277,7 +277,7 @@ def ascore(
                         new_hits.append(new_hit)
 
                     new_pid.setHits(new_hits)
-                    processed_peptide_ids.append(new_pid)
+                    processed_peptide_ids.push_back(new_pid)
                     stats["processed"] += 1
                     phospho_count = len([h for h in new_pid.getHits() if "(Phospho)" in h.getSequence().toString()])
                     stats["phospho"] += phospho_count

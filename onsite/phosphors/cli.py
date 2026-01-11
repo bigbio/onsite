@@ -161,7 +161,7 @@ def phosphors(
                         pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, scan_map
                     )
                     if result["status"] == "success":
-                        processed_peptide_ids.append(result["new_pid"])
+                        processed_peptide_ids.push_back(result["new_pid"])
                         stats["processed"] += 1
                         stats["phospho"] += len([h for h in result["new_pid"].getHits() 
                                               if "(Phospho)" in h.getSequence().toString()])
@@ -272,7 +272,7 @@ def phosphors(
                         new_hits.append(new_hit)
 
                     new_pid.setHits(new_hits)
-                    processed_peptide_ids.append(new_pid)
+                    processed_peptide_ids.push_back(new_pid)
                     stats["processed"] += 1
                     stats["phospho"] += len(
                         [
