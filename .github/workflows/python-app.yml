@@ -185,6 +185,23 @@ jobs:
           --threads 1 \
           --min-num-psms-model 50
     
+    - name: Verify reference result files exist
+      run: |
+        # Verify that reference result files exist for comparison
+        echo "Checking reference result files..."
+        ls -lh data/1_lucxor_result.idXML || echo "Warning: LucXor reference file not found"
+        ls -lh data/1_ascore_result.idXML || echo "Warning: AScore reference file not found"
+        ls -lh data/1_phosphors_result.idXML || echo "Warning: PhosphoRS reference file not found"
+    
+    - name: Run algorithm comparison tests
+      run: |
+        # Run algorithm comparison tests to compare new results with reference results
+        # Tests compare at different thresholds:
+        # - LucXor: local_flr < 0.01, 0.05, 0.1 (with q-value < 0.01)
+        # - AScore: AScore >= 3, 15, 20 (with q-value < 0.01)
+        # - PhosphoRS: site probability > 75%, 90%, 99% (with q-value < 0.01)
+        pytest tests/test_algorithm_comparison.py -v -s --tb=short --color=yes
+    
     - name: Upload test outputs as artifacts
       if: always()
       uses: actions/upload-artifact@v4
