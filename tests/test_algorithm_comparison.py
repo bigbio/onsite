@@ -13,8 +13,9 @@ Testing Framework:
 Filtering criteria:
 - q-value < 0.01 (prerequisite for all algorithms)
 - LucXor: local_flr < 0.01 (strict), 0.05 (moderate), 0.1 (lenient)
-- AScore: AScore >= 20 (strict), 15 (moderate), 3 (lenient)
-- PhosphoRS: all site probabilities > 99% (strict), 90% (moderate), 75% (lenient)
+- AScore: all AScore values >= 20 (strict), 15 (moderate), 3 (lenient)
+- PhosphoRS: all top-N site probabilities > 99% (strict), 90% (moderate), 75% (lenient)
+  where N = number of phosphorylations in the peptide
 """
 
 import pytest
@@ -149,14 +150,9 @@ def filter_ascore(peptide_data: Dict[str, Dict], q_value_threshold: float, ascor
 def filter_phosphors(peptide_data: Dict[str, Dict], q_value_threshold: float, prob_threshold: float) -> Set[str]:
     """Filter peptides by PhosphoRS criteria.
     
-    For PhosphoRS, we check if the highest probability site(s) exceed the threshold.
-    The number of sites to check equals the number of phosphorylations in the peptide.
-    Since we may not know the exact number of phosphorylations, we check if the maximum
-    probability exceeds the threshold (for single phosphorylation) or if the top N
-    probabilities all exceed the threshold (for multiple phosphorylations).
-    
-    A simpler approach: check if the maximum site probability exceeds the threshold.
-    This indicates at least one site is confidently localized.
+    For PhosphoRS, we check if ALL top-N site probabilities exceed the threshold,
+    where N is the number of phosphorylations in the peptide. This ensures that
+    all phosphorylation sites are confidently localized, not just one.
     
     Args:
         prob_threshold: Probability threshold as percentage (e.g., 75 for 75%)
@@ -164,14 +160,32 @@ def filter_phosphors(peptide_data: Dict[str, Dict], q_value_threshold: float, pr
     filtered = set()
     # Convert percentage threshold to decimal
     prob_threshold_decimal = prob_threshold / 100.0
+    
     for key, data in peptide_data.items():
         q_value = data.get('q_value')
         site_probs = data.get('phosphors_site_probs', [])
+        sequence = data.get('sequence', '')
         
         if q_value is not None and q_value < q_value_threshold:
-            # Check if the maximum site probability exceeds the threshold
-            if site_probs and max(site_probs) > prob_threshold_decimal:
-                filtered.add(key)
+            if not site_probs:
+                continue
+            
+            # Count phosphorylations (both regular and decoy)
+            # OpenMS format: "S(Phospho)", "T(Phospho)", "Y(Phospho)", "A(PhosphoDecoy)"
+            phospho_count = sequence.count('(Phospho)')  # Matches both Phospho and PhosphoDecoy
+            
+            if phospho_count == 0:
+                continue
+            
+            # Sort probabilities in descending order and check top N
+            sorted_probs = sorted(site_probs, reverse=True)
+            
+            # Check if the top N probabilities (where N = phospho_count) all exceed threshold
+            if len(sorted_probs) >= phospho_count:
+                top_n_probs = sorted_probs[:phospho_count]
+                if all(prob > prob_threshold_decimal for prob in top_n_probs):
+                    filtered.add(key)
+    
     return filtered
 
 
@@ -225,10 +239,21 @@ class TestAlgorithmComparison:
                     "--min-num-psms-model", "50",
                     "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y),PhosphoDecoy(A)",
                 ],
+                catch_exceptions=False,
             )
             
-            if result.exit_code != 0 or not os.path.exists(new_output):
-                pytest.skip("LucXor execution failed")
+            if result.exit_code != 0:
+                pytest.fail(
+                    f"LucXor command execution failed (exit_code={result.exit_code}).\n"
+                    f"Output:\n{result.output}\n"
+                    f"Exception: {result.exception if hasattr(result, 'exception') else 'N/A'}"
+                )
+            
+            if not os.path.exists(new_output):
+                pytest.fail(
+                    f"LucXor output file not created: {new_output}\n"
+                    f"Command output:\n{result.output}"
+                )
             
             # Load results
             _, _, new_data = load_idxml_with_scores(new_output)
@@ -330,10 +355,21 @@ class TestAlgorithmComparison:
                     "--threads", "1",
                     "--add-decoys",
                 ],
+                catch_exceptions=False,
             )
             
-            if result.exit_code != 0 or not os.path.exists(new_output):
-                pytest.skip("AScore execution failed")
+            if result.exit_code != 0:
+                pytest.fail(
+                    f"AScore command execution failed (exit_code={result.exit_code}).\n"
+                    f"Output:\n{result.output}\n"
+                    f"Exception: {result.exception if hasattr(result, 'exception') else 'N/A'}"
+                )
+            
+            if not os.path.exists(new_output):
+                pytest.fail(
+                    f"AScore output file not created: {new_output}\n"
+                    f"Command output:\n{result.output}"
+                )
             
             # Load results
             _, _, new_data = load_idxml_with_scores(new_output)
@@ -435,10 +471,21 @@ class TestAlgorithmComparison:
                     "--threads", "1",
                     "--add-decoys",
                 ],
+                catch_exceptions=False,
             )
             
-            if result.exit_code != 0 or not os.path.exists(new_output):
-                pytest.skip("PhosphoRS execution failed")
+            if result.exit_code != 0:
+                pytest.fail(
+                    f"PhosphoRS command execution failed (exit_code={result.exit_code}).\n"
+                    f"Output:\n{result.output}\n"
+                    f"Exception: {result.exception if hasattr(result, 'exception') else 'N/A'}"
+                )
+            
+            if not os.path.exists(new_output):
+                pytest.fail(
+                    f"PhosphoRS output file not created: {new_output}\n"
+                    f"Command output:\n{result.output}"
+                )
             
             # Load results
             _, _, new_data = load_idxml_with_scores(new_output)
