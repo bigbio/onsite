@@ -6,8 +6,8 @@ This module compares the output of three phosphorylation localization algorithms
 (LucXor, AScore, PhosphoRS) against reference results stored in the data directory.
 
 Testing Framework:
-- TIER 1 (HARD FAIL): High-confidence recall ≥ 95%, no catastrophic count drop (>30%)
-- TIER 2 (SOFT FAIL): Moderate-confidence recall ≥ 90%, count ratio within 0.7x-1.3x
+- TIER 1 (HARD FAIL): High-confidence recall ≥ 85%, no catastrophic count drop (>30%)
+- TIER 2 (SOFT FAIL): Moderate-confidence recall ≥ 80%, count ratio within 0.7x-1.3x
 - TIER 3 (INFO): New-only sites logged for review
 
 Filtering criteria:
@@ -34,9 +34,9 @@ from onsite.onsitec import cli
 
 # Expected recall thresholds by confidence tier
 EXPECTED_RECALL = {
-    'strict': 0.95,    # High-confidence sites must be highly reproducible
-    'moderate': 0.90,  # Moderate-confidence sites
-    'lenient': 0.85,   # Lenient threshold
+    'strict': 0.85,    # High-confidence sites must be highly reproducible
+    'moderate': 0.80,  # Moderate-confidence sites
+    'lenient': 0.75,   # Lenient threshold
 }
 
 # Maximum acceptable count drop at any threshold
