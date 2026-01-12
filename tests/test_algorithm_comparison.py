@@ -226,6 +226,7 @@ class TestAlgorithmComparison:
                     "--fragment-error-units", "Da",
                     "--threads", "1",
                     "--min-num-psms-model", "50",
+                    "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y),PhosphoDecoy(A)",
                 ],
             )
         elif algorithm == "ascore":
@@ -452,6 +453,7 @@ class TestAlgorithmComparisonSummary:
                     "--fragment-error-units", "Da",
                     "--threads", "1",
                     "--min-num-psms-model", "50",
+                    "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y),PhosphoDecoy(A)",
                 ],
             )
             
