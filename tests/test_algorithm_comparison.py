@@ -155,15 +155,20 @@ def filter_phosphors(peptide_data: Dict[str, Dict], q_value_threshold: float, pr
     
     A simpler approach: check if the maximum site probability exceeds the threshold.
     This indicates at least one site is confidently localized.
+    
+    Args:
+        prob_threshold: Probability threshold as percentage (e.g., 75 for 75%)
     """
     filtered = set()
+    # Convert percentage threshold to decimal
+    prob_threshold_decimal = prob_threshold / 100.0
     for key, data in peptide_data.items():
         q_value = data.get('q_value')
         site_probs = data.get('phosphors_site_probs', [])
         
         if q_value is not None and q_value < q_value_threshold:
             # Check if the maximum site probability exceeds the threshold
-            if site_probs and max(site_probs) > prob_threshold:
+            if site_probs and max(site_probs) > prob_threshold_decimal:
                 filtered.add(key)
     return filtered
 
@@ -286,6 +291,9 @@ class TestAlgorithmComparison:
             print("LucXor Comparison Results (q-value < 0.01)")
             print("=" * 80)
             
+            # Track results for assertions
+            all_results = []
+            
             for flr_threshold in flr_thresholds:
                 new_filtered = filter_lucxor(new_data, q_value_threshold, flr_threshold)
                 ref_filtered = filter_lucxor(ref_data, q_value_threshold, flr_threshold)
@@ -299,12 +307,28 @@ class TestAlgorithmComparison:
                 print(f"  New only: {len(new_only)}")
                 print(f"  Reference only: {len(ref_only)}")
                 
+                overlap_pct = 0
                 if len(new_filtered) > 0 or len(ref_filtered) > 0:
                     overlap_pct = len(overlap) / max(len(new_filtered), len(ref_filtered), 1) * 100
                     print(f"  Overlap percentage: {overlap_pct:.1f}%")
+                
+                all_results.append({
+                    'threshold': flr_threshold,
+                    'new_count': len(new_filtered),
+                    'ref_count': len(ref_filtered),
+                    'overlap_pct': overlap_pct
+                })
             
-            # Test always passes - human review required
-            assert True, "LucXor comparison completed - review results above"
+            # Assertions for regression protection
+            # At the strictest threshold (FLR < 0.01), require at least 80% overlap
+            strictest = all_results[0]
+            assert strictest['overlap_pct'] >= 80, \
+                f"Low overlap ({strictest['overlap_pct']:.1f}%) at strictest threshold (FLR < {strictest['threshold']})"
+            
+            # Ensure we have at least some results at the most lenient threshold
+            lenient = all_results[-1]
+            assert lenient['new_count'] > 0 or lenient['ref_count'] > 0, \
+                "No results found at most lenient threshold (FLR < 0.1)"
     
     def test_ascore_comparison(self, mzml_file, idxml_file, ref_ascore_file):
         """Test AScore results comparison at different score thresholds."""
@@ -330,6 +354,9 @@ class TestAlgorithmComparison:
             print("AScore Comparison Results (q-value < 0.01)")
             print("=" * 80)
             
+            # Track results for assertions
+            all_results = []
+            
             for ascore_threshold in ascore_thresholds:
                 new_filtered = filter_ascore(new_data, q_value_threshold, ascore_threshold)
                 ref_filtered = filter_ascore(ref_data, q_value_threshold, ascore_threshold)
@@ -343,12 +370,28 @@ class TestAlgorithmComparison:
                 print(f"  New only: {len(new_only)}")
                 print(f"  Reference only: {len(ref_only)}")
                 
+                overlap_pct = 0
                 if len(new_filtered) > 0 or len(ref_filtered) > 0:
                     overlap_pct = len(overlap) / max(len(new_filtered), len(ref_filtered), 1) * 100
                     print(f"  Overlap percentage: {overlap_pct:.1f}%")
+                
+                all_results.append({
+                    'threshold': ascore_threshold,
+                    'new_count': len(new_filtered),
+                    'ref_count': len(ref_filtered),
+                    'overlap_pct': overlap_pct
+                })
             
-            # Test always passes - human review required
-            assert True, "AScore comparison completed - review results above"
+            # Assertions for regression protection
+            # At the strictest threshold (AScore >= 20), require at least 80% overlap
+            strictest = all_results[-1]
+            assert strictest['overlap_pct'] >= 80, \
+                f"Low overlap ({strictest['overlap_pct']:.1f}%) at strictest threshold (AScore >= {strictest['threshold']})"
+            
+            # Ensure we have at least some results at the most lenient threshold
+            lenient = all_results[0]
+            assert lenient['new_count'] > 0 or lenient['ref_count'] > 0, \
+                "No results found at most lenient threshold (AScore >= 3)"
     
     def test_phosphors_comparison(self, mzml_file, idxml_file, ref_phosphors_file):
         """Test PhosphoRS results comparison at different probability thresholds."""
@@ -374,6 +417,9 @@ class TestAlgorithmComparison:
             print("PhosphoRS Comparison Results (q-value < 0.01)")
             print("=" * 80)
             
+            # Track results for assertions
+            all_results = []
+            
             for prob_threshold in prob_thresholds:
                 new_filtered = filter_phosphors(new_data, q_value_threshold, prob_threshold)
                 ref_filtered = filter_phosphors(ref_data, q_value_threshold, prob_threshold)
@@ -387,12 +433,28 @@ class TestAlgorithmComparison:
                 print(f"  New only: {len(new_only)}")
                 print(f"  Reference only: {len(ref_only)}")
                 
+                overlap_pct = 0
                 if len(new_filtered) > 0 or len(ref_filtered) > 0:
                     overlap_pct = len(overlap) / max(len(new_filtered), len(ref_filtered), 1) * 100
                     print(f"  Overlap percentage: {overlap_pct:.1f}%")
+                
+                all_results.append({
+                    'threshold': prob_threshold,
+                    'new_count': len(new_filtered),
+                    'ref_count': len(ref_filtered),
+                    'overlap_pct': overlap_pct
+                })
             
-            # Test always passes - human review required
-            assert True, "PhosphoRS comparison completed - review results above"
+            # Assertions for regression protection
+            # At the strictest threshold (prob > 99%), require at least 80% overlap
+            strictest = all_results[-1]
+            assert strictest['overlap_pct'] >= 80, \
+                f"Low overlap ({strictest['overlap_pct']:.1f}%) at strictest threshold (prob > {strictest['threshold']}%)"
+            
+            # Ensure we have at least some results at the most lenient threshold
+            lenient = all_results[0]
+            assert lenient['new_count'] > 0 or lenient['ref_count'] > 0, \
+                "No results found at most lenient threshold (prob > 75%)"
 
 
 class TestAlgorithmComparisonSummary:
