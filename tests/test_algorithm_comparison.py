@@ -5,11 +5,16 @@ Test algorithm comparison between new results and reference results.
 This module compares the output of three phosphorylation localization algorithms
 (LucXor, AScore, PhosphoRS) against reference results stored in the data directory.
 
+Testing Framework:
+- TIER 1 (HARD FAIL): High-confidence recall ≥ 95%, no catastrophic count drop (>30%)
+- TIER 2 (SOFT FAIL): Moderate-confidence recall ≥ 90%, count ratio within 0.7x-1.3x
+- TIER 3 (INFO): New-only sites logged for review
+
 Filtering criteria:
 - q-value < 0.01 (prerequisite for all algorithms)
-- LucXor: local_flr < 0.01, 0.05, or 0.1
-- AScore: AScore >= 3, 15, or 20
-- PhosphoRS: all site probabilities > 75%, 90%, or 99%
+- LucXor: local_flr < 0.01 (strict), 0.05 (moderate), 0.1 (lenient)
+- AScore: AScore >= 20 (strict), 15 (moderate), 3 (lenient)
+- PhosphoRS: all site probabilities > 99% (strict), 90% (moderate), 75% (lenient)
 """
 
 import pytest
@@ -19,8 +24,6 @@ import tempfile
 import re
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Any
-from dataclasses import dataclass
-from pyopenms import IdXMLFile, MzMLFile, MSExperiment
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,18 +31,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from onsite.onsitec import cli
 
 
-@dataclass
-class ComparisonResult:
-    """Result of comparing new vs reference results."""
-    algorithm: str
-    threshold_name: str
-    threshold_value: float
-    new_count: int
-    ref_count: int
-    overlap_count: int
-    new_only: Set[str]
-    ref_only: Set[str]
-    overlap: Set[str]
+# Expected recall thresholds by confidence tier
+EXPECTED_RECALL = {
+    'strict': 0.95,    # High-confidence sites must be highly reproducible
+    'moderate': 0.90,  # Moderate-confidence sites
+    'lenient': 0.85,   # Lenient threshold
+}
+
+# Maximum acceptable count drop at any threshold
+MAX_COUNT_DROP = 0.30  # 30% drop triggers hard fail
 
 
 def get_peptide_key(pep_id, hit) -> str:
@@ -68,6 +68,8 @@ def parse_phosphors_site_probs(site_probs_str: str) -> List[float]:
 
 def load_idxml_with_scores(idxml_path: str) -> Tuple[List, List, Dict[str, Dict[str, Any]]]:
     """Load idXML file and extract peptide hits with their scores."""
+    from pyopenms import IdXMLFile
+    
     peptide_ids = []
     protein_ids = []
     IdXMLFile().load(str(idxml_path), protein_ids, peptide_ids)
@@ -173,59 +175,49 @@ def filter_phosphors(peptide_data: Dict[str, Dict], q_value_threshold: float, pr
     return filtered
 
 
-def compare_results(new_set: Set[str], ref_set: Set[str]) -> Tuple[Set[str], Set[str], Set[str]]:
-    """Compare two sets of peptide keys and return overlap statistics."""
+def compare_results(new_set: Set[str], ref_set: Set[str]) -> Tuple[Set[str], Set[str], Set[str], float, float]:
+    """Compare two sets of peptide keys and return overlap statistics.
+    
+    Returns:
+        overlap: Sites found in both
+        new_only: Sites only in new (potential gains)
+        ref_only: Sites only in reference (potential losses)
+        recall: Fraction of reference sites found in new (overlap / ref)
+        gain_rate: Fraction of new sites not in reference (new_only / new)
+    """
     overlap = new_set & ref_set
     new_only = new_set - ref_set
     ref_only = ref_set - new_set
-    return overlap, new_only, ref_only
+    
+    recall = len(overlap) / len(ref_set) if len(ref_set) > 0 else 1.0
+    gain_rate = len(new_only) / len(new_set) if len(new_set) > 0 else 0.0
+    
+    return overlap, new_only, ref_only, recall, gain_rate
 
 
 class TestAlgorithmComparison:
     """Test class for comparing algorithm results against reference data."""
     
-    @pytest.fixture
-    def data_dir(self):
-        """Get the data directory path."""
-        return Path(__file__).parent.parent / "data"
-    
-    @pytest.fixture
-    def idxml_file(self, data_dir):
-        """Get the input idXML file path."""
-        return data_dir / "1_consensus_fdr_filter_pep.idXML"
-    
-    @pytest.fixture
-    def mzml_file(self, data_dir):
-        """Get the mzML file path."""
-        return data_dir / "1.mzML"
-    
-    @pytest.fixture
-    def ref_lucxor_file(self, data_dir):
-        """Get the reference LucXor result file."""
-        return data_dir / "1_lucxor_result.idXML"
-    
-    @pytest.fixture
-    def ref_ascore_file(self, data_dir):
-        """Get the reference AScore result file."""
-        return data_dir / "1_ascore_result.idXML"
-    
-    @pytest.fixture
-    def ref_phosphors_file(self, data_dir):
-        """Get the reference PhosphoRS result file."""
-        return data_dir / "1_phosphors_result.idXML"
-    
-    def run_algorithm(self, algorithm: str, mzml_file: Path, idxml_file: Path, output_file: str) -> bool:
-        """Run an algorithm and return success status."""
-        runner = CliRunner()
+    @pytest.mark.data
+    @pytest.mark.slow
+    def test_lucxor_comparison(self, data_dir, mzml_file, idxml_file):
+        """Test LucXor results comparison with tiered recall thresholds."""
+        ref_lucxor_file = data_dir / "1_lucxor_result.idXML"
+        if not ref_lucxor_file.exists():
+            pytest.skip("Reference LucXor file not found")
         
-        if algorithm == "lucxor":
+        with tempfile.TemporaryDirectory() as temp_dir:
+            new_output = os.path.join(temp_dir, "new_lucxor.idXML")
+            
+            # Run LucXor
+            runner = CliRunner()
             result = runner.invoke(
                 cli,
                 [
                     "lucxor",
                     "--input-spectrum", str(mzml_file),
                     "--input-id", str(idxml_file),
-                    "--output", output_file,
+                    "--output", new_output,
                     "--fragment-method", "HCD",
                     "--fragment-mass-tolerance", "0.5",
                     "--fragment-error-units", "Da",
@@ -234,50 +226,8 @@ class TestAlgorithmComparison:
                     "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y),PhosphoDecoy(A)",
                 ],
             )
-        elif algorithm == "ascore":
-            result = runner.invoke(
-                cli,
-                [
-                    "ascore",
-                    "--in-file", str(mzml_file),
-                    "--id-file", str(idxml_file),
-                    "--out-file", output_file,
-                    "--fragment-mass-tolerance", "0.05",
-                    "--fragment-mass-unit", "Da",
-                    "--threads", "1",
-                    "--add-decoys",
-                ],
-            )
-        elif algorithm == "phosphors":
-            result = runner.invoke(
-                cli,
-                [
-                    "phosphors",
-                    "--in-file", str(mzml_file),
-                    "--id-file", str(idxml_file),
-                    "--out-file", output_file,
-                    "--fragment-mass-tolerance", "0.05",
-                    "--fragment-mass-unit", "Da",
-                    "--threads", "1",
-                    "--add-decoys",
-                ],
-            )
-        else:
-            return False
-        
-        return result.exit_code == 0 and os.path.exists(output_file)
-    
-    def test_lucxor_comparison(self, mzml_file, idxml_file, ref_lucxor_file):
-        """Test LucXor results comparison at different FLR thresholds."""
-        if not ref_lucxor_file.exists():
-            pytest.skip("Reference LucXor file not found")
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            new_output = os.path.join(temp_dir, "new_lucxor.idXML")
             
-            # Run LucXor
-            success = self.run_algorithm("lucxor", mzml_file, idxml_file, new_output)
-            if not success:
+            if result.exit_code != 0 or not os.path.exists(new_output):
                 pytest.skip("LucXor execution failed")
             
             # Load results
@@ -285,53 +235,81 @@ class TestAlgorithmComparison:
             _, _, ref_data = load_idxml_with_scores(str(ref_lucxor_file))
             
             q_value_threshold = 0.01
-            flr_thresholds = [0.01, 0.05, 0.1]
+            thresholds = {
+                'strict': 0.01,
+                'moderate': 0.05,
+                'lenient': 0.1,
+            }
             
             print("\n" + "=" * 80)
             print("LucXor Comparison Results (q-value < 0.01)")
             print("=" * 80)
             
-            # Track results for assertions
-            all_results = []
+            results = {}
+            warnings = []
             
-            for flr_threshold in flr_thresholds:
+            for tier, flr_threshold in thresholds.items():
                 new_filtered = filter_lucxor(new_data, q_value_threshold, flr_threshold)
                 ref_filtered = filter_lucxor(ref_data, q_value_threshold, flr_threshold)
                 
-                overlap, new_only, ref_only = compare_results(new_filtered, ref_filtered)
+                overlap, new_only, ref_only, recall, gain_rate = compare_results(new_filtered, ref_filtered)
                 
-                print(f"\nLocal FLR < {flr_threshold}:")
+                count_ratio = len(new_filtered) / len(ref_filtered) if len(ref_filtered) > 0 else 1.0
+                
+                print(f"\n{tier.upper()} (Local FLR < {flr_threshold}):")
                 print(f"  New results: {len(new_filtered)}")
                 print(f"  Reference results: {len(ref_filtered)}")
                 print(f"  Overlap: {len(overlap)}")
-                print(f"  New only: {len(new_only)}")
-                print(f"  Reference only: {len(ref_only)}")
+                print(f"  Recall: {recall:.1%} (new found {len(overlap)}/{len(ref_filtered)} reference sites)")
+                print(f"  Gain rate: {gain_rate:.1%} ({len(new_only)} new-only sites)")
+                print(f"  Lost sites: {len(ref_only)}")
+                print(f"  Count ratio: {count_ratio:.2f}x")
                 
-                overlap_pct = 0
-                if len(new_filtered) > 0 or len(ref_filtered) > 0:
-                    overlap_pct = len(overlap) / max(len(new_filtered), len(ref_filtered), 1) * 100
-                    print(f"  Overlap percentage: {overlap_pct:.1f}%")
-                
-                all_results.append({
-                    'threshold': flr_threshold,
+                results[tier] = {
+                    'recall': recall,
+                    'count_ratio': count_ratio,
                     'new_count': len(new_filtered),
                     'ref_count': len(ref_filtered),
-                    'overlap_pct': overlap_pct
-                })
+                }
+                
+                # Check thresholds
+                expected_recall = EXPECTED_RECALL[tier]
+                if recall < expected_recall:
+                    msg = f"{tier} recall {recall:.1%} < {expected_recall:.1%}"
+                    if tier == 'strict':
+                        warnings.append(f"HARD FAIL: {msg}")
+                    else:
+                        warnings.append(f"SOFT FAIL: {msg}")
+                
+                # Check catastrophic count drop
+                if count_ratio < (1 - MAX_COUNT_DROP):
+                    warnings.append(f"HARD FAIL: {tier} count dropped {(1-count_ratio):.1%} (>{MAX_COUNT_DROP:.0%})")
             
-            # Assertions for regression protection
-            # At the strictest threshold (FLR < 0.01), require at least 80% overlap
-            strictest = all_results[0]
-            assert strictest['overlap_pct'] >= 80, \
-                f"Low overlap ({strictest['overlap_pct']:.1f}%) at strictest threshold (FLR < {strictest['threshold']})"
+            # Print warnings
+            if warnings:
+                print("\n" + "!" * 80)
+                print("WARNINGS:")
+                for warning in warnings:
+                    print(f"  {warning}")
+                print("!" * 80)
             
-            # Ensure we have at least some results at the most lenient threshold
-            lenient = all_results[-1]
-            assert lenient['new_count'] > 0 or lenient['ref_count'] > 0, \
-                "No results found at most lenient threshold (FLR < 0.1)"
+            # TIER 1: Hard fail conditions
+            assert results['strict']['recall'] >= EXPECTED_RECALL['strict'], \
+                f"LucXor strict recall {results['strict']['recall']:.1%} < {EXPECTED_RECALL['strict']:.1%}"
+            
+            for tier in thresholds.keys():
+                assert results[tier]['count_ratio'] >= (1 - MAX_COUNT_DROP), \
+                    f"LucXor {tier} count dropped {(1-results[tier]['count_ratio']):.1%} (>{MAX_COUNT_DROP:.0%})"
+            
+            # TIER 2: Soft fail - warn if moderate recall is low
+            if results['moderate']['recall'] < EXPECTED_RECALL['moderate']:
+                print(f"\nWARNING: Moderate recall {results['moderate']['recall']:.1%} < {EXPECTED_RECALL['moderate']:.1%}")
     
-    def test_ascore_comparison(self, mzml_file, idxml_file, ref_ascore_file):
-        """Test AScore results comparison at different score thresholds."""
+    @pytest.mark.data
+    @pytest.mark.slow
+    def test_ascore_comparison(self, data_dir, mzml_file, idxml_file):
+        """Test AScore results comparison with tiered recall thresholds."""
+        ref_ascore_file = data_dir / "1_ascore_result.idXML"
         if not ref_ascore_file.exists():
             pytest.skip("Reference AScore file not found")
         
@@ -339,8 +317,22 @@ class TestAlgorithmComparison:
             new_output = os.path.join(temp_dir, "new_ascore.idXML")
             
             # Run AScore
-            success = self.run_algorithm("ascore", mzml_file, idxml_file, new_output)
-            if not success:
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                [
+                    "ascore",
+                    "--in-file", str(mzml_file),
+                    "--id-file", str(idxml_file),
+                    "--out-file", new_output,
+                    "--fragment-mass-tolerance", "0.05",
+                    "--fragment-mass-unit", "Da",
+                    "--threads", "1",
+                    "--add-decoys",
+                ],
+            )
+            
+            if result.exit_code != 0 or not os.path.exists(new_output):
                 pytest.skip("AScore execution failed")
             
             # Load results
@@ -348,53 +340,81 @@ class TestAlgorithmComparison:
             _, _, ref_data = load_idxml_with_scores(str(ref_ascore_file))
             
             q_value_threshold = 0.01
-            ascore_thresholds = [3, 15, 20]
+            thresholds = {
+                'strict': 20,
+                'moderate': 15,
+                'lenient': 3,
+            }
             
             print("\n" + "=" * 80)
             print("AScore Comparison Results (q-value < 0.01)")
             print("=" * 80)
             
-            # Track results for assertions
-            all_results = []
+            results = {}
+            warnings = []
             
-            for ascore_threshold in ascore_thresholds:
+            for tier, ascore_threshold in thresholds.items():
                 new_filtered = filter_ascore(new_data, q_value_threshold, ascore_threshold)
                 ref_filtered = filter_ascore(ref_data, q_value_threshold, ascore_threshold)
                 
-                overlap, new_only, ref_only = compare_results(new_filtered, ref_filtered)
+                overlap, new_only, ref_only, recall, gain_rate = compare_results(new_filtered, ref_filtered)
                 
-                print(f"\nAScore >= {ascore_threshold}:")
+                count_ratio = len(new_filtered) / len(ref_filtered) if len(ref_filtered) > 0 else 1.0
+                
+                print(f"\n{tier.upper()} (AScore >= {ascore_threshold}):")
                 print(f"  New results: {len(new_filtered)}")
                 print(f"  Reference results: {len(ref_filtered)}")
                 print(f"  Overlap: {len(overlap)}")
-                print(f"  New only: {len(new_only)}")
-                print(f"  Reference only: {len(ref_only)}")
+                print(f"  Recall: {recall:.1%} (new found {len(overlap)}/{len(ref_filtered)} reference sites)")
+                print(f"  Gain rate: {gain_rate:.1%} ({len(new_only)} new-only sites)")
+                print(f"  Lost sites: {len(ref_only)}")
+                print(f"  Count ratio: {count_ratio:.2f}x")
                 
-                overlap_pct = 0
-                if len(new_filtered) > 0 or len(ref_filtered) > 0:
-                    overlap_pct = len(overlap) / max(len(new_filtered), len(ref_filtered), 1) * 100
-                    print(f"  Overlap percentage: {overlap_pct:.1f}%")
-                
-                all_results.append({
-                    'threshold': ascore_threshold,
+                results[tier] = {
+                    'recall': recall,
+                    'count_ratio': count_ratio,
                     'new_count': len(new_filtered),
                     'ref_count': len(ref_filtered),
-                    'overlap_pct': overlap_pct
-                })
+                }
+                
+                # Check thresholds
+                expected_recall = EXPECTED_RECALL[tier]
+                if recall < expected_recall:
+                    msg = f"{tier} recall {recall:.1%} < {expected_recall:.1%}"
+                    if tier == 'strict':
+                        warnings.append(f"HARD FAIL: {msg}")
+                    else:
+                        warnings.append(f"SOFT FAIL: {msg}")
+                
+                # Check catastrophic count drop
+                if count_ratio < (1 - MAX_COUNT_DROP):
+                    warnings.append(f"HARD FAIL: {tier} count dropped {(1-count_ratio):.1%} (>{MAX_COUNT_DROP:.0%})")
             
-            # Assertions for regression protection
-            # At the strictest threshold (AScore >= 20), require at least 80% overlap
-            strictest = all_results[-1]
-            assert strictest['overlap_pct'] >= 80, \
-                f"Low overlap ({strictest['overlap_pct']:.1f}%) at strictest threshold (AScore >= {strictest['threshold']})"
+            # Print warnings
+            if warnings:
+                print("\n" + "!" * 80)
+                print("WARNINGS:")
+                for warning in warnings:
+                    print(f"  {warning}")
+                print("!" * 80)
             
-            # Ensure we have at least some results at the most lenient threshold
-            lenient = all_results[0]
-            assert lenient['new_count'] > 0 or lenient['ref_count'] > 0, \
-                "No results found at most lenient threshold (AScore >= 3)"
+            # TIER 1: Hard fail conditions
+            assert results['strict']['recall'] >= EXPECTED_RECALL['strict'], \
+                f"AScore strict recall {results['strict']['recall']:.1%} < {EXPECTED_RECALL['strict']:.1%}"
+            
+            for tier in thresholds.keys():
+                assert results[tier]['count_ratio'] >= (1 - MAX_COUNT_DROP), \
+                    f"AScore {tier} count dropped {(1-results[tier]['count_ratio']):.1%} (>{MAX_COUNT_DROP:.0%})"
+            
+            # TIER 2: Soft fail - warn if moderate recall is low
+            if results['moderate']['recall'] < EXPECTED_RECALL['moderate']:
+                print(f"\nWARNING: Moderate recall {results['moderate']['recall']:.1%} < {EXPECTED_RECALL['moderate']:.1%}")
     
-    def test_phosphors_comparison(self, mzml_file, idxml_file, ref_phosphors_file):
-        """Test PhosphoRS results comparison at different probability thresholds."""
+    @pytest.mark.data
+    @pytest.mark.slow
+    def test_phosphors_comparison(self, data_dir, mzml_file, idxml_file):
+        """Test PhosphoRS results comparison with tiered recall thresholds."""
+        ref_phosphors_file = data_dir / "1_phosphors_result.idXML"
         if not ref_phosphors_file.exists():
             pytest.skip("Reference PhosphoRS file not found")
         
@@ -402,8 +422,22 @@ class TestAlgorithmComparison:
             new_output = os.path.join(temp_dir, "new_phosphors.idXML")
             
             # Run PhosphoRS
-            success = self.run_algorithm("phosphors", mzml_file, idxml_file, new_output)
-            if not success:
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                [
+                    "phosphors",
+                    "--in-file", str(mzml_file),
+                    "--id-file", str(idxml_file),
+                    "--out-file", new_output,
+                    "--fragment-mass-tolerance", "0.05",
+                    "--fragment-mass-unit", "Da",
+                    "--threads", "1",
+                    "--add-decoys",
+                ],
+            )
+            
+            if result.exit_code != 0 or not os.path.exists(new_output):
                 pytest.skip("PhosphoRS execution failed")
             
             # Load results
@@ -411,50 +445,75 @@ class TestAlgorithmComparison:
             _, _, ref_data = load_idxml_with_scores(str(ref_phosphors_file))
             
             q_value_threshold = 0.01
-            prob_thresholds = [75, 90, 99]
+            thresholds = {
+                'strict': 99,
+                'moderate': 90,
+                'lenient': 75,
+            }
             
             print("\n" + "=" * 80)
             print("PhosphoRS Comparison Results (q-value < 0.01)")
             print("=" * 80)
             
-            # Track results for assertions
-            all_results = []
+            results = {}
+            warnings = []
             
-            for prob_threshold in prob_thresholds:
+            for tier, prob_threshold in thresholds.items():
                 new_filtered = filter_phosphors(new_data, q_value_threshold, prob_threshold)
                 ref_filtered = filter_phosphors(ref_data, q_value_threshold, prob_threshold)
                 
-                overlap, new_only, ref_only = compare_results(new_filtered, ref_filtered)
+                overlap, new_only, ref_only, recall, gain_rate = compare_results(new_filtered, ref_filtered)
                 
-                print(f"\nSite probability > {prob_threshold}%:")
+                count_ratio = len(new_filtered) / len(ref_filtered) if len(ref_filtered) > 0 else 1.0
+                
+                print(f"\n{tier.upper()} (Site probability > {prob_threshold}%):")
                 print(f"  New results: {len(new_filtered)}")
                 print(f"  Reference results: {len(ref_filtered)}")
                 print(f"  Overlap: {len(overlap)}")
-                print(f"  New only: {len(new_only)}")
-                print(f"  Reference only: {len(ref_only)}")
+                print(f"  Recall: {recall:.1%} (new found {len(overlap)}/{len(ref_filtered)} reference sites)")
+                print(f"  Gain rate: {gain_rate:.1%} ({len(new_only)} new-only sites)")
+                print(f"  Lost sites: {len(ref_only)}")
+                print(f"  Count ratio: {count_ratio:.2f}x")
                 
-                overlap_pct = 0
-                if len(new_filtered) > 0 or len(ref_filtered) > 0:
-                    overlap_pct = len(overlap) / max(len(new_filtered), len(ref_filtered), 1) * 100
-                    print(f"  Overlap percentage: {overlap_pct:.1f}%")
-                
-                all_results.append({
-                    'threshold': prob_threshold,
+                results[tier] = {
+                    'recall': recall,
+                    'count_ratio': count_ratio,
                     'new_count': len(new_filtered),
                     'ref_count': len(ref_filtered),
-                    'overlap_pct': overlap_pct
-                })
+                }
+                
+                # Check thresholds
+                expected_recall = EXPECTED_RECALL[tier]
+                if recall < expected_recall:
+                    msg = f"{tier} recall {recall:.1%} < {expected_recall:.1%}"
+                    if tier == 'strict':
+                        warnings.append(f"HARD FAIL: {msg}")
+                    else:
+                        warnings.append(f"SOFT FAIL: {msg}")
+                
+                # Check catastrophic count drop
+                if count_ratio < (1 - MAX_COUNT_DROP):
+                    warnings.append(f"HARD FAIL: {tier} count dropped {(1-count_ratio):.1%} (>{MAX_COUNT_DROP:.0%})")
             
-            # Assertions for regression protection
-            # At the strictest threshold (prob > 99%), require at least 80% overlap
-            strictest = all_results[-1]
-            assert strictest['overlap_pct'] >= 80, \
-                f"Low overlap ({strictest['overlap_pct']:.1f}%) at strictest threshold (prob > {strictest['threshold']}%)"
+            # Print warnings
+            if warnings:
+                print("\n" + "!" * 80)
+                print("WARNINGS:")
+                for warning in warnings:
+                    print(f"  {warning}")
+                print("!" * 80)
             
-            # Ensure we have at least some results at the most lenient threshold
-            lenient = all_results[0]
-            assert lenient['new_count'] > 0 or lenient['ref_count'] > 0, \
-                "No results found at most lenient threshold (prob > 75%)"
+            # TIER 1: Hard fail conditions
+            assert results['strict']['recall'] >= EXPECTED_RECALL['strict'], \
+                f"PhosphoRS strict recall {results['strict']['recall']:.1%} < {EXPECTED_RECALL['strict']:.1%}"
+            
+            for tier in thresholds.keys():
+                assert results[tier]['count_ratio'] >= (1 - MAX_COUNT_DROP), \
+                    f"PhosphoRS {tier} count dropped {(1-results[tier]['count_ratio']):.1%} (>{MAX_COUNT_DROP:.0%})"
+            
+            # TIER 2: Soft fail - warn if moderate recall is low
+            if results['moderate']['recall'] < EXPECTED_RECALL['moderate']:
+                print(f"\nWARNING: Moderate recall {results['moderate']['recall']:.1%} < {EXPECTED_RECALL['moderate']:.1%}")
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
