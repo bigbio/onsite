@@ -932,21 +932,7 @@ class PSM:
                     pep1 = p
                     break
 
-            # Calculate delta score
-            if self.is_unambiguous:
-                # Unambiguous case: deltaScore = score1
-                self.delta_score = score1
-                logger.debug(f"Unambiguous case, delta score: {self.delta_score}")
-            else:
-                # Ambiguous case: deltaScore = score1 - score2
-                self.delta_score = score1 - score2
-                logger.debug(
-                    f"Non-unambiguous case, delta score: {score1} - {score2} = {self.delta_score}"
-                )
-
-            # Set psm_score to score1
-            self.psm_score = score1
-
+            # Store best peptides for reference (delta_score calculated by calculate_delta_score())
             self.score1_pep = pep1
             self.score2_pep = pep2
 
@@ -990,33 +976,10 @@ class PSM:
             sequence: Peptide sequence to check
 
         Returns:
-            bool: True if sequence is a decoy sequence
+            bool: True if sequence contains decoy amino acid symbols
         """
-        try:
-            # First remove modification markers, then check for decoy amino acids
-            unmod_seq = ""
-            i = 0
-            while i < len(sequence):
-                if sequence[i : i + 9] == "(Phospho)":
-                    i += 9
-                elif sequence[i : i + 14] == "(PhosphoDecoy)":
-                    i += 14
-                elif sequence[i : i + 11] == "(Oxidation)":
-                    i += 11
-                else:
-                    unmod_seq += sequence[i]
-                    i += 1
-
-            # Check if sequence contains decoy amino acid symbols after removing modifications
-            for aa in unmod_seq:
-                if aa in DECOY_AA_MAP:
-                    return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error checking decoy sequence: {str(e)}")
-            return False
+        unmod_seq = strip_modifications(sequence)
+        return any(aa in DECOY_AA_MAP for aa in unmod_seq)
 
     def _get_mod_map(self, perm: str) -> Dict[int, float]:
         """
@@ -1408,176 +1371,98 @@ class PSM:
 
         logger.debug(f"PSM {self.scan_num} scores cleared")
 
-    def generate_real_permutations(self) -> List[Tuple[str, List[int]]]:
+    def _generate_permutations(
+        self, decoy: bool = False, shuffle: bool = False
+    ) -> List[Tuple[str, List[int]]]:
         """
-        Generate real sequence permutations
+        Generate permutations of modification sites.
+
+        Args:
+            decoy: If True, place mods on non-target sites (decoy). If False, on target sites (real).
+            shuffle: If True, shuffle combinations before iterating.
+
         Returns:
-            List[Tuple[str, List[int]]]: List of real sequences and modification sites
+            List of (modified_sequence, site_positions) tuples.
         """
-        try:
-            # Get unmodified peptide sequence
-            peptide_seq = self.peptide.get_unmodified_sequence()
+        peptide_seq = self.peptide.get_unmodified_sequence()
+        target_mods = self.config.get("target_modifications", [])
+        target_aas = extract_target_amino_acids(target_mods)
 
-            # Find all possible modification sites (target modification sites)
-            # Extract target amino acids from target_modifications
-            target_modifications = self.config.get("target_modifications", [])
-            target_amino_acids = extract_target_amino_acids(target_modifications)
+        # Find candidate sites: target AAs for real, non-target AAs for decoy
+        if decoy:
+            cand_sites = [i for i, aa in enumerate(peptide_seq) if aa not in target_aas]
+        else:
+            cand_sites = [i for i, aa in enumerate(peptide_seq) if aa in target_aas]
 
-            cand_mod_sites = []
+        if not cand_sites:
+            logger.debug(f"No {'non-target' if decoy else 'target'} sites found")
+            return []
+
+        # Count phospho modifications
+        num_mods = sum(1 for m in self.mod_coord_map.values() if abs(m - PHOSPHO_MOD_MASS) < 0.01)
+        if num_mods == 0:
+            logger.debug("No phosphorylation modifications found")
+            return []
+
+        logger.debug(f"{'Decoy' if decoy else 'Real'} permutations: {len(cand_sites)} sites, {num_mods} mods")
+
+        # Generate combinations
+        combos = list(combinations(cand_sites, num_mods))
+        if shuffle:
+            random.shuffle(combos)
+
+        perms = []
+        seen = set()
+
+        for sites in combos:
+            # Build modified sequence
+            parts = []
+            if not decoy and NTERM_MOD in self.mod_coord_map:
+                parts.append("[")
+
             for i, aa in enumerate(peptide_seq):
-                if aa in target_amino_acids:  # Target modification sites
-                    cand_mod_sites.append(i)
+                if i in sites:
+                    # Modification site
+                    parts.append(get_decoy_symbol(aa) if decoy else aa.lower())
+                elif not decoy and i in self.non_target_mods:
+                    # Non-target mods (e.g., oxidation) - real only
+                    parts.append(aa.lower())
+                else:
+                    parts.append(aa.upper())
 
-            if not cand_mod_sites:
-                logger.debug("No potential modification sites found")
-                return []
+            if not decoy and CTERM_MOD in self.mod_coord_map:
+                parts.append("]")
 
-            # DEBUG: Output mod_coord_map content
-            logger.debug(f"mod_coord_map: {self.mod_coord_map}")
-            logger.debug(f"Original peptide: {self.peptide.peptide}")
-            logger.debug(f"Unmodified peptide_seq: {peptide_seq}")
-            logger.debug(f"Candidate mod sites: {cand_mod_sites}")
+            mod_pep = "".join(parts)
 
-            # Get the number of modification sites in the original peptide
-            num_rps = len(
-                [
-                    m
-                    for m in self.mod_coord_map.values()
-                    if abs(m - PHOSPHO_MOD_MASS) < 0.01
-                ]
-            )
-            logger.debug(f"num_rps calculated: {num_rps}")
+            # Skip duplicates; for decoy also validate it contains decoy symbols
+            if mod_pep not in seen:
+                if not decoy or any(c in DECOY_AA_MAP for c in mod_pep):
+                    seen.add(mod_pep)
+                    perms.append((mod_pep, list(sites)))
 
-            if num_rps == 0:
-                logger.debug("No phosphorylation modifications found in peptide")
-                return []
+        perm_type = "decoy" if decoy else "real"
+        logger.debug(f"Generated {len(perms)} {perm_type} permutations")
+        for perm, sites in perms:
+            logger.debug(f"  {perm_type.capitalize()} permutation: {perm} with sites: {sites}")
 
-            # Generate all possible modification site combinations
-            real_perms = []
+        return perms
 
-            # Generate all possible modification site combinations
-            for sites in combinations(cand_mod_sites, num_rps):
-                # Create real sequence: modification sites represented by lowercase letters
-                mod_pep = ""
-                if NTERM_MOD in self.mod_coord_map:
-                    mod_pep = "["
-
-                for i, aa in enumerate(peptide_seq):
-                    aa_lower = aa.lower()
-                    if i in sites:  # Sites that need modification
-                        mod_pep += aa_lower
-                    elif i in self.non_target_mods:
-                        mod_pep += aa_lower
-                    else:
-                        mod_pep += aa_lower.upper()
-
-                if CTERM_MOD in self.mod_coord_map:
-                    mod_pep += "]"
-
-                # Avoid duplicates
-                if mod_pep not in [x[0] for x in real_perms]:
-                    real_perms.append((mod_pep, list(sites)))
-
-            logger.debug(f"Generated {len(real_perms)} real permutations")
-            for perm, sites in real_perms:
-                logger.debug(f"  Real permutation: {perm} with sites: {sites}")
-            return real_perms
+    def generate_real_permutations(self) -> List[Tuple[str, List[int]]]:
+        """Generate real sequence permutations at target modification sites."""
+        try:
+            return self._generate_permutations(decoy=False)
         except Exception as e:
-            logger.error(f"Error generating real permutations: {str(e)}")
+            logger.error(f"Error generating real permutations: {e}")
             return []
 
     def generate_decoy_permutations(self) -> List[Tuple[str, List[int]]]:
-        """
-        Generate decoy sequence permutations at non-STY sites
-        Returns:
-            List[Tuple[str, List[int]]]: List of decoy sequences and modification sites
-        """
+        """Generate decoy sequence permutations at non-target sites."""
         try:
-            # Get unmodified peptide sequence
-            peptide_seq = self.peptide.get_unmodified_sequence()
-
-            # Extract target amino acids from target_modifications
-            target_modifications = self.config.get("target_modifications", [])
-            target_amino_acids = extract_target_amino_acids(target_modifications)
-
-            # Find non-target amino acid sites as decoy modification sites
-            cand_mod_sites = []
-            for i, aa in enumerate(peptide_seq):
-                if aa not in target_amino_acids:  # Non-target amino acid sites
-                    cand_mod_sites.append(i)
-
-            if not cand_mod_sites:
-                logger.debug(
-                    "No non-target amino acid sites available for decoy generation"
-                )
-                return []
-
-            # Calculate the number of modifications in the original peptide
-            num_mods = len(
-                [
-                    m
-                    for m in self.mod_coord_map.values()
-                    if abs(m - PHOSPHO_MOD_MASS) < 0.01
-                ]
-            )
-            if num_mods == 0:
-                logger.debug("No phosphorylation modifications found in peptide")
-                return []
-
-            # Generate all possible modification site combinations
-            decoy_perms = []
-
-            combos = list(combinations(cand_mod_sites, num_mods))
-            random.shuffle(combos)
-
-            # No limit on decoy count, use all possible combinations
-            max_decoys = len(combos)
-
-            for sites in islice(combos, max_decoys):
-                # Create decoy sequence: decoy sites represented by decoy symbols
-                mod_pep = ""
-                for i, aa in enumerate(peptide_seq):
-                    if i in sites:  # Sites that need modification
-                        decoy_char = get_decoy_symbol(aa)  # Use decoy symbol
-                        mod_pep += decoy_char
-                    else:
-                        mod_pep += (
-                            aa.upper()
-                        )  # Non-modification sites use uppercase letters
-
-                # Check if it's a valid decoy sequence
-                if self._is_valid_decoy_sequence(mod_pep):
-                    decoy_perms.append((mod_pep, list(sites)))
-
-            logger.debug(f"Generated {len(decoy_perms)} decoy permutations")
-            for perm, sites in decoy_perms:
-                logger.debug(f"  Decoy permutation: {perm} with sites: {sites}")
-            return decoy_perms
+            return self._generate_permutations(decoy=True, shuffle=True)
         except Exception as e:
-            logger.error(f"Error generating decoy permutations: {str(e)}")
+            logger.error(f"Error generating decoy permutations: {e}")
             return []
-
-    def _is_valid_decoy_sequence(self, sequence: str) -> bool:
-        """
-        Check if the sequence is a valid decoy sequence
-
-        Args:
-            sequence: Sequence to check
-
-        Returns:
-            bool: Returns True if it"s a valid decoy sequence
-        """
-        try:
-            # Check if it contains decoy amino acid symbols
-            for aa in sequence:
-                if aa in DECOY_AA_MAP:
-                    return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error validating decoy sequence: {str(e)}")
-            return False
 
     def _match_peaks(self, perm: str, tolerance: float) -> List[Dict[str, Any]]:
         """
@@ -1835,72 +1720,50 @@ class PSM:
 
     def calculate_delta_score(self, include_decoys: bool = True) -> None:
         """
-        Calculate delta score based on permutation scores
+        Calculate delta score based on permutation scores.
+
+        Sets self.delta_score and self.psm_score based on permutation scoring results.
 
         Args:
-            include_decoys: Whether to include decoy permutations (True: first round calculation, False: second round calculation)
-
-
+            include_decoys: Whether to include decoy permutations in scoring.
+                           True for first round (FLR estimation), False for second round.
         """
         try:
-            # Get scores for all real permutations
             real_scores = list(self.pos_permutation_score_map.values())
-
-            if len(real_scores) == 0:
-                logger.debug(
-                    f"PSM {self.scan_num} has no real permutation scores, setting delta_score to 0"
-                )
+            if not real_scores:
+                logger.debug(f"PSM {self.scan_num} has no real permutation scores")
                 self.delta_score = 0.0
+                self.psm_score = 0.0
                 return
 
             real_scores.sort(reverse=True)
 
-            # For unambiguous cases, delta_score should equal the top real score
-            if self.is_unambiguous:
-                top_score = real_scores[0]
-                self.delta_score = top_score
-                self.psm_score = top_score
-                logger.debug(
-                    f"PSM {self.scan_num} unambiguous: setting delta_score = top real score {top_score:.6f}"
-                )
-                return
-
-            if include_decoys and len(self.neg_permutation_score_map) > 0:
-                all_scores = real_scores + list(self.neg_permutation_score_map.values())
-                all_scores.sort(reverse=True)
-
-                if len(all_scores) == 1:
-                    # Only one permutation overall: treat as unambiguous
-                    self.delta_score = all_scores[0]
-                    self.psm_score = all_scores[0]
-                    logger.debug(
-                        f"PSM {self.scan_num} single permutation overall: delta_score = {self.delta_score:.6f}"
-                    )
-                else:
-                    top_score = all_scores[0]
-                    second_score = all_scores[1]
-                    self.delta_score = top_score - second_score
-                    logger.debug(
-                        f"PSM {self.scan_num} first round delta_score (including decoys): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}"
-                    )
+            # Determine which scores to use for delta calculation
+            if include_decoys and self.neg_permutation_score_map:
+                scores = real_scores + list(self.neg_permutation_score_map.values())
+                scores.sort(reverse=True)
+                score_type = "all (including decoys)"
             else:
-                if len(real_scores) == 1:
-                    # Only one real permutation: treat as unambiguous
-                    self.delta_score = real_scores[0]
-                    self.psm_score = real_scores[0]
-                    logger.debug(
-                        f"PSM {self.scan_num} single real permutation: delta_score = {self.delta_score:.6f}"
-                    )
-                else:
-                    top_score = real_scores[0]
-                    second_score = real_scores[1]
-                    self.delta_score = top_score - second_score
-                    logger.debug(
-                        f"PSM {self.scan_num} second round delta_score (real permutations only): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}"
-                    )
+                scores = real_scores
+                score_type = "real only"
+
+            # Calculate delta score
+            top_score = scores[0]
+            self.psm_score = top_score
+
+            if self.is_unambiguous or len(scores) == 1:
+                self.delta_score = top_score
+                logger.debug(
+                    f"PSM {self.scan_num} unambiguous/single: delta_score = {top_score:.6f}"
+                )
+            else:
+                second_score = scores[1]
+                self.delta_score = top_score - second_score
+                logger.debug(
+                    f"PSM {self.scan_num} delta_score ({score_type}): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}"
+                )
 
         except Exception as e:
-            logger.error(
-                f"Error calculating delta_score for PSM {self.scan_num}: {str(e)}"
-            )
+            logger.error(f"Error calculating delta_score for PSM {self.scan_num}: {e}")
             self.delta_score = 0.0
+            self.psm_score = 0.0
