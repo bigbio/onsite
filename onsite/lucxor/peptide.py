@@ -599,7 +599,8 @@ class Peptide:
         """
         Check if the peptide contains decoy symbols (special characters).
 
-        These are symbols from DECOY_AA_MAP that PyOpenMS cannot handle.
+        These are symbols from DECOY_AA_MAP representing decoy modifications.
+        Now handled by PyOpenMS using registered PhosphoDecoy modifications.
         """
         return any(aa in DECOY_AA_MAP for aa in self.mod_peptide)
 
@@ -610,16 +611,17 @@ class Peptide:
         Internal format uses:
         - Uppercase letters: unmodified amino acids
         - Lowercase letters: modified amino acids (s=Phospho-S, t=Phospho-T, etc.)
-        - Special characters: decoy amino acids (cannot be handled by PyOpenMS)
+        - Lowercase 'a': PhosphoDecoy on Alanine
+        - Special characters from DECOY_AA_MAP: PhosphoDecoy on other amino acids
 
         PyOpenMS format uses:
         - Uppercase letters with bracketed modifications: S(Phospho), M(Oxidation), etc.
+        - PhosphoDecoy modifications: A(PhosphoDecoy), K(PhosphoDecoy (K)), etc.
 
         Returns:
-            PyOpenMS-compatible sequence string, or empty string if decoy symbols present
+            PyOpenMS-compatible sequence string
         """
-        if self._has_decoy_symbols():
-            return ""  # Cannot convert decoy sequences to PyOpenMS format
+        from .mass_provider import get_phospho_decoy_mod_name
 
         result = []
         for aa in self.mod_peptide:
@@ -630,9 +632,16 @@ class Peptide:
             elif aa == "y":
                 result.append("Y(Phospho)")
             elif aa == "a":
-                result.append("A(Phospho)")  # PhosphoDecoy treated as Phospho for mass
+                # PhosphoDecoy on Alanine
+                mod_name = get_phospho_decoy_mod_name("A")
+                result.append(f"A({mod_name})")
             elif aa == "m":
                 result.append("M(Oxidation)")
+            elif aa in DECOY_AA_MAP:
+                # Special character represents decoy modification on mapped amino acid
+                real_aa = DECOY_AA_MAP[aa]
+                mod_name = get_phospho_decoy_mod_name(real_aa)
+                result.append(f"{real_aa}({mod_name})")
             else:
                 result.append(aa)
 
@@ -643,14 +652,10 @@ class Peptide:
         Calculate peptide precursor mass using PyOpenMS AASequence.
 
         This method provides validation against the custom mass calculation.
-        Returns None for decoy sequences that PyOpenMS cannot handle.
 
         Returns:
-            Precursor mass [M+zH]^z+ or None for decoy sequences
+            Precursor mass [M+zH]^z+ or None on failure
         """
-        if self._has_decoy_symbols():
-            return None
-
         seq_str = self._to_pyopenms_format()
         if not seq_str:
             return None
@@ -671,16 +676,12 @@ class Peptide:
 
         This method uses PyOpenMS for theoretical spectrum generation, providing
         consistency with other algorithms (AScore, PhosphoRS) that use PyOpenMS.
-        Falls back to custom implementation for decoy sequences.
+        Handles both regular and decoy sequences using registered PhosphoDecoy
+        modifications.
 
         Returns:
-            True if PyOpenMS was used, False if fallback to custom was needed
+            True if successful, False on failure
         """
-        if self._has_decoy_symbols():
-            # Fall back to custom implementation for decoy sequences
-            self._build_ion_ladders_custom()
-            return False
-
         if not self.mod_peptide:
             return False
 

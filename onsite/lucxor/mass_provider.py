@@ -6,13 +6,70 @@ providing fast O(1) lookup during processing.
 """
 
 import numpy as np
-from pyopenms import ResidueDB, ModificationsDB, Residue, Constants
+from pyopenms import ResidueDB, ModificationsDB, ResidueModification, Residue, Constants
 
 
 # Module-level caches populated at import time
 _AA_MASSES: dict = {}
 _MASS_ARRAY: np.ndarray = None  # Indexed by ord(char) for fast lookup
 _INITIALIZED: bool = False
+_PHOSPHO_DECOY_REGISTERED: bool = False
+
+# Residues that already have PhosphoDecoy defined in PyOpenMS
+_BUILTIN_PHOSPHO_DECOY_RESIDUES = {'A', 'G', 'L'}
+
+# All standard amino acids
+_STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def _register_phospho_decoy_modifications():
+    """
+    Register PhosphoDecoy modification for all amino acid residues.
+
+    PyOpenMS only has PhosphoDecoy defined for A, G, L by default.
+    This function registers it for all other residues so that decoy
+    sequences can be handled uniformly by TheoreticalSpectrumGenerator.
+    """
+    global _PHOSPHO_DECOY_REGISTERED
+
+    if _PHOSPHO_DECOY_REGISTERED:
+        return
+
+    mod_db = ModificationsDB()
+    phospho_decoy_mass = 79.966331  # Same as Phospho
+
+    # Register PhosphoDecoy for residues that don't have it
+    for aa in _STANDARD_AAS:
+        if aa in _BUILTIN_PHOSPHO_DECOY_RESIDUES:
+            continue  # Already defined in PyOpenMS
+
+        try:
+            mod = ResidueModification()
+            mod.setId(f'PhosphoDecoy ({aa})')
+            mod.setFullId(f'PhosphoDecoy ({aa})')
+            mod.setName('PhosphoDecoy')
+            mod.setDiffMonoMass(phospho_decoy_mass)
+            mod.setOrigin(aa.encode())
+            mod_db.addModification(mod)
+        except Exception:
+            pass  # Ignore if already registered or other errors
+
+    _PHOSPHO_DECOY_REGISTERED = True
+
+
+def get_phospho_decoy_mod_name(residue: str) -> str:
+    """
+    Get the correct PhosphoDecoy modification name for a residue.
+
+    Args:
+        residue: Single-letter amino acid code
+
+    Returns:
+        Modification name to use with AASequence.setModification()
+    """
+    if residue in _BUILTIN_PHOSPHO_DECOY_RESIDUES:
+        return "PhosphoDecoy"
+    return f"PhosphoDecoy ({residue})"
 
 
 def _initialize():
@@ -22,14 +79,14 @@ def _initialize():
     if _INITIALIZED:
         return
 
+    # Register PhosphoDecoy for all residues first
+    _register_phospho_decoy_modifications()
+
     # Get residue database
     residue_db = ResidueDB()
 
-    # Standard amino acid one-letter codes
-    standard_aas = "ACDEFGHIKLMNPQRSTVWY"
-
     # Build mass dictionary from PyOpenMS
-    for aa in standard_aas:
+    for aa in _STANDARD_AAS:
         residue = residue_db.getResidue(aa)
         _AA_MASSES[aa] = residue.getMonoWeight(Residue.ResidueType.Internal)
 
