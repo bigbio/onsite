@@ -165,9 +165,17 @@ def get_water_mass() -> float:
     return 18.010564684
 
 
+# Cache for modification masses to avoid repeated PyOpenMS lookups
+# (which can produce warnings about multiple matches)
+_MOD_MASS_CACHE: dict = {}
+
+
 def get_modification_mass(mod_name: str) -> float:
     """
     Get modification delta mass from PyOpenMS ModificationsDB.
+
+    Results are cached to avoid repeated lookups and suppress duplicate
+    warnings from PyOpenMS about multiple modifications with the same name.
 
     Args:
         mod_name: Modification name (e.g., "Phospho", "Oxidation")
@@ -178,6 +186,10 @@ def get_modification_mass(mod_name: str) -> float:
     Raises:
         ValueError: If modification is not found in PyOpenMS ModificationsDB
     """
+    # Check cache first
+    if mod_name in _MOD_MASS_CACHE:
+        return _MOD_MASS_CACHE[mod_name]
+
     mod_db = ModificationsDB()
 
     # Try different naming conventions that PyOpenMS uses
@@ -188,7 +200,9 @@ def get_modification_mass(mod_name: str) -> float:
     for suffix in residue_suffixes:
         try:
             mod = mod_db.getModification(mod_name + suffix)
-            return mod.getDiffMonoMass()
+            mass = mod.getDiffMonoMass()
+            _MOD_MASS_CACHE[mod_name] = mass  # Cache the result
+            return mass
         except Exception:
             continue
 
@@ -203,7 +217,9 @@ def get_modification_mass(mod_name: str) -> float:
     for name in alternative_names:
         try:
             mod = mod_db.getModification(name)
-            return mod.getDiffMonoMass()
+            mass = mod.getDiffMonoMass()
+            _MOD_MASS_CACHE[mod_name] = mass  # Cache the result
+            return mass
         except Exception:
             continue
 
