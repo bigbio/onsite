@@ -17,7 +17,7 @@ _INITIALIZED: bool = False
 
 def _initialize():
     """Initialize mass caches from PyOpenMS databases."""
-    global _AA_MASSES, _MASS_ARRAY, _INITIALIZED
+    global _MASS_ARRAY, _INITIALIZED  # _AA_MASSES is modified in-place, not reassigned
 
     if _INITIALIZED:
         return
