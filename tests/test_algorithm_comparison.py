@@ -284,7 +284,7 @@ class TestAlgorithmComparison:
                 print(f"\n{tier.upper()} (Local FLR < {flr_threshold}):")
                 print(f"  New results: {len(new_filtered)}")
                 print(f"  Reference results: {len(ref_filtered)}")
-                overlap_pct = len(overlap) / len(ref_filtered) * 100 if len(ref_filtered) > 0 else 0.0
+                overlap_pct = recall * 100
                 print(f"  Overlap: {len(overlap)} ({overlap_pct:.1f}%)")
                 print(f"  Recall: {recall:.1%} (new found {len(overlap)}/{len(ref_filtered)} reference sites)")
                 print(f"  Gain rate: {gain_rate:.1%} ({len(new_only)} new-only sites)")
@@ -401,7 +401,7 @@ class TestAlgorithmComparison:
                 print(f"\n{tier.upper()} (AScore >= {ascore_threshold}):")
                 print(f"  New results: {len(new_filtered)}")
                 print(f"  Reference results: {len(ref_filtered)}")
-                overlap_pct = len(overlap) / len(ref_filtered) * 100 if len(ref_filtered) > 0 else 0.0
+                overlap_pct = recall * 100
                 print(f"  Overlap: {len(overlap)} ({overlap_pct:.1f}%)")
                 print(f"  Recall: {recall:.1%} (new found {len(overlap)}/{len(ref_filtered)} reference sites)")
                 print(f"  Gain rate: {gain_rate:.1%} ({len(new_only)} new-only sites)")
@@ -518,7 +518,7 @@ class TestAlgorithmComparison:
                 print(f"\n{tier.upper()} (Site probability > {prob_threshold}%):")
                 print(f"  New results: {len(new_filtered)}")
                 print(f"  Reference results: {len(ref_filtered)}")
-                overlap_pct = len(overlap) / len(ref_filtered) * 100 if len(ref_filtered) > 0 else 0.0
+                overlap_pct = recall * 100
                 print(f"  Overlap: {len(overlap)} ({overlap_pct:.1f}%)")
                 print(f"  Recall: {recall:.1%} (new found {len(overlap)}/{len(ref_filtered)} reference sites)")
                 print(f"  Gain rate: {gain_rate:.1%} ({len(new_only)} new-only sites)")
