@@ -36,8 +36,6 @@ from .peptide import (
     extract_target_amino_acids,
     parse_modifications,
     strip_modifications,
-    _MOD_PATTERN,
-    _TARGET_MOD_NAMES,
 )
 from .spectrum import Spectrum
 from .flr import FLRCalculator
@@ -1075,15 +1073,9 @@ class PSM:
         cumsum = np.zeros(n + 1)
         for i, aa in enumerate(unmod_seq):
             if aa in AA_MASSES:
+                # AA_MASSES includes both standard amino acids and decoy symbols
+                # (decoy symbols are added with DECOY_MASS offset in constants.py)
                 cumsum[i + 1] = cumsum[i] + AA_MASSES[aa]
-            elif aa in DECOY_AA_MAP:
-                # Decoy amino acid - use the mapped real AA mass
-                real_aa = DECOY_AA_MAP[aa]
-                if real_aa in AA_MASSES:
-                    cumsum[i + 1] = cumsum[i] + AA_MASSES[real_aa]
-                else:
-                    logger.warning(f"Unknown decoy amino acid mapping: {aa} -> {real_aa}")
-                    cumsum[i + 1] = cumsum[i]
             else:
                 logger.warning(f"Unknown amino acid in sequence: '{aa}' at position {i}")
                 cumsum[i + 1] = cumsum[i]
@@ -1490,7 +1482,16 @@ class PSM:
         # correctly convert internal format (lowercase letters like 'm') to
         # PyOpenMS format (e.g., 'M(Oxidation)')
         temp_peptide.non_target_mods = self.non_target_mods
-        temp_peptide.build_ion_ladders()  # Build ion ladders with correct mod_pos_map
+
+        try:
+            temp_peptide.build_ion_ladders()
+        except (ValueError, RuntimeError) as e:
+            logger.warning(
+                f"Failed to build ion ladders for permutation '{perm}': {e}. "
+                f"mod_map={mod_map}, charge={self.charge}, "
+                f"non_target_mods={self.non_target_mods}"
+            )
+            return []
 
         # Pass tolerance directly instead of copying entire config
         # Create minimal config override for tolerance
