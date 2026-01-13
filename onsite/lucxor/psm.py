@@ -733,6 +733,16 @@ class PSM:
                 tolerance = base_tolerance * 2.0 if is_decoy else base_tolerance
 
                 # ─────────────────────────────────────────────────────────
+                # Pre-compute modification prefix counts for O(1) lookup
+                # mod_prefix[i] = count of modifications at positions < i
+                # ─────────────────────────────────────────────────────────
+                mod_prefix = np.zeros(n + 1, dtype=int)
+                for p in all_mod_positions:
+                    if 0 <= p < n:
+                        mod_prefix[p + 1:] += 1
+                total_mods = mod_prefix[n]
+
+                # ─────────────────────────────────────────────────────────
                 # Compute all theoretical ion m/z values for this permutation
                 # ─────────────────────────────────────────────────────────
                 theo_mz_list = []
@@ -741,8 +751,8 @@ class PSM:
                 for z in range(1, self.charge):
                     for i in range(2, n):  # b-ions from position 2 to n-1
                         # b-ion: prefix contains positions 0..i-1
-                        # Count mods in prefix (positions < i)
-                        b_mod_count = sum(1 for p in all_mod_positions if p < i)
+                        # Count mods in prefix using O(1) lookup
+                        b_mod_count = int(mod_prefix[i])
                         b_ox_count = int(ox_prefix[i])
                         b_mass = cumsum[i] + b_mod_count * PHOSPHO_MOD_MASS + b_ox_count * OXIDATION_MASS + PROTON_MASS * z
                         b_mz = b_mass / z
@@ -751,7 +761,7 @@ class PSM:
                             theo_mz_list.append(b_mz)
                             ion_types.append('b')
 
-                            # Neutral losses for b-ions (if fragment contains potential phospho sites S/T/Y)
+                            # Neutral losses for b-ions (if fragment contains target residues)
                             if b_can_nl[i]:
                                 for nl_mass in nl_masses:
                                     nl_mz = (b_mass + nl_mass) / z
@@ -761,8 +771,8 @@ class PSM:
 
                     for i in range(1, n - 1):  # y-ions from position 1 to n-2
                         # y-ion: suffix contains positions i..n-1
-                        # Count mods in suffix (positions >= i)
-                        y_mod_count = sum(1 for p in all_mod_positions if p >= i)
+                        # Count mods in suffix using O(1) lookup
+                        y_mod_count = total_mods - int(mod_prefix[i])
                         y_ox_count = int(ox_prefix[n] - ox_prefix[i])
                         y_mass = (total_unmod_mass - cumsum[i]) + y_mod_count * PHOSPHO_MOD_MASS + y_ox_count * OXIDATION_MASS + WATER_MASS + PROTON_MASS * z
                         y_mz = y_mass / z
@@ -771,7 +781,7 @@ class PSM:
                             theo_mz_list.append(y_mz)
                             ion_types.append('y')
 
-                            # Neutral losses for y-ions (if fragment contains potential phospho sites S/T/Y)
+                            # Neutral losses for y-ions (if fragment contains target residues)
                             if y_can_nl[i]:
                                 for nl_mass in nl_masses:
                                     nl_mz = (y_mass + nl_mass) / z
@@ -1198,7 +1208,7 @@ class PSM:
     def _precompute_nl_eligibility(self, unmod_seq: str) -> Tuple[np.ndarray, np.ndarray]:
         """
         Pre-compute which cleavage positions can have neutral losses.
-        Based on presence of S, T, Y in the fragment.
+        Based on presence of target residues (from config) in the fragment.
 
         Args:
             unmod_seq: Unmodified sequence
@@ -1212,12 +1222,26 @@ class PSM:
         b_can_nl = np.zeros(n + 1, dtype=bool)
         y_can_nl = np.zeros(n + 1, dtype=bool)
 
-        # Check each cleavage position
-        for i in range(1, n):
-            prefix = unmod_seq[:i]
-            suffix = unmod_seq[i:]
-            b_can_nl[i] = any(aa in "STY" for aa in prefix)
-            y_can_nl[i] = any(aa in "STY" for aa in suffix)
+        # Get target residues from config (e.g., S, T, Y for phosphorylation)
+        target_modifications = self.config.get("target_modifications", [])
+        target_residues = extract_target_amino_acids(target_modifications)
+
+        # Use cumulative count for O(n) instead of O(n²)
+        # Count target residues seen up to each position
+        target_count = np.zeros(n + 1, dtype=int)
+        for i, aa in enumerate(unmod_seq):
+            target_count[i + 1] = target_count[i] + (1 if aa in target_residues else 0)
+
+        # b-ion at position i contains residues 0..i-1
+        # Can have NL if any target residue in prefix
+        for i in range(1, n + 1):
+            b_can_nl[i] = target_count[i] > 0
+
+        # y-ion at position i contains residues i..n-1
+        # Can have NL if any target residue in suffix
+        total_targets = target_count[n]
+        for i in range(n):
+            y_can_nl[i] = (total_targets - target_count[i]) > 0
 
         return b_can_nl, y_can_nl
 
