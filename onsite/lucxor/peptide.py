@@ -53,6 +53,110 @@ def extract_target_amino_acids(target_modifications: List[str]) -> Set[str]:
     return amino_acids
 
 
+def strip_modifications(seq: str) -> str:
+    """
+    Remove all modification markers from a peptide sequence.
+
+    Args:
+        seq: Peptide sequence with modifications like "MS(Phospho)TM(Oxidation)K"
+
+    Returns:
+        Unmodified sequence like "MSTMK"
+    """
+    return _MOD_PATTERN.sub("", seq).replace("[", "").replace("]", "")
+
+
+def parse_modifications(
+    seq: str,
+    target_mod_names: Set[str] = None,
+    get_mass_func=None,
+) -> Dict[str, Any]:
+    """
+    Parse a peptide sequence to extract modification information.
+
+    This is the single source of truth for modification parsing in LucXor.
+
+    Args:
+        seq: Peptide sequence with modifications like "MS(Phospho)TM(Oxidation)K"
+        target_mod_names: Set of target modification names (default: {"Phospho", "PhosphoDecoy"})
+        get_mass_func: Function to get modification mass by name (optional)
+
+    Returns:
+        Dict with:
+            - unmodified: Unmodified sequence (e.g., "MSTMK")
+            - internal: Internal format with lowercase for modified (e.g., "MsTmK")
+            - target_mods: Dict of position -> mass for target modifications
+            - non_target_mods: Dict of position -> mod_name for non-target modifications
+            - all_mods: Dict of position -> (mod_name, mass) for all modifications
+            - has_nterm: True if N-terminal modification marker present
+            - has_cterm: True if C-terminal modification marker present
+    """
+    if target_mod_names is None:
+        target_mod_names = _TARGET_MOD_NAMES
+
+    result = {
+        "unmodified": "",
+        "internal": "",
+        "target_mods": {},
+        "non_target_mods": {},
+        "all_mods": {},
+        "has_nterm": False,
+        "has_cterm": False,
+    }
+
+    # Handle terminal modification markers
+    if seq.startswith("["):
+        result["has_nterm"] = True
+        seq = seq[1:]
+    if seq.endswith("]"):
+        result["has_cterm"] = True
+        seq = seq[:-1]
+
+    # Parse sequence character by character
+    i = 0
+    while i < len(seq):
+        if seq[i] == "(":
+            # Found modification - extract name using regex
+            match = _MOD_PATTERN.match(seq, i)
+            if match:
+                mod_name = match.group(1)
+
+                # Get the position of the modified residue (previous character)
+                if result["unmodified"]:
+                    pos = len(result["unmodified"]) - 1
+
+                    # Get mass if function provided
+                    mod_mass = None
+                    if get_mass_func:
+                        try:
+                            mod_mass = get_mass_func(mod_name)
+                        except (ValueError, KeyError):
+                            pass
+
+                    # Categorize as target or non-target
+                    if mod_name in target_mod_names:
+                        result["target_mods"][pos] = mod_mass
+                    else:
+                        result["non_target_mods"][pos] = mod_name
+
+                    result["all_mods"][pos] = (mod_name, mod_mass)
+
+                    # Mark position as modified in internal format (lowercase)
+                    result["internal"] = (
+                        result["internal"][:-1] + result["internal"][-1].lower()
+                    )
+
+                i = match.end()
+                continue
+
+        # Regular amino acid character
+        result["unmodified"] += seq[i]
+        result["internal"] += seq[i]
+        i += 1
+
+    return result
+
+
 class Peptide:
     """
     Class representing a peptide sequence.
@@ -129,76 +233,31 @@ class Peptide:
         """
         from .mass_provider import get_modification_mass
 
-        # Initialize modification mapping
-        self.mod_pos_map = {}  # Target modifications (phosphorylation) - position -> mass
-        self.non_target_mods = {}  # Non-target modifications - position -> mod_name
-
         # Check if mod_peptide was provided externally (different from raw peptide)
         mod_peptide_provided = self.mod_peptide and self.mod_peptide != self.peptide
 
-        # Parse the original peptide to extract modifications
-        # This populates mod_pos_map and non_target_mods
-        # Also builds temp_mod_peptide which we use if mod_peptide wasn't provided
-        temp_mod_peptide = ""
-        i = 0
-        while i < len(self.peptide):
-            if self.peptide[i] == "(":
-                # Found start of modification - extract the full modification name
-                match = _MOD_PATTERN.match(self.peptide, i)
-                if match:
-                    mod_name = match.group(1)
-                    mod_end = match.end()
+        # Parse modifications using shared utility function
+        parsed = parse_modifications(self.peptide, get_mass_func=get_modification_mass)
 
-                    # Get the position of the modified residue (previous character)
-                    if len(temp_mod_peptide) > 0:
-                        pos = len(temp_mod_peptide) - 1
+        # Extract target mods (position -> mass) and non-target mods (position -> name)
+        self.mod_pos_map = {
+            pos: mass for pos, mass in parsed["target_mods"].items() if mass is not None
+        }
+        self.non_target_mods = parsed["non_target_mods"]
 
-                        if mod_name in _TARGET_MOD_NAMES:
-                            # Target modification (Phospho, PhosphoDecoy)
-                            self.mod_pos_map[pos] = get_modification_mass(mod_name)
-                        else:
-                            # Non-target modification - store the modification name
-                            self.non_target_mods[pos] = mod_name
-
-                        # Convert the residue to lowercase to mark it as modified
-                        temp_mod_peptide = (
-                            temp_mod_peptide[:-1] + temp_mod_peptide[-1].lower()
-                        )
-
-                    i = mod_end
-                    continue
-
-            # Regular amino acid character
-            temp_mod_peptide += self.peptide[i]
-            i += 1
-
-        # Use provided mod_peptide if available, otherwise use the one we built
+        # Use provided mod_peptide if available, otherwise use the parsed internal format
         if not mod_peptide_provided:
-            self.mod_peptide = temp_mod_peptide
+            self.mod_peptide = parsed["internal"]
 
-        # Calculate potential phosphorylation sites and reported phosphorylation sites
-        # Extract target amino acids from target_modifications
+        # Calculate potential and reported phosphorylation sites
         target_modifications = self.config.get("target_modifications", [])
         target_amino_acids = extract_target_amino_acids(target_modifications)
 
-        # Calculate potential phosphorylation sites from original sequence (including all target amino acid sites)
-        self.num_pps = 0
-        i = 0
-        while i < len(self.peptide):
-            if self.peptide[i : i + 9] == "(Phospho)":
-                # Skip modification markers
-                i += 9
-            elif self.peptide[i : i + 14] == "(PhosphoDecoy)":
-                # Skip modification markers
-                i += 14
-            elif self.peptide[i] in target_amino_acids:
-                # This is a potential phosphorylation site
-                self.num_pps += 1
-                i += 1
-            else:
-                i += 1
+        # Count potential sites (target amino acids in unmodified sequence)
+        unmod_seq = parsed["unmodified"]
+        self.num_pps = sum(1 for aa in unmod_seq if aa in target_amino_acids)
 
-        # Calculate reported phosphorylation sites (number of (Phospho) + (PhosphoDecoy))
+        # Count reported sites (Phospho + PhosphoDecoy modifications)
         self.num_rps = self.peptide.count("(Phospho)") + self.peptide.count(
             "(PhosphoDecoy)"
         )
@@ -901,21 +960,4 @@ class Peptide:
         Returns:
             str: Unmodified peptide sequence
         """
-        try:
-            # Remove all modification markers
-            unmod_seq = ""
-            i = 0
-            while i < len(self.peptide):
-                if self.peptide[i : i + 9] == "(Phospho)":
-                    i += 9
-                elif self.peptide[i : i + 9] == "(Oxidation)":
-                    i += 9
-                elif self.peptide[i : i + 13] == "(PhosphoDecoy)":
-                    i += 13
-                else:
-                    unmod_seq += self.peptide[i]
-                    i += 1
-            return unmod_seq
-        except Exception as e:
-            logger.error(f"Error getting unmodified sequence: {str(e)}")
-            return self.peptide
+        return strip_modifications(self.peptide)

@@ -31,18 +31,19 @@ from .constants import (
     OXIDATION_MASS,
 )
 from .peak import Peak
-from .peptide import Peptide, extract_target_amino_acids
+from .peptide import (
+    Peptide,
+    extract_target_amino_acids,
+    parse_modifications,
+    strip_modifications,
+    _MOD_PATTERN,
+    _TARGET_MOD_NAMES,
+)
 from .spectrum import Spectrum
 from .flr import FLRCalculator
 from .globals import get_decoy_symbol
 
 logger = logging.getLogger(__name__)
-
-# Regex pattern to match any modification in format (ModName)
-_MOD_PATTERN = re.compile(r"\(([^)]+)\)")
-
-# Target modification names for phospho site localization
-_TARGET_MOD_NAMES = {"Phospho", "PhosphoDecoy"}
 
 
 class PSM:
@@ -228,72 +229,50 @@ class PSM:
     def _init_modifications(self):
         """Initialize modification information.
 
-        Uses generic modification parsing to handle any (ModName) pattern.
+        Uses shared parse_modifications() to handle any (ModName) pattern.
         Target modifications (Phospho, PhosphoDecoy) are stored in mod_pos_map.
         Non-target modifications are stored in non_target_mods with their names.
         """
         from .mass_provider import get_modification_mass
 
         try:
-            # Get the peptide sequence
             seq = self.peptide.peptide
 
-            # Initialize modification maps
-            self.mod_coord_map = {}  # Position -> mass (all modifications)
-            self.non_target_mods = {}  # Position -> mod_name (non-target only)
-            self.target_mod_map = {}  # AA -> bool (target residues)
-            self.mod_pos_map = {}  # Position -> mass (target mods only)
+            # Parse modifications using shared utility function
+            parsed = parse_modifications(seq, get_mass_func=get_modification_mass)
 
-            # Initialize target_mod_map, add S, T, Y as target modification sites
+            # Initialize modification maps
             self.target_mod_map = {"S": True, "T": True, "Y": True}
 
-            # Process N-terminal modifications
-            if seq.startswith("["):
+            # Build mod_coord_map (all mods: position -> mass)
+            self.mod_coord_map = {
+                pos: mass for pos, (name, mass) in parsed["all_mods"].items()
+                if mass is not None
+            }
+
+            # Copy non_target_mods directly (position -> mod_name)
+            self.non_target_mods = parsed["non_target_mods"]
+
+            # Build mod_pos_map (position -> mass for mass calculations)
+            # Includes both target mods and non-target mods
+            self.mod_pos_map = {}
+            for pos, mass in parsed["target_mods"].items():
+                if mass is not None:
+                    self.mod_pos_map[pos] = mass
+            for pos, mod_name in parsed["non_target_mods"].items():
+                if pos in self.mod_coord_map:
+                    self.mod_pos_map[pos] = self.mod_coord_map[pos]
+
+            # Handle terminal modifications
+            if parsed["has_nterm"]:
                 self.mod_coord_map[NTERM_MOD] = 0.0
                 self.mod_pos_map[NTERM_MOD] = 0.0
-                seq = seq[1:]
-
-            # Process C-terminal modifications
-            if seq.endswith("]"):
+            if parsed["has_cterm"]:
                 self.mod_coord_map[CTERM_MOD] = 0.0
-                self.mod_pos_map[CTERM_MOD] = len(seq)
-                seq = seq[:-1]
-
-            # Process internal modifications using generic pattern matching
-            mod_pep_pos = ""  # Used to track unmodified sequence length
-            i = 0
-            while i < len(seq):
-                if seq[i] == "(":
-                    # Found start of modification - extract the full modification name
-                    match = _MOD_PATTERN.match(seq, i)
-                    if match:
-                        mod_name = match.group(1)
-                        mod_mass = get_modification_mass(mod_name)
-                        mod_end = match.end()
-
-                        # Get the position of the modified residue
-                        if len(mod_pep_pos) > 0:
-                            pos = len(mod_pep_pos) - 1
-                            self.mod_coord_map[pos] = mod_mass
-
-                            if mod_name in _TARGET_MOD_NAMES:
-                                # Target modification
-                                self.mod_pos_map[pos] = mod_mass
-                            else:
-                                # Non-target modification - store the name
-                                self.non_target_mods[pos] = mod_name
-                                # Also store in mod_pos_map for mass calculations
-                                self.mod_pos_map[pos] = mod_mass
-
-                        i = mod_end
-                        continue
-
-                # Regular amino acid character
-                mod_pep_pos += seq[i]
-                i += 1
+                self.mod_pos_map[CTERM_MOD] = 0.0
 
             # Update the peptide sequence
-            self.peptide_sequence = self.peptide.get_unmodified_sequence()
+            self.peptide_sequence = parsed["unmodified"]
 
         except Exception as e:
             logger.error(f"Error initializing modification information: {str(e)}")
@@ -1115,25 +1094,8 @@ class PSM:
         else:
             perm = self.peptide.mod_peptide
 
-        # Extract unmodified sequence
-        unmod_seq = []
-        i = 0
-        while i < len(perm):
-            if perm[i:i+9] == "(Phospho)":
-                i += 9
-            elif perm[i:i+14] == "(PhosphoDecoy)":
-                i += 14
-            elif perm[i:i+11] == "(Oxidation)":
-                i += 11
-            elif perm[i] in '()[]':
-                # Skip parentheses and brackets (N-term/C-term modification markers)
-                i += 1
-            else:
-                # Convert to uppercase (handles lowercase phospho markers)
-                unmod_seq.append(perm[i].upper())
-                i += 1
-
-        return ''.join(unmod_seq)
+        # Strip modifications and convert to uppercase (handles internal lowercase format)
+        return strip_modifications(perm).upper()
 
     def _compute_backbone_cumsum(self, unmod_seq: str) -> np.ndarray:
         """
@@ -1446,10 +1408,6 @@ class PSM:
 
         logger.debug(f"PSM {self.scan_num} scores cleared")
 
-    def remove_modifications(self, seq):
-        # Remove all bracket modifications like (Phospho), (PhosphoDecoy), (Oxidation), etc.
-        return re.sub(r"\([A-Za-z0-9;@#%]+?\)", "", seq)
-
     def generate_real_permutations(self) -> List[Tuple[str, List[int]]]:
         """
         Generate real sequence permutations
@@ -1458,9 +1416,7 @@ class PSM:
         """
         try:
             # Get unmodified peptide sequence
-            peptide_seq = self.remove_modifications(
-                self.peptide.get_unmodified_sequence()
-            )
+            peptide_seq = self.peptide.get_unmodified_sequence()
 
             # Find all possible modification sites (target modification sites)
             # Extract target amino acids from target_modifications
@@ -1538,9 +1494,7 @@ class PSM:
         """
         try:
             # Get unmodified peptide sequence
-            peptide_seq = self.remove_modifications(
-                self.peptide.get_unmodified_sequence()
-            )
+            peptide_seq = self.peptide.get_unmodified_sequence()
 
             # Extract target amino acids from target_modifications
             target_modifications = self.config.get("target_modifications", [])
