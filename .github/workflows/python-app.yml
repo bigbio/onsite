@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   build:
@@ -185,6 +186,87 @@ jobs:
           --threads 1 \
           --min-num-psms-model 50
     
+    - name: Verify reference result files exist
+      run: |
+        # Verify that reference result files exist for comparison
+        echo "Checking reference result files..."
+        ls -lh data/1_lucxor_result.idXML || echo "Warning: LucXor reference file not found"
+        ls -lh data/1_ascore_result.idXML || echo "Warning: AScore reference file not found"
+        ls -lh data/1_phosphors_result.idXML || echo "Warning: PhosphoRS reference file not found"
+    
+    - name: Run algorithm comparison tests
+      id: algorithm_comparison
+      run: |
+        set -o pipefail
+        # Run algorithm comparison tests to compare new results with reference results
+        # Tests compare at different thresholds:
+        # - LucXor: local_flr < 0.01, 0.05, 0.1 (with q-value < 0.01)
+        # - AScore: AScore >= 3, 15, 20 (with q-value < 0.01)
+        # - PhosphoRS: site probability > 75%, 90%, 99% (with q-value < 0.01)
+        pytest tests/test_algorithm_comparison.py -v -s --tb=short --color=no 2>&1 | tee algorithm_comparison_results.txt
+    
+    - name: Post algorithm comparison results to PR
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const resultsFile = 'algorithm_comparison_results.txt';
+          
+          if (!fs.existsSync(resultsFile)) {
+            console.log('Results file not found, skipping comment');
+            return;
+          }
+          
+          let results = fs.readFileSync(resultsFile, 'utf8');
+          
+          // Truncate if too long (GitHub comments have a limit)
+          const maxLength = 65000;
+          if (results.length > maxLength) {
+            results = results.substring(0, maxLength) + '\n\n... (truncated)';
+          }
+          
+          const body = [
+            '## Algorithm Comparison Test Results',
+            '',
+            '<details>',
+            '<summary>Click to expand test results</summary>',
+            '',
+            '```',
+            results,
+            '```',
+            '',
+            '</details>'
+          ].join('\n');
+          
+          // Find and update existing comment or create new one
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.find(comment => 
+            comment.user.login === 'github-actions[bot]' && 
+            comment.body.includes('## Algorithm Comparison Test Results')
+          );
+          
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: body
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+          }
+    
     - name: Upload test outputs as artifacts
       if: always()
       uses: actions/upload-artifact@v4
@@ -192,6 +274,7 @@ jobs:
         name: test-outputs
         path: |
           test_*.idXML
+          algorithm_comparison_results.txt
         retention-days: 7
     
     - name: Upload coverage to artifacts
