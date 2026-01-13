@@ -20,8 +20,6 @@ from .constants import (
     AA_DECOY_MAP,
     WATER_MASS,
     PROTON_MASS,
-    ION_TYPES,
-    NEUTRAL_LOSSES,
 )
 from .globals import get_decoy_symbol
 from .peak import Peak
@@ -119,12 +117,6 @@ class Peptide:
         # Add permutations attribute
         self.permutations = []
 
-        # Cache for performance optimization - parse neutral losses once
-        self._cached_nl_map = None  # Parsed neutral losses
-        self._cached_decoy_nl_map = None  # Parsed decoy neutral losses
-        self._cached_min_mz = config.get("min_mz", 0.0)
-        self._cached_is_decoy = None  # Cached decoy status
-
         # Initialize the peptide
         self._initialize(skip_expensive_init=skip_expensive_init)
 
@@ -141,17 +133,13 @@ class Peptide:
         self.mod_pos_map = {}  # Target modifications (phosphorylation) - position -> mass
         self.non_target_mods = {}  # Non-target modifications - position -> mod_name
 
-        # Parse modifications using generic pattern matching
-        # Convert modified sequence to internal format (lowercase = modified)
-        if self.mod_peptide and self.mod_peptide != self.peptide:
-            # If modified peptide is provided directly, we still need to parse
-            # the original peptide to populate mod_pos_map and non_target_mods
-            pass
-        else:
-            self.mod_peptide = ""
+        # Check if mod_peptide was provided externally (different from raw peptide)
+        mod_peptide_provided = self.mod_peptide and self.mod_peptide != self.peptide
 
         # Parse the original peptide to extract modifications
-        # This populates mod_pos_map, non_target_mods, and builds mod_peptide
+        # This populates mod_pos_map and non_target_mods
+        # Also builds temp_mod_peptide which we use if mod_peptide wasn't provided
+        temp_mod_peptide = ""
         i = 0
         while i < len(self.peptide):
             if self.peptide[i] == "(":
@@ -162,8 +150,8 @@ class Peptide:
                     mod_end = match.end()
 
                     # Get the position of the modified residue (previous character)
-                    if len(self.mod_peptide) > 0:
-                        pos = len(self.mod_peptide) - 1
+                    if len(temp_mod_peptide) > 0:
+                        pos = len(temp_mod_peptide) - 1
 
                         if mod_name in _TARGET_MOD_NAMES:
                             # Target modification (Phospho, PhosphoDecoy)
@@ -173,16 +161,20 @@ class Peptide:
                             self.non_target_mods[pos] = mod_name
 
                         # Convert the residue to lowercase to mark it as modified
-                        self.mod_peptide = (
-                            self.mod_peptide[:-1] + self.mod_peptide[-1].lower()
+                        temp_mod_peptide = (
+                            temp_mod_peptide[:-1] + temp_mod_peptide[-1].lower()
                         )
 
                     i = mod_end
                     continue
 
             # Regular amino acid character
-            self.mod_peptide += self.peptide[i]
+            temp_mod_peptide += self.peptide[i]
             i += 1
+
+        # Use provided mod_peptide if available, otherwise use the one we built
+        if not mod_peptide_provided:
+            self.mod_peptide = temp_mod_peptide
 
         # Calculate potential phosphorylation sites and reported phosphorylation sites
         # Extract target amino acids from target_modifications
@@ -272,302 +264,6 @@ class Peptide:
             float: Precursor m/z value
         """
         return self.get_precursor_mass() / self.charge
-
-    def _build_ion_ladders_custom(self) -> None:
-        """
-        Build b-ion and y-ion ladders using custom implementation.
-
-        This method uses manual mass calculation, fully aligned with Java Peptide.java.
-        Used as fallback for decoy sequences that PyOpenMS cannot handle.
-        """
-        if not self.mod_peptide:
-            return
-
-        self.b_ions = {}
-        self.y_ions = {}
-
-        peptide = self.mod_peptide
-        pep_len = len(peptide)
-        charge = self.charge
-        NTERM_MOD = self.config.get("NTERM_MOD", -100)
-        CTERM_MOD = self.config.get("CTERM_MOD", 100)
-        nterm_mass = (
-            self.mod_pos_map.get(NTERM_MOD, 0.0)
-            if NTERM_MOD in self.mod_pos_map
-            else 0.0
-        )
-        cterm_mass = (
-            self.mod_pos_map.get(CTERM_MOD, 0.0)
-            if CTERM_MOD in self.mod_pos_map
-            else 0.0
-        )
-        min_len = 2
-        min_mz = self.config.get("min_mz", 0.0)
-
-        # Only generate ions with charge less than peptide charge
-        for z in range(1, charge):  # Only generate charge states 1 to charge-1
-            for i in range(1, pep_len):  # Fragment length at least 2
-                prefix = peptide[:i]
-                suffix = peptide[i:]
-                prefix_len = str(len(prefix))
-                suffix_len = str(len(suffix))
-
-                # b ions
-                if len(prefix) >= min_len:
-                    b = f"b{prefix_len}:{prefix}"
-
-                    bm = self._fragment_ion_mass(b, z, 0.0, ion_type="b") + nterm_mass
-                    bmz = bm / z
-
-                    if z > 1:
-                        b += f"/+{z}"
-
-                    if bmz > min_mz:
-                        self.b_ions[b] = bmz
-
-                        # Handle neutral losses - extend neutral losses for all charge states
-                        self._record_nl_ions(b, z, bm, ion_type="b")
-
-                # y ions
-                if len(suffix) >= min_len and suffix.lower() != peptide.lower():
-                    y = f"y{suffix_len}:{suffix}"
-                    ym = (
-                        self._fragment_ion_mass(y, z, 18.01056, ion_type="y")
-                        + cterm_mass
-                    )
-                    ymz = ym / z
-
-                    if z > 1:
-                        y += f"/+{z}"
-
-                    if ymz > min_mz:
-                        self.y_ions[y] = ymz
-
-                        # Handle neutral losses - extend neutral losses for all charge states
-                        self._record_nl_ions(y, z, ym, ion_type="y")
-
-        # Theoretical mass list
-        self.theoretical_masses = list(self.b_ions.values()) + list(
-            self.y_ions.values()
-        )
-        self.theoretical_masses.sort()
-
-    def _fragment_ion_mass(self, ion_str, z, addl_mass, ion_type="b"):
-        """
-        Calculate fragment ion mass
-        Receives complete ion string, such as "b4:FLLE" or "y2:sK"
-        """
-        mass = 0.0
-        # Parse amino acid sequence starting after colon
-        start = ion_str.find(":") + 1
-        stop = len(ion_str)
-        seq = ion_str[start:stop]
-
-        for idx, aa in enumerate(seq):
-            # Directly use mass mapping table, lowercase letters represent modified amino acids
-            if aa in AA_MASSES:
-                mass += AA_MASSES[aa]
-
-        # Both b/y ions add z proton masses, y ions also add 1 water molecule mass
-        mass += PROTON_MASS * z
-        if ion_type == "y":
-            mass += WATER_MASS
-
-        return mass
-
-    def _record_nl_ions(self, ion, z, orig_ion_mass, ion_type="b"):
-        """
-        Handle neutral loss ions.
-        Uses cached neutral loss config and pre-computed uppercase residues.
-        """
-        # Extract sequence part from ion string
-        start = ion.find(":") + 1
-        end = len(ion)
-        if "/" in ion:
-            end = ion.find("/")
-
-        seq = ion[start:end]
-
-        # Check if it's a decoy sequence
-        is_decoy = self._is_decoy_seq(seq)
-
-        # Get cached neutral loss map (with pre-computed uppercase residues)
-        nl_entries = self._get_cached_nl_map(is_decoy)
-
-        # Use cached min_mz
-        min_mz = self._cached_min_mz
-
-        if is_decoy:
-            # Decoy sequence - no residue check needed
-            for residues_upper, nl_tag, nl_mass in nl_entries:
-                nl_str = ion + nl_tag
-                mass = orig_ion_mass + nl_mass
-                mz = round(mass / z, 4)
-
-                if mz > min_mz:
-                    if ion_type == "b":
-                        self.b_ions[nl_str] = mz
-                    else:
-                        self.y_ions[nl_str] = mz
-        else:
-            # Normal sequence - check if contains matching residues
-            # Pre-compute uppercase sequence once
-            seq_upper = seq.upper()
-
-            for residues_upper, nl_tag, nl_mass in nl_entries:
-                # Check if sequence contains any amino acid from residues
-                if any(aa in residues_upper for aa in seq_upper):
-                    nl_str = ion + nl_tag
-                    mass = orig_ion_mass + nl_mass
-                    mz = round(mass / z, 4)
-
-                    if mz > min_mz:
-                        if ion_type == "b":
-                            self.b_ions[nl_str] = mz
-                        else:
-                            self.y_ions[nl_str] = mz
-
-    def _get_neutral_losses(self, ion_str, ion_type="b", only_main_ion=False):
-        """
-        Return neutral loss list
-        Only extend main ion names, avoid extending ion names with "-".
-        """
-        nl_list = []
-        # Only extend main ion names (without "-")
-        # Main ion name definition: after ":" to "/+" or end, without "-"
-        colon_idx = ion_str.find(":")
-        if colon_idx == -1:
-            return nl_list
-        # Find /+ position
-        slash_idx = ion_str.find("/+", colon_idx)
-        dash_idx = ion_str.find("-", colon_idx)
-        # If there"s "-" after ":" to "/+" or before "-", it"s not a main ion name
-        if only_main_ion:
-            # Only allow no "-" between after ":" to "/+" or end
-            end_idx = len(ion_str)
-            if slash_idx != -1 and (dash_idx == -1 or slash_idx < dash_idx):
-                end_idx = slash_idx
-            elif dash_idx != -1:
-                end_idx = dash_idx
-            seq_part = ion_str[colon_idx + 1 : end_idx]
-            if "-" in seq_part:
-                return nl_list
-
-        # Extract sequence part from ion string
-        start = ion_str.find(":") + 1
-        end = len(ion_str)
-        if "-" in ion_str:
-            end = ion_str.find("-")
-
-        seq = ion_str[start:end]
-
-        # Check if it's a decoy sequence
-        if self._is_decoy_seq(seq):
-            # Decoy sequence neutral loss handling
-            decoy_nl_map = self.config.get("decoy_neutral_losses", {})
-            # Handle list format decoy_neutral_losses
-            if isinstance(decoy_nl_map, list):
-                decoy_nl_map = self._parse_neutral_losses_list(decoy_nl_map)
-
-            for nl_key, nl_mass in decoy_nl_map.items():
-                residues = nl_key.split("-")[0]
-                nl_tag = "-" + nl_key.split("-")[1]
-
-                num_cand_res = sum(1 for aa in seq if aa.upper() in residues.upper())
-                if num_cand_res > 0:
-                    nl_list.append((nl_tag, nl_mass))
-        else:
-            nl_map = self.config.get("neutral_losses", {})
-            if isinstance(nl_map, list):
-                nl_map = self._parse_neutral_losses_list(nl_map)
-
-            for nl_key, nl_mass in nl_map.items():
-                residues = nl_key.split("-")[0]
-                nl_tag = "-" + nl_key.split("-")[1]
-
-                num_cand_res = sum(1 for aa in seq if aa.upper() in residues.upper())
-                if num_cand_res > 0:
-                    nl_list.append((nl_tag, nl_mass))
-
-        return nl_list
-
-    def _parse_neutral_losses_list(self, nl_list):
-        """
-        Parse list format neutral loss configuration
-        Format: ["sty -H3PO4 -97.97690"] -> {"sty-H3PO4": -97.97690}
-        """
-        nl_dict = {}
-        for item in nl_list:
-            parts = item.strip().split()
-            if len(parts) >= 3:
-                residues = parts[0]
-                nl_name = parts[1]
-                nl_mass = float(parts[2])
-                # Remove leading - from nl_name to avoid double hyphens
-                if nl_name.startswith("-"):
-                    nl_key = f"{residues}{nl_name}"  # sty-H3PO4
-                else:
-                    nl_key = f"{residues}-{nl_name}"
-                nl_dict[nl_key] = nl_mass
-        return nl_dict
-
-    def _get_cached_nl_map(self, is_decoy: bool):
-        """
-        Get cached neutral loss map with pre-computed uppercase residues.
-        Parses config once and caches the result for reuse.
-
-        Returns:
-            List of tuples: (residues_upper, nl_tag, nl_mass)
-        """
-        if is_decoy:
-            if self._cached_decoy_nl_map is None:
-                decoy_nl_list = self.config.get("decoy_neutral_losses", [])
-                if isinstance(decoy_nl_list, list):
-                    nl_dict = self._parse_neutral_losses_list(decoy_nl_list)
-                else:
-                    nl_dict = decoy_nl_list
-                # Pre-compute uppercase residues and split nl_tag
-                self._cached_decoy_nl_map = []
-                for nl_key, nl_mass in nl_dict.items():
-                    residues_upper = nl_key.split("-")[0].upper()
-                    nl_tag = "-" + nl_key.split("-", 1)[1]
-                    self._cached_decoy_nl_map.append((residues_upper, nl_tag, nl_mass))
-            return self._cached_decoy_nl_map
-        else:
-            if self._cached_nl_map is None:
-                nl_list = self.config.get("neutral_losses", [])
-                if isinstance(nl_list, list):
-                    nl_dict = self._parse_neutral_losses_list(nl_list)
-                else:
-                    nl_dict = nl_list
-                # Pre-compute uppercase residues and split nl_tag
-                self._cached_nl_map = []
-                for nl_key, nl_mass in nl_dict.items():
-                    residues_upper = nl_key.split("-")[0].upper()
-                    nl_tag = "-" + nl_key.split("-", 1)[1]
-                    self._cached_nl_map.append((residues_upper, nl_tag, nl_mass))
-            return self._cached_nl_map
-
-    def _is_decoy_seq(self, seq):
-        """
-        Check if sequence is a decoy sequence.
-        Uses cached result - if the full peptide is not a decoy,
-        no fragment can be a decoy either (since fragments are substrings).
-
-        Decoy residues are identified by membership in DECOY_AA_MAP (special
-        characters like '2', '@', '#', etc.), not by lowercase letters which
-        indicate modifications.
-        """
-        # Cache the decoy status of the full peptide on first call
-        if self._cached_is_decoy is None:
-            self._cached_is_decoy = any(aa in DECOY_AA_MAP for aa in self.mod_peptide)
-
-        # If full peptide is not a decoy, no fragment can be
-        if not self._cached_is_decoy:
-            return False
-
-        # Full peptide is a decoy - check if this specific fragment contains decoy residues
-        return any(aa in DECOY_AA_MAP for aa in seq)
 
     def _has_decoy_symbols(self) -> bool:
         """
@@ -662,79 +358,83 @@ class Peptide:
         modifications.
 
         Returns:
-            True if successful, False on failure
+            True if successful
+
+        Raises:
+            ValueError: If sequence cannot be converted to PyOpenMS format
+            RuntimeError: If PyOpenMS spectrum generation fails
         """
         if not self.mod_peptide:
-            return False
+            raise ValueError("Cannot build ion ladders: mod_peptide is empty")
 
         self.b_ions = {}
         self.y_ions = {}
 
         seq_str = self._to_pyopenms_format()
         if not seq_str:
-            self._build_ion_ladders_custom()
-            return False
+            raise ValueError(
+                f"Cannot convert peptide to PyOpenMS format: {self.mod_peptide}"
+            )
 
         try:
             seq = pyopenms.AASequence.fromString(seq_str)
-
-            # Configure spectrum generator
-            spec_gen = pyopenms.TheoreticalSpectrumGenerator()
-            params = spec_gen.getParameters()
-            params.setValue("add_b_ions", "true")
-            params.setValue("add_y_ions", "true")
-            params.setValue("add_first_prefix_ion", "true")
-            params.setValue("add_losses", "true")
-            params.setValue("add_metainfo", "true")
-            params.setValue("add_precursor_peaks", "false")
-            params.setValue("add_abundant_immonium_ions", "false")
-            params.setValue("isotope_model", "none")
-            spec_gen.setParameters(params)
-
-            min_mz = self.config.get("min_mz", 0.0)
-
-            # Generate spectrum for each charge state
-            for z in range(1, self.charge):
-                theo_spectrum = pyopenms.MSSpectrum()
-                spec_gen.getSpectrum(theo_spectrum, seq, z, z)
-
-                # Extract ions from spectrum
-                for i in range(theo_spectrum.size()):
-                    peak = theo_spectrum[i]
-                    mz = peak.getMZ()
-
-                    if mz <= min_mz:
-                        continue
-
-                    # Get ion annotation from metainfo
-                    ion_name = ""
-                    if theo_spectrum.getStringDataArrays():
-                        for sda in theo_spectrum.getStringDataArrays():
-                            if sda.getName() == "IonNames" and i < len(sda):
-                                raw_name = sda[i]
-                                ion_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
-                                break
-
-                    if not ion_name:
-                        continue
-
-                    # Parse ion name and categorize (PyOpenMS format: b2-H2O1++, y3+, etc.)
-                    if ion_name.startswith("b"):
-                        self.b_ions[ion_name] = mz
-                    elif ion_name.startswith("y"):
-                        self.y_ions[ion_name] = mz
-
-            # Build theoretical masses list
-            self.theoretical_masses = list(self.b_ions.values()) + list(
-                self.y_ions.values()
-            )
-            self.theoretical_masses.sort()
-            return True
-
         except Exception as e:
-            logger.warning(f"PyOpenMS ion ladder generation failed: {e}, using custom implementation")
-            self._build_ion_ladders_custom()
-            return False
+            raise ValueError(
+                f"PyOpenMS cannot parse sequence '{seq_str}': {e}"
+            ) from e
+
+        # Configure spectrum generator
+        spec_gen = pyopenms.TheoreticalSpectrumGenerator()
+        params = spec_gen.getParameters()
+        params.setValue("add_b_ions", "true")
+        params.setValue("add_y_ions", "true")
+        params.setValue("add_first_prefix_ion", "true")
+        params.setValue("add_losses", "true")
+        params.setValue("add_metainfo", "true")
+        params.setValue("add_precursor_peaks", "false")
+        params.setValue("add_abundant_immonium_ions", "false")
+        params.setValue("isotope_model", "none")
+        spec_gen.setParameters(params)
+
+        min_mz = self.config.get("min_mz", 0.0)
+
+        # Generate spectrum for each charge state
+        for z in range(1, self.charge):
+            theo_spectrum = pyopenms.MSSpectrum()
+            spec_gen.getSpectrum(theo_spectrum, seq, z, z)
+
+            # Extract ions from spectrum
+            for i in range(theo_spectrum.size()):
+                peak = theo_spectrum[i]
+                mz = peak.getMZ()
+
+                if mz <= min_mz:
+                    continue
+
+                # Get ion annotation from metainfo
+                ion_name = ""
+                if theo_spectrum.getStringDataArrays():
+                    for sda in theo_spectrum.getStringDataArrays():
+                        if sda.getName() == "IonNames" and i < len(sda):
+                            raw_name = sda[i]
+                            ion_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+                            break
+
+                if not ion_name:
+                    continue
+
+                # Parse ion name and categorize (PyOpenMS format: b2-H2O1++, y3+, etc.)
+                if ion_name.startswith("b"):
+                    self.b_ions[ion_name] = mz
+                elif ion_name.startswith("y"):
+                    self.y_ions[ion_name] = mz
+
+        # Build theoretical masses list
+        self.theoretical_masses = list(self.b_ions.values()) + list(
+            self.y_ions.values()
+        )
+        self.theoretical_masses.sort()
+        return True
 
     def calc_theoretical_masses(self, perm: str) -> List[float]:
         """

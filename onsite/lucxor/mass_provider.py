@@ -6,7 +6,7 @@ providing fast O(1) lookup during processing.
 """
 
 import numpy as np
-from pyopenms import ResidueDB, ModificationsDB, ResidueModification, Residue, Constants
+from pyopenms import ResidueDB, ModificationsDB, ResidueModification, Residue, Constants, EmpiricalFormula
 
 
 # Module-level caches populated at import time
@@ -159,10 +159,8 @@ def get_proton_mass() -> float:
 
 
 def get_water_mass() -> float:
-    """Get water mass (H2O)."""
-    # PyOpenMS stores this in Constants or can be computed
-    # H2O = 2*H + O = 2*1.007825 + 15.994915 = 18.010565
-    return 18.010564684
+    """Get water mass (H2O) from PyOpenMS."""
+    return EmpiricalFormula("H2O").getMonoWeight()
 
 
 # Cache for modification masses to avoid repeated PyOpenMS lookups
