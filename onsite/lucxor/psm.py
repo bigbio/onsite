@@ -1486,6 +1486,10 @@ class PSM:
             perm, self.config, charge=self.charge, skip_expensive_init=True
         )
         temp_peptide.mod_pos_map = mod_map
+        # Copy non_target_mods from PSM - needed for _to_pyopenms_format() to
+        # correctly convert internal format (lowercase letters like 'm') to
+        # PyOpenMS format (e.g., 'M(Oxidation)')
+        temp_peptide.non_target_mods = self.non_target_mods
         temp_peptide.build_ion_ladders()  # Build ion ladders with correct mod_pos_map
 
         # Pass tolerance directly instead of copying entire config

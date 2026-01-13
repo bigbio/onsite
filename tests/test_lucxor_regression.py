@@ -169,6 +169,136 @@ class TestPeakMatching:
             assert p1["matched_ion_str"] == p2["matched_ion_str"], "Ion strings differ"
             assert abs(p1["mass_diff"] - p2["mass_diff"]) < 1e-10, "Mass diff values differ"
 
+    def test_match_peaks_with_non_target_mods(self):
+        """Test that _match_peaks correctly handles non-target modifications like Oxidation.
+
+        Regression test for bug where non_target_mods weren't copied to temporary
+        Peptide objects in PSM._match_peaks(), causing PyOpenMS to fail with:
+        'unexpected character m' when converting internal format to PyOpenMS format.
+
+        The internal format uses lowercase letters (e.g., 'm' for oxidized M), which
+        must be converted to PyOpenMS format (e.g., 'M(Oxidation)') using the
+        non_target_mods dictionary.
+        """
+        from onsite.lucxor.psm import PSM
+        from onsite.lucxor.peptide import Peptide
+        from onsite.lucxor.spectrum import Spectrum
+
+        set_random_seeds()
+
+        config = {
+            "fragment_mass_tolerance": 0.5,
+            "ms2_tolerance_units": "Da",
+            "target_modifications": ["Phospho (S)", "Phospho (T)", "Phospho (Y)"],
+            "neutral_losses": ["sty -H3PO4 -97.97690"],
+            "decoy_neutral_losses": ["X -H3PO4 -97.97690"],
+            "decoy_mass": 79.966331,
+            "min_mz": 150.0,
+            "max_charge_state": 3,
+        }
+
+        # Peptide with both Phospho (target) and Oxidation (non-target) modifications
+        # This is the case that triggered the bug: M(Oxidation) becomes 'm' in internal
+        # format, and without non_target_mods being passed, it couldn't be converted back
+        peptide_seq = "ALLSLHT(Phospho)M(Oxidation)K"
+        peptide = Peptide(peptide_seq, config, charge=2)
+
+        # Verify that non_target_mods was populated correctly
+        assert len(peptide.non_target_mods) > 0, "non_target_mods should contain Oxidation"
+        assert any("Oxidation" in str(v) for v in peptide.non_target_mods.values()), (
+            "non_target_mods should contain Oxidation modification"
+        )
+
+        # Create a simple spectrum
+        mz_array = np.linspace(200, 1200, 500)
+        intensity_array = np.random.uniform(100, 10000, len(mz_array))
+        spectrum = Spectrum(mz_array, intensity_array)
+
+        # Create PSM
+        psm = PSM(
+            peptide=peptide,
+            spectrum_source=spectrum,
+            config=config,
+        )
+
+        # Verify PSM has the non_target_mods
+        assert len(psm.non_target_mods) > 0, "PSM.non_target_mods should contain Oxidation"
+
+        # This is the critical test: _match_peaks should work without raising
+        # "unexpected character 'm'" error. Before the fix, this would fail because
+        # non_target_mods wasn't passed to the temporary Peptide object.
+        internal_format_perm = peptide.mod_peptide  # e.g., "ALLSLHtmK"
+        try:
+            matched_peaks = psm._match_peaks(internal_format_perm, 0.5)
+        except ValueError as e:
+            if "unexpected character" in str(e):
+                pytest.fail(
+                    f"_match_peaks failed to handle non-target mod in internal format: {e}\n"
+                    f"This indicates non_target_mods wasn't copied to temp Peptide."
+                )
+            raise
+
+        # Verify we got some matched peaks (exact count depends on spectrum)
+        # The important thing is that it didn't crash
+        assert isinstance(matched_peaks, list), "_match_peaks should return a list"
+
+    def test_match_peaks_preserves_non_target_mods_in_permutations(self):
+        """Test that non-target mods are preserved across all permutation scorings.
+
+        When scoring different phospho site permutations, non-target modifications
+        (like Oxidation) should remain in the same position for all permutations.
+        """
+        from onsite.lucxor.psm import PSM
+        from onsite.lucxor.peptide import Peptide
+        from onsite.lucxor.spectrum import Spectrum
+
+        set_random_seeds()
+
+        config = {
+            "fragment_mass_tolerance": 0.5,
+            "ms2_tolerance_units": "Da",
+            "target_modifications": ["Phospho (S)", "Phospho (T)", "Phospho (Y)"],
+            "neutral_losses": ["sty -H3PO4 -97.97690"],
+            "decoy_neutral_losses": ["X -H3PO4 -97.97690"],
+            "decoy_mass": 79.966331,
+            "min_mz": 150.0,
+            "max_charge_state": 3,
+        }
+
+        # Peptide with multiple potential phospho sites and an oxidation
+        # S at pos 4, T at pos 6 - both potential phospho sites
+        # M at pos 8 - oxidation (non-target)
+        peptide_seq = "AAALST(Phospho)SM(Oxidation)K"
+        peptide = Peptide(peptide_seq, config, charge=2)
+
+        # Create spectrum
+        mz_array = np.linspace(200, 1200, 500)
+        intensity_array = np.random.uniform(100, 10000, len(mz_array))
+        spectrum = Spectrum(mz_array, intensity_array)
+
+        psm = PSM(
+            peptide=peptide,
+            spectrum_source=spectrum,
+            config=config,
+        )
+
+        # Generate real permutations - these move the Phospho to different S/T positions
+        # but Oxidation on M should stay the same
+        real_perms = psm.generate_real_permutations()
+
+        assert len(real_perms) > 1, "Should have multiple permutations for ambiguous sites"
+
+        # Each permutation should successfully build ion ladders without error
+        for perm_str, sites in real_perms:
+            try:
+                matched = psm._match_peaks(perm_str, 0.5)
+                assert isinstance(matched, list), f"_match_peaks failed for {perm_str}"
+            except ValueError as e:
+                pytest.fail(
+                    f"_match_peaks failed for permutation '{perm_str}': {e}\n"
+                    f"Non-target mods may not be correctly preserved."
+                )
+
 
 class TestPSMScoring:
     """Test PSM scoring consistency."""
