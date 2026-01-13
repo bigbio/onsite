@@ -702,6 +702,11 @@ class PSM:
                 if 0 <= p < n:
                     ox_prefix[p + 1:] += 1
 
+            # Pre-compute neutral loss eligibility based on S/T/Y presence
+            # This determines which fragment positions CAN have neutral losses
+            # (based on potential phospho sites, not actual phosphorylation in permutation)
+            b_can_nl, y_can_nl = self._precompute_nl_eligibility(unmod_seq)
+
             # ═══════════════════════════════════════════════════════════════
             # PHASE 2: Score each permutation using backbone + delta approach
             # ═══════════════════════════════════════════════════════════════
@@ -732,8 +737,8 @@ class PSM:
                             theo_mz_list.append(b_mz)
                             ion_types.append('b')
 
-                            # Neutral losses for b-ions (only if fragment has phospho mods)
-                            if b_mod_count > 0:
+                            # Neutral losses for b-ions (if fragment contains potential phospho sites S/T/Y)
+                            if b_can_nl[i]:
                                 for nl_mass in nl_masses:
                                     nl_mz = (b_mass + nl_mass) / z
                                     if nl_mz > min_mz:
@@ -752,8 +757,8 @@ class PSM:
                             theo_mz_list.append(y_mz)
                             ion_types.append('y')
 
-                            # Neutral losses for y-ions (only if fragment has phospho mods)
-                            if y_mod_count > 0:
+                            # Neutral losses for y-ions (if fragment contains potential phospho sites S/T/Y)
+                            if y_can_nl[i]:
                                 for nl_mass in nl_masses:
                                     nl_mz = (y_mass + nl_mass) / z
                                     if nl_mz > min_mz:
