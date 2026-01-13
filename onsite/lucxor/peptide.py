@@ -683,6 +683,7 @@ class Peptide:
             params = spec_gen.getParameters()
             params.setValue("add_b_ions", "true")
             params.setValue("add_y_ions", "true")
+            params.setValue("add_first_prefix_ion", "true")
             params.setValue("add_losses", "true")
             params.setValue("add_metainfo", "true")
             params.setValue("add_precursor_peaks", "false")
