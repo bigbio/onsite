@@ -63,28 +63,31 @@ class TestPeptideIonLadders:
 
         pep = Peptide("PEPTIDEs(Phospho)EQ", config, charge=2)
 
-        # Reference values (computed once and stored)
+        # Reference values from PyOpenMS TheoreticalSpectrumGenerator
+        # Ion naming format: b2+, y3-H2O1+, etc.
         expected_b_ions = {
-            "b2:PE": 227.10262646688,
-            "b3:PEP": 324.15538646688,
-            "b4:PEPT": 425.20306646688,
+            "b2+": 227.102634913371,
+            "b3+": 324.155399136671,
+            "b4+": 425.203078359971,
         }
 
         expected_y_ions = {
-            "y9:EPTIDEsEQ": 1127.41399215088,
-            "y8:PTIDEsEQ": 998.3714021508799,
-            "y7:TIDEsEQ": 901.3186421508799,
+            "y9+": 1127.414015094071,
+            "y8+": 998.371420870771,
+            "y7+": 901.318656646471,
         }
+
+        mass_tolerance = 1e-6
 
         for ion_name, expected_mz in expected_b_ions.items():
             assert ion_name in pep.b_ions, f"Missing b-ion: {ion_name}"
-            assert abs(pep.b_ions[ion_name] - expected_mz) < 1e-6, (
+            assert abs(pep.b_ions[ion_name] - expected_mz) < mass_tolerance, (
                 f"B-ion {ion_name} mismatch: {pep.b_ions[ion_name]} vs {expected_mz}"
             )
 
         for ion_name, expected_mz in expected_y_ions.items():
             assert ion_name in pep.y_ions, f"Missing y-ion: {ion_name}"
-            assert abs(pep.y_ions[ion_name] - expected_mz) < 1e-6, (
+            assert abs(pep.y_ions[ion_name] - expected_mz) < mass_tolerance, (
                 f"Y-ion {ion_name} mismatch: {pep.y_ions[ion_name]} vs {expected_mz}"
             )
 

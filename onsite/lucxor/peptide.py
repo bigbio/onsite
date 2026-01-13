@@ -299,9 +299,12 @@ class Peptide:
         """
         return self.get_precursor_mass() / self.charge
 
-    def build_ion_ladders(self) -> None:
+    def _build_ion_ladders_custom(self) -> None:
         """
-        Build b-ion and y-ion ladders, naming and generation method fully aligned with Java Peptide.java.
+        Build b-ion and y-ion ladders using custom implementation.
+
+        This method uses manual mass calculation, fully aligned with Java Peptide.java.
+        Used as fallback for decoy sequences that PyOpenMS cannot handle.
         """
         if not self.mod_peptide:
             return
@@ -591,6 +594,163 @@ class Peptide:
 
         # Full peptide is a decoy - check if this specific fragment contains decoy residues
         return any(aa in DECOY_AA_MAP for aa in seq)
+
+    def _has_decoy_symbols(self) -> bool:
+        """
+        Check if the peptide contains decoy symbols (special characters).
+
+        These are symbols from DECOY_AA_MAP that PyOpenMS cannot handle.
+        """
+        return any(aa in DECOY_AA_MAP for aa in self.mod_peptide)
+
+    def _to_pyopenms_format(self) -> str:
+        """
+        Convert internal sequence representation to PyOpenMS AASequence format.
+
+        Internal format uses:
+        - Uppercase letters: unmodified amino acids
+        - Lowercase letters: modified amino acids (s=Phospho-S, t=Phospho-T, etc.)
+        - Special characters: decoy amino acids (cannot be handled by PyOpenMS)
+
+        PyOpenMS format uses:
+        - Uppercase letters with bracketed modifications: S(Phospho), M(Oxidation), etc.
+
+        Returns:
+            PyOpenMS-compatible sequence string, or empty string if decoy symbols present
+        """
+        if self._has_decoy_symbols():
+            return ""  # Cannot convert decoy sequences to PyOpenMS format
+
+        result = []
+        for aa in self.mod_peptide:
+            if aa == "s":
+                result.append("S(Phospho)")
+            elif aa == "t":
+                result.append("T(Phospho)")
+            elif aa == "y":
+                result.append("Y(Phospho)")
+            elif aa == "a":
+                result.append("A(Phospho)")  # PhosphoDecoy treated as Phospho for mass
+            elif aa == "m":
+                result.append("M(Oxidation)")
+            else:
+                result.append(aa)
+
+        return "".join(result)
+
+    def get_precursor_mass_pyopenms(self) -> Optional[float]:
+        """
+        Calculate peptide precursor mass using PyOpenMS AASequence.
+
+        This method provides validation against the custom mass calculation.
+        Returns None for decoy sequences that PyOpenMS cannot handle.
+
+        Returns:
+            Precursor mass [M+zH]^z+ or None for decoy sequences
+        """
+        if self._has_decoy_symbols():
+            return None
+
+        seq_str = self._to_pyopenms_format()
+        if not seq_str:
+            return None
+
+        try:
+            seq = pyopenms.AASequence.fromString(seq_str)
+            # getMonoWeight returns [M+H]+ mass by default for Full type
+            mono_weight = seq.getMonoWeight(pyopenms.Residue.ResidueType.Full, 1)
+            # Adjust for charge: add (charge-1) protons
+            return mono_weight + (self.charge - 1) * PROTON_MASS
+        except Exception as e:
+            logger.warning(f"PyOpenMS precursor mass calculation failed: {e}")
+            return None
+
+    def build_ion_ladders(self) -> bool:
+        """
+        Build b-ion and y-ion ladders using PyOpenMS TheoreticalSpectrumGenerator.
+
+        This method uses PyOpenMS for theoretical spectrum generation, providing
+        consistency with other algorithms (AScore, PhosphoRS) that use PyOpenMS.
+        Falls back to custom implementation for decoy sequences.
+
+        Returns:
+            True if PyOpenMS was used, False if fallback to custom was needed
+        """
+        if self._has_decoy_symbols():
+            # Fall back to custom implementation for decoy sequences
+            self._build_ion_ladders_custom()
+            return False
+
+        if not self.mod_peptide:
+            return False
+
+        self.b_ions = {}
+        self.y_ions = {}
+
+        seq_str = self._to_pyopenms_format()
+        if not seq_str:
+            self._build_ion_ladders_custom()
+            return False
+
+        try:
+            seq = pyopenms.AASequence.fromString(seq_str)
+
+            # Configure spectrum generator
+            spec_gen = pyopenms.TheoreticalSpectrumGenerator()
+            params = spec_gen.getParameters()
+            params.setValue("add_b_ions", "true")
+            params.setValue("add_y_ions", "true")
+            params.setValue("add_losses", "true")
+            params.setValue("add_metainfo", "true")
+            params.setValue("add_precursor_peaks", "false")
+            params.setValue("add_abundant_immonium_ions", "false")
+            params.setValue("isotope_model", "none")
+            spec_gen.setParameters(params)
+
+            min_mz = self.config.get("min_mz", 0.0)
+
+            # Generate spectrum for each charge state
+            for z in range(1, self.charge):
+                theo_spectrum = pyopenms.MSSpectrum()
+                spec_gen.getSpectrum(theo_spectrum, seq, z, z)
+
+                # Extract ions from spectrum
+                for i in range(theo_spectrum.size()):
+                    peak = theo_spectrum[i]
+                    mz = peak.getMZ()
+
+                    if mz <= min_mz:
+                        continue
+
+                    # Get ion annotation from metainfo
+                    ion_name = ""
+                    if theo_spectrum.getStringDataArrays():
+                        for sda in theo_spectrum.getStringDataArrays():
+                            if sda.getName() == "IonNames" and i < len(sda):
+                                raw_name = sda[i]
+                                ion_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+                                break
+
+                    if not ion_name:
+                        continue
+
+                    # Parse ion name and categorize (PyOpenMS format: b2-H2O1++, y3+, etc.)
+                    if ion_name.startswith("b"):
+                        self.b_ions[ion_name] = mz
+                    elif ion_name.startswith("y"):
+                        self.y_ions[ion_name] = mz
+
+            # Build theoretical masses list
+            self.theoretical_masses = list(self.b_ions.values()) + list(
+                self.y_ions.values()
+            )
+            self.theoretical_masses.sort()
+            return True
+
+        except Exception as e:
+            logger.warning(f"PyOpenMS ion ladder generation failed: {e}, using custom implementation")
+            self._build_ion_ladders_custom()
+            return False
 
     def calc_theoretical_masses(self, perm: str) -> List[float]:
         """
