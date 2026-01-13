@@ -124,11 +124,15 @@ def parse_modifications(
                 # Get the position of the modified residue (previous character)
                 if result["unmodified"]:
                     pos = len(result["unmodified"]) - 1
+                    residue = result["unmodified"][-1]  # The modified residue
 
-                    # Get mass if function provided
+                    # Get mass if function provided (pass residue for precise lookup)
                     mod_mass = None
                     if get_mass_func:
                         try:
+                            mod_mass = get_mass_func(mod_name, residue)
+                        except TypeError:
+                            # Fall back if function doesn't accept residue parameter
                             mod_mass = get_mass_func(mod_name)
                         except (ValueError, KeyError):
                             pass

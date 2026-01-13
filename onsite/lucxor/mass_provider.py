@@ -168,15 +168,16 @@ def get_water_mass() -> float:
 _MOD_MASS_CACHE: dict = {}
 
 
-def get_modification_mass(mod_name: str) -> float:
+def get_modification_mass(mod_name: str, residue: str = None) -> float:
     """
     Get modification delta mass from PyOpenMS ModificationsDB.
 
-    Results are cached to avoid repeated lookups and suppress duplicate
-    warnings from PyOpenMS about multiple modifications with the same name.
+    When the residue is provided, uses precise three-argument lookup which
+    avoids PyOpenMS warnings about multiple matches. Results are cached.
 
     Args:
         mod_name: Modification name (e.g., "Phospho", "Oxidation")
+        residue: Single-letter amino acid code for precise lookup (recommended)
 
     Returns:
         Delta mass of the modification
@@ -185,41 +186,32 @@ def get_modification_mass(mod_name: str) -> float:
         ValueError: If modification is not found in PyOpenMS ModificationsDB
     """
     # Check cache first
-    if mod_name in _MOD_MASS_CACHE:
-        return _MOD_MASS_CACHE[mod_name]
+    cache_key = f"{mod_name}:{residue}" if residue else mod_name
+    if cache_key in _MOD_MASS_CACHE:
+        return _MOD_MASS_CACHE[cache_key]
 
     mod_db = ModificationsDB()
 
-    # Try different naming conventions that PyOpenMS uses
-    # Common residue-specific suffixes
-    residue_suffixes = ["", " (S)", " (T)", " (Y)", " (M)", " (C)", " (K)", " (R)",
-                        " (N)", " (Q)", " (W)", " (H)", " (D)", " (E)", " (F)"]
-
-    for suffix in residue_suffixes:
+    # Use precise lookup when residue is known (silent, no warnings)
+    if residue:
         try:
-            mod = mod_db.getModification(mod_name + suffix)
+            mod = mod_db.getModification(
+                mod_name, residue, ResidueModification.TermSpecificity.ANYWHERE
+            )
             mass = mod.getDiffMonoMass()
-            _MOD_MASS_CACHE[mod_name] = mass  # Cache the result
+            _MOD_MASS_CACHE[cache_key] = mass
             return mass
         except Exception:
-            continue
+            pass  # Fall through to generic lookup
 
-    # Also try without any suffix for terminal modifications
-    # and common alternative names
-    alternative_names = [
-        mod_name.replace(" ", ""),  # Try without spaces
-        mod_name.lower(),  # Try lowercase
-        mod_name.upper(),  # Try uppercase
-    ]
-
-    for name in alternative_names:
-        try:
-            mod = mod_db.getModification(name)
-            mass = mod.getDiffMonoMass()
-            _MOD_MASS_CACHE[mod_name] = mass  # Cache the result
-            return mass
-        except Exception:
-            continue
+    # Fall back to generic name lookup (may produce warning for ambiguous names)
+    try:
+        mod = mod_db.getModification(mod_name)
+        mass = mod.getDiffMonoMass()
+        _MOD_MASS_CACHE[cache_key] = mass
+        return mass
+    except Exception:
+        pass
 
     raise ValueError(
         f"Modification '{mod_name}' not found in PyOpenMS ModificationsDB. "
@@ -236,7 +228,7 @@ def get_phospho_mass() -> float:
     """Get phosphorylation modification mass."""
     global PHOSPHO_MASS
     if PHOSPHO_MASS is None:
-        PHOSPHO_MASS = get_modification_mass("Phospho")
+        PHOSPHO_MASS = get_modification_mass("Phospho", "S")  # Mass is same for S/T/Y
     return PHOSPHO_MASS
 
 
@@ -244,7 +236,7 @@ def get_oxidation_mass() -> float:
     """Get oxidation modification mass."""
     global OXIDATION_MASS
     if OXIDATION_MASS is None:
-        OXIDATION_MASS = get_modification_mass("Oxidation")
+        OXIDATION_MASS = get_modification_mass("Oxidation", "M")  # Most common site
     return OXIDATION_MASS
 
 
