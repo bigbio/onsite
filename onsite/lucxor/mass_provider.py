@@ -174,31 +174,43 @@ def get_modification_mass(mod_name: str) -> float:
 
     Returns:
         Delta mass of the modification
+
+    Raises:
+        ValueError: If modification is not found in PyOpenMS ModificationsDB
     """
     mod_db = ModificationsDB()
 
-    # Try different naming conventions
-    search_names = [
-        mod_name,
-        f"{mod_name} (S)",
-        f"{mod_name} (T)",
-        f"{mod_name} (Y)",
-        f"{mod_name} (M)",
+    # Try different naming conventions that PyOpenMS uses
+    # Common residue-specific suffixes
+    residue_suffixes = ["", " (S)", " (T)", " (Y)", " (M)", " (C)", " (K)", " (R)",
+                        " (N)", " (Q)", " (W)", " (H)", " (D)", " (E)", " (F)"]
+
+    for suffix in residue_suffixes:
+        try:
+            mod = mod_db.getModification(mod_name + suffix)
+            return mod.getDiffMonoMass()
+        except Exception:
+            continue
+
+    # Also try without any suffix for terminal modifications
+    # and common alternative names
+    alternative_names = [
+        mod_name.replace(" ", ""),  # Try without spaces
+        mod_name.lower(),  # Try lowercase
+        mod_name.upper(),  # Try uppercase
     ]
 
-    for name in search_names:
+    for name in alternative_names:
         try:
             mod = mod_db.getModification(name)
             return mod.getDiffMonoMass()
         except Exception:
             continue
 
-    # Fallback to known values if PyOpenMS lookup fails
-    fallbacks = {
-        "Phospho": 79.966331,
-        "Oxidation": 15.994915,
-    }
-    return fallbacks.get(mod_name, 0.0)
+    raise ValueError(
+        f"Modification '{mod_name}' not found in PyOpenMS ModificationsDB. "
+        f"Please check the modification name is correct."
+    )
 
 
 # Pre-compute common modification masses

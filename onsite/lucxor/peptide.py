@@ -28,6 +28,13 @@ from .peak import Peak
 
 logger = logging.getLogger(__name__)
 
+# Regex pattern to match any modification in format (ModName)
+# Captures the modification name inside parentheses
+_MOD_PATTERN = re.compile(r"\(([^)]+)\)")
+
+# Target modification names that are handled specially for phospho site localization
+_TARGET_MOD_NAMES = {"Phospho", "PhosphoDecoy"}
+
 
 def extract_target_amino_acids(target_modifications: List[str]) -> Set[str]:
     """
@@ -85,8 +92,8 @@ class Peptide:
         self.config = config  # Configuration
 
         # Modification related
-        self.mod_pos_map = {}  # Position -> Modification mass
-        self.non_target_mods = {}  # Position -> AA
+        self.mod_pos_map = {}  # Position -> Modification mass (target mods)
+        self.non_target_mods = {}  # Position -> Modification name (non-target mods)
 
         # Fragment ion information
         self.b_ions = {}  # Ion string -> m/z
@@ -128,87 +135,54 @@ class Peptide:
             skip_expensive_init: If True, skip permutation generation and ion ladder
                 building. Used for temporary Peptide objects in peak matching.
         """
-        # Convert modified sequence to Java style (lowercase letters represent modifications)
-        if self.mod_peptide and self.mod_peptide != self.peptide:
-            # If modified peptide is provided, use it directly
-            pass
-        else:
-            # Parse modifications from original peptide
-            mod_pep = ""
-            i = 0
-            while i < len(self.peptide):
-                # Check phosphorylation modification (9 characters)
-                if (
-                    i + 9 <= len(self.peptide)
-                    and self.peptide[i : i + 9] == "(Phospho)"
-                ):
-                    # Convert modified amino acid to lowercase
-                    if len(mod_pep) > 0:
-                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
-                    i += 9
-                    continue
-                # Check decoy phosphorylation modification (14 characters)
-                elif (
-                    i + 14 <= len(self.peptide)
-                    and self.peptide[i : i + 14] == "(PhosphoDecoy)"
-                ):
-                    # Convert modified amino acid to lowercase (treat as phosphorylation)
-                    if len(mod_pep) > 0:
-                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
-                    i += 14
-                    continue
-                # Check oxidation modification (11 characters)
-                elif (
-                    i + 11 <= len(self.peptide)
-                    and self.peptide[i : i + 11] == "(Oxidation)"
-                ):
-                    # Convert modified amino acid to lowercase
-                    if len(mod_pep) > 0:
-                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
-                    i += 11
-                    continue
-
-                # If not a modification marker, add the character
-                mod_pep += self.peptide[i]
-                i += 1
-
-            self.mod_peptide = mod_pep
+        from .mass_provider import get_modification_mass
 
         # Initialize modification mapping
-        self.mod_pos_map = {}  # Target modifications (phosphorylation)
-        self.non_target_mods = {}  # Non-target modifications (oxidation, etc.)
+        self.mod_pos_map = {}  # Target modifications (phosphorylation) - position -> mass
+        self.non_target_mods = {}  # Non-target modifications - position -> mod_name
 
-        # Parse modification positions - rebuild mod_pep to calculate correct positions
-        mod_pep_pos = ""
+        # Parse modifications using generic pattern matching
+        # Convert modified sequence to internal format (lowercase = modified)
+        if self.mod_peptide and self.mod_peptide != self.peptide:
+            # If modified peptide is provided directly, we still need to parse
+            # the original peptide to populate mod_pos_map and non_target_mods
+            pass
+        else:
+            self.mod_peptide = ""
+
+        # Parse the original peptide to extract modifications
+        # This populates mod_pos_map, non_target_mods, and builds mod_peptide
         i = 0
         while i < len(self.peptide):
-            if i + 9 <= len(self.peptide) and self.peptide[i : i + 9] == "(Phospho)":
-                # Phosphorylation modification - target modification
-                if len(mod_pep_pos) > 0:
-                    pos = len(mod_pep_pos) - 1
-                    self.mod_pos_map[pos] = 79.966  # Phosphorylation mass
-                i += 9
-            elif (
-                i + 14 <= len(self.peptide)
-                and self.peptide[i : i + 14] == "(PhosphoDecoy)"
-            ):
-                # Decoy phosphorylation modification - also treat as target modification
-                if len(mod_pep_pos) > 0:
-                    pos = len(mod_pep_pos) - 1
-                    self.mod_pos_map[pos] = 79.966  # Phosphorylation mass
-                i += 14
-            elif (
-                i + 11 <= len(self.peptide)
-                and self.peptide[i : i + 11] == "(Oxidation)"
-            ):
-                # Oxidation modification - non-target modification
-                if len(mod_pep_pos) > 0:
-                    pos = len(mod_pep_pos) - 1
-                    self.non_target_mods[pos] = mod_pep_pos[-1].lower()
-                i += 11
-            else:
-                mod_pep_pos += self.peptide[i]
-                i += 1
+            if self.peptide[i] == "(":
+                # Found start of modification - extract the full modification name
+                match = _MOD_PATTERN.match(self.peptide, i)
+                if match:
+                    mod_name = match.group(1)
+                    mod_end = match.end()
+
+                    # Get the position of the modified residue (previous character)
+                    if len(self.mod_peptide) > 0:
+                        pos = len(self.mod_peptide) - 1
+
+                        if mod_name in _TARGET_MOD_NAMES:
+                            # Target modification (Phospho, PhosphoDecoy)
+                            self.mod_pos_map[pos] = get_modification_mass(mod_name)
+                        else:
+                            # Non-target modification - store the modification name
+                            self.non_target_mods[pos] = mod_name
+
+                        # Convert the residue to lowercase to mark it as modified
+                        self.mod_peptide = (
+                            self.mod_peptide[:-1] + self.mod_peptide[-1].lower()
+                        )
+
+                    i = mod_end
+                    continue
+
+            # Regular amino acid character
+            self.mod_peptide += self.peptide[i]
+            i += 1
 
         # Calculate potential phosphorylation sites and reported phosphorylation sites
         # Extract target amino acids from target_modifications
@@ -614,8 +588,8 @@ class Peptide:
         - Special characters from DECOY_AA_MAP: PhosphoDecoy on mapped amino acids
 
         Modification disambiguation:
-        - Uses self.non_target_mods to distinguish oxidation from phosphorylation
-        - Positions in non_target_mods are oxidation (any residue)
+        - Uses self.non_target_mods to retrieve the actual modification name
+        - Positions in non_target_mods have their stored modification name emitted
         - Other lowercase positions are target modifications (Phospho on S/T/Y,
           PhosphoDecoy on A or decoy residues)
 
@@ -630,10 +604,11 @@ class Peptide:
 
         result = []
         for pos, aa in enumerate(self.mod_peptide):
-            # Check if this position is a non-target modification (oxidation)
+            # Check if this position has a non-target modification
             if pos in self.non_target_mods:
-                # Oxidation - emit uppercase letter + (Oxidation)
-                result.append(f"{aa.upper()}(Oxidation)")
+                # Emit uppercase letter + stored modification name
+                mod_name = self.non_target_mods[pos]
+                result.append(f"{aa.upper()}({mod_name})")
             elif aa == "s":
                 result.append("S(Phospho)")
             elif aa == "t":
