@@ -610,9 +610,14 @@ class Peptide:
 
         Internal format uses:
         - Uppercase letters: unmodified amino acids
-        - Lowercase letters: modified amino acids (s=Phospho-S, t=Phospho-T, etc.)
-        - Lowercase 'a': PhosphoDecoy on Alanine
-        - Special characters from DECOY_AA_MAP: PhosphoDecoy on other amino acids
+        - Lowercase letters: modified amino acids
+        - Special characters from DECOY_AA_MAP: PhosphoDecoy on mapped amino acids
+
+        Modification disambiguation:
+        - Uses self.non_target_mods to distinguish oxidation from phosphorylation
+        - Positions in non_target_mods are oxidation (any residue)
+        - Other lowercase positions are target modifications (Phospho on S/T/Y,
+          PhosphoDecoy on A or decoy residues)
 
         PyOpenMS format uses:
         - Uppercase letters with bracketed modifications: S(Phospho), M(Oxidation), etc.
@@ -624,8 +629,12 @@ class Peptide:
         from .mass_provider import get_phospho_decoy_mod_name
 
         result = []
-        for aa in self.mod_peptide:
-            if aa == "s":
+        for pos, aa in enumerate(self.mod_peptide):
+            # Check if this position is a non-target modification (oxidation)
+            if pos in self.non_target_mods:
+                # Oxidation - emit uppercase letter + (Oxidation)
+                result.append(f"{aa.upper()}(Oxidation)")
+            elif aa == "s":
                 result.append("S(Phospho)")
             elif aa == "t":
                 result.append("T(Phospho)")
@@ -635,8 +644,6 @@ class Peptide:
                 # PhosphoDecoy on Alanine
                 mod_name = get_phospho_decoy_mod_name("A")
                 result.append(f"A({mod_name})")
-            elif aa == "m":
-                result.append("M(Oxidation)")
             elif aa in DECOY_AA_MAP:
                 # Special character represents decoy modification on mapped amino acid
                 real_aa = DECOY_AA_MAP[aa]
