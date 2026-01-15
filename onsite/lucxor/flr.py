@@ -457,7 +457,7 @@ class FLRCalculator:
             self.minor_map_l[i] = [self.pos[i], self.local_fdr[i]]
 
     def perform_minorization(self) -> None:
-        """Perform minorization"""
+        """Perform minorization with validation"""
         for iter_type in ["global", "local"]:
             fdr_array = self.global_fdr if iter_type == "global" else self.local_fdr
             minor_map = self.minor_map_g if iter_type == "global" else self.minor_map_l
@@ -471,6 +471,14 @@ class FLRCalculator:
             x = np.array([p[0] for p in pairs])  # delta scores
             f = np.array([p[1] for p in pairs])  # FDR values
             is_minor_point = np.zeros(n, dtype=bool)
+            
+            # Validate that data is sorted (critical for minorization algorithm)
+            is_sorted = all(x[i] <= x[i+1] for i in range(len(x)-1))
+            if not is_sorted:
+                logger.error(f"[ERROR] {iter_type} FDR data is NOT sorted! Minorization will fail!")
+                logger.error(f"First 10 delta scores: {x[:10]}")
+            else:
+                logger.debug(f"[OK] {iter_type} FDR data is properly sorted")
 
             # Find minimum value and its index (vectorized)
             min_idx = np.argmin(f)
@@ -523,12 +531,12 @@ class FLRCalculator:
                 while cur_end < n and not is_minor_point[cur_end]:
                     cur_end += 1
 
-            # Map results back to FDR array - O(n) with dictionary lookup instead of O(n²)
-            # Use reversed iteration to keep FIRST occurrence (matching original behavior)
-            x_to_idx = {x[j]: j for j in range(n - 1, -1, -1)}
+            # Map results back to FDR array
             for i in range(n):
-                if self.pos[i] in x_to_idx:
-                    fdr_array[i] = f[x_to_idx[self.pos[i]]]
+                for j in range(n):
+                    if self.pos[i] == x[j]:
+                        fdr_array[i] = f[j]
+                        break
 
             if iter_type == "global":
                 self.global_fdr = fdr_array
@@ -536,55 +544,144 @@ class FLRCalculator:
                 self.local_fdr = fdr_array
 
     def assign_fdrs(self, psms: List) -> None:
-        """Assign FDR values to PSMs"""
-        real_psm_index = 0
+        """Assign FDR values to PSMs by finding closest delta_score in sorted mapping"""
         total_real_psms = sum(1 for psm in psms if not psm.is_decoy)
         logger.info(
-            f"assign_fdrs: Total PSM count={len(psms)}, Real PSM count={total_real_psms}, FDR array size={len(self.global_fdr)}"
+            f"assign_fdrs: Total PSM count={len(psms)}, Real PSM count={total_real_psms}"
         )
 
+        # Check if sorted mapping exists
+        if not hasattr(self, 'sorted_delta_scores') or len(self.sorted_delta_scores) == 0:
+            logger.warning("No sorted FLR mapping available, using default values")
+            for psm in psms:
+                if not psm.is_decoy:
+                    psm.global_flr = 1.0
+                    psm.local_flr = 1.0
+                else:
+                    psm.global_flr = float("nan")
+                    psm.local_flr = float("nan")
+            return
+
+        # Assign FLR values to each PSM
+        assigned_count = 0
+        default_count = 0
+        decoy_count = 0
+        
         for psm in psms:
-            if not psm.is_decoy:  # Only assign FDR values to real PSMs
-                # Only process PSMs with delta_score > min_delta_score
+            if not psm.is_decoy:
                 if (
                     hasattr(psm, "delta_score")
                     and not np.isnan(psm.delta_score)
                     and psm.delta_score > self.min_delta_score
                 ):
-                    # Check if index is out of bounds
-                    if real_psm_index >= len(self.global_fdr):
-                        logger.error(
-                            f"FDR array index out of bounds: real_psm_index={real_psm_index}, global_fdr_size={len(self.global_fdr)}"
+                    psm_delta = float(psm.delta_score)
+                    
+                    # Use binary search to find the closest delta_score
+                    # searchsorted finds the index where psm_delta would be inserted
+                    idx = np.searchsorted(self.sorted_delta_scores, psm_delta)
+                    
+                    # Determine the closest index
+                    if idx == 0:
+                        # PSM delta_score is smaller than all values, use first
+                        closest_idx = 0
+                    elif idx >= len(self.sorted_delta_scores):
+                        # PSM delta_score is larger than all values, use last
+                        closest_idx = len(self.sorted_delta_scores) - 1
+                    else:
+                        # Check which is closer: idx-1 or idx
+                        dist_left = abs(psm_delta - self.sorted_delta_scores[idx - 1])
+                        dist_right = abs(psm_delta - self.sorted_delta_scores[idx])
+                        closest_idx = (idx - 1) if dist_left <= dist_right else idx
+                    
+                    # Assign FLR values from the closest match
+                    psm.global_flr = float(self.sorted_global_flr[closest_idx])
+                    psm.local_flr = float(self.sorted_local_flr[closest_idx])
+                    assigned_count += 1
+                    
+                    # Log if the match is not very close
+                    delta_diff = abs(psm_delta - self.sorted_delta_scores[closest_idx])
+                    if delta_diff > 1.0:
+                        logger.debug(
+                            f"PSM delta_score {psm_delta:.4f} matched to {self.sorted_delta_scores[closest_idx]:.4f} "
+                            f"(diff={delta_diff:.4f})"
                         )
-                        # Set default values for remaining PSMs
-                        psm.global_flr = 1.0
-                        psm.local_flr = 1.0
-                        real_psm_index += 1  # Still need to increment index
-                        continue
-
-                    # Apply min(1.0, ...) limit
-                    original_g_fdr = self.global_fdr[real_psm_index]
-                    original_l_fdr = self.local_fdr[real_psm_index]
-                    g_fdr = min(1.0, original_g_fdr)
-                    l_fdr = min(1.0, original_l_fdr)
-
-                    # Add debug information
-                    if original_g_fdr > 1.0 or original_l_fdr > 1.0:
-                        logger.warning(
-                            f"PSM {real_psm_index}: Original FDR value > 1.0 - global_fdr={original_g_fdr:.6f}, local_fdr={original_l_fdr:.6f}"
-                        )
-
-                    psm.global_flr = g_fdr
-                    psm.local_flr = l_fdr
-                    real_psm_index += 1
                 else:
                     # For real PSMs with delta_score <= min_delta_score, set default values
                     psm.global_flr = 1.0
                     psm.local_flr = 1.0
+                    default_count += 1
             else:
                 # Set decoy PSMs to NaN
                 psm.global_flr = float("nan")
                 psm.local_flr = float("nan")
+                decoy_count += 1
+        
+        logger.info(
+            f"FLR assignment completed - Assigned: {assigned_count}, Default: {default_count}, Decoy: {decoy_count}"
+        )
+        
+        # Validate monotonicity
+        self._validate_flr_monotonicity(psms)
+
+    def _validate_flr_monotonicity(self, psms: List) -> None:
+        """Validate that FLR values are monotonically decreasing with increasing delta_score"""
+        # Collect real PSMs with valid delta_score and FLR
+        real_psms_data = []
+        for psm in psms:
+            if (not psm.is_decoy and 
+                hasattr(psm, 'delta_score') and 
+                not np.isnan(psm.delta_score) and
+                hasattr(psm, 'global_flr') and
+                not np.isnan(psm.global_flr) and
+                psm.global_flr < 1.0):  # Exclude default values
+                real_psms_data.append({
+                    'delta_score': psm.delta_score,
+                    'global_flr': psm.global_flr,
+                    'local_flr': psm.local_flr
+                })
+        
+        if len(real_psms_data) < 2:
+            logger.debug("Insufficient PSMs for monotonicity validation")
+            return
+        
+        # Sort by delta_score
+        sorted_data = sorted(real_psms_data, key=lambda x: x['delta_score'])
+        
+        # Check monotonicity
+        global_violations = 0
+        local_violations = 0
+        
+        for i in range(len(sorted_data) - 1):
+            curr = sorted_data[i]
+            next_psm = sorted_data[i + 1]
+            
+            # Global FLR should decrease (or stay same) as delta_score increases
+            if curr['global_flr'] < next_psm['global_flr']:
+                global_violations += 1
+                if global_violations <= 3:  # Log first 3 violations
+                    logger.debug(
+                        f"Global FLR violation: delta {curr['delta_score']:.4f} (FLR={curr['global_flr']:.4f}) "
+                        f"-> {next_psm['delta_score']:.4f} (FLR={next_psm['global_flr']:.4f})"
+                    )
+            
+            # Local FLR should decrease (or stay same) as delta_score increases
+            if curr['local_flr'] < next_psm['local_flr']:
+                local_violations += 1
+                if local_violations <= 3:  # Log first 3 violations
+                    logger.debug(
+                        f"Local FLR violation: delta {curr['delta_score']:.4f} (FLR={curr['local_flr']:.4f}) "
+                        f"-> {next_psm['delta_score']:.4f} (FLR={next_psm['local_flr']:.4f})"
+                    )
+        
+        # Report results
+        total_pairs = len(sorted_data) - 1
+        if global_violations == 0 and local_violations == 0:
+            logger.info(f"✓ FLR monotonicity validated: {total_pairs} pairs checked, no violations")
+        else:
+            logger.warning(
+                f"⚠ FLR monotonicity violations detected: "
+                f"Global={global_violations}/{total_pairs}, Local={local_violations}/{total_pairs}"
+            )
 
     def calculate_flr(self, psms):
         """Calculate FLR
@@ -616,13 +713,47 @@ class FLRCalculator:
         # Calculate FDR
         self.calc_both_fdrs()
 
-        # Perform minorization
+        # Set minor maps
+        self.set_minor_maps()
+
+        # Perform minorization to ensure monotonicity
         self.perform_minorization()
+
+        # Create sorted delta_score to FLR mapping for efficient lookup
+        self._create_sorted_flr_mapping()
 
         # Assign FDR values to each PSM
         self.assign_fdrs(psms)
 
         logger.info("FLR calculation completed")
+
+    def _create_sorted_flr_mapping(self) -> None:
+        """
+        Create a sorted mapping of delta_score to FLR values.
+        This allows efficient lookup when assigning FLR to PSMs.
+        """
+        # Create list of (delta_score, global_flr, local_flr) tuples
+        flr_data = []
+        for i in range(len(self.pos)):
+            if i < len(self.global_fdr) and i < len(self.local_fdr):
+                flr_data.append({
+                    'delta_score': float(self.pos[i]),
+                    'global_flr': min(1.0, float(self.global_fdr[i])),
+                    'local_flr': min(1.0, float(self.local_fdr[i]))
+                })
+        
+        # Sort by delta_score
+        flr_data.sort(key=lambda x: x['delta_score'])
+        
+        # Store sorted arrays for binary search
+        self.sorted_delta_scores = np.array([d['delta_score'] for d in flr_data])
+        self.sorted_global_flr = np.array([d['global_flr'] for d in flr_data])
+        self.sorted_local_flr = np.array([d['local_flr'] for d in flr_data])
+        
+        logger.info(
+            f"Created sorted FLR mapping with {len(self.sorted_delta_scores)} entries, "
+            f"delta_score range: [{self.sorted_delta_scores[0]:.4f}, {self.sorted_delta_scores[-1]:.4f}]"
+        )
 
     def calculate_flr_estimates(self, psms: List) -> None:
         """
