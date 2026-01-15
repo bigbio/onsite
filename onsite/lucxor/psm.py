@@ -31,7 +31,12 @@ from .constants import (
     OXIDATION_MASS,
 )
 from .peak import Peak
-from .peptide import Peptide, extract_target_amino_acids
+from .peptide import (
+    Peptide,
+    extract_target_amino_acids,
+    parse_modifications,
+    strip_modifications,
+)
 from .spectrum import Spectrum
 from .flr import FLRCalculator
 from .globals import get_decoy_symbol
@@ -220,66 +225,52 @@ class PSM:
             logger.error(f"Error reducing neutral loss peak: {str(e)}")
 
     def _init_modifications(self):
-        """Initialize modification information."""
+        """Initialize modification information.
+
+        Uses shared parse_modifications() to handle any (ModName) pattern.
+        Target modifications (Phospho, PhosphoDecoy) are stored in mod_pos_map.
+        Non-target modifications are stored in non_target_mods with their names.
+        """
+        from .mass_provider import get_modification_mass
+
         try:
-            # Get the peptide sequence
             seq = self.peptide.peptide
 
-            # Initialize modification maps
-            self.mod_coord_map = {}
-            self.non_target_mods = {}
-            self.target_mod_map = {}  # Initialize target_mod_map
-            self.mod_pos_map = {}  # Initialize mod_pos_map
+            # Parse modifications using shared utility function
+            parsed = parse_modifications(seq, get_mass_func=get_modification_mass)
 
-            # Initialize target_mod_map, add S, T, Y as target modification sites
+            # Initialize modification maps
             self.target_mod_map = {"S": True, "T": True, "Y": True}
 
-            # Process N-terminal modifications
-            if seq.startswith("["):
+            # Build mod_coord_map (all mods: position -> mass)
+            self.mod_coord_map = {
+                pos: mass for pos, (name, mass) in parsed["all_mods"].items()
+                if mass is not None
+            }
+
+            # Copy non_target_mods directly (position -> mod_name)
+            self.non_target_mods = parsed["non_target_mods"]
+
+            # Build mod_pos_map (position -> mass for mass calculations)
+            # Includes both target mods and non-target mods
+            self.mod_pos_map = {}
+            for pos, mass in parsed["target_mods"].items():
+                if mass is not None:
+                    self.mod_pos_map[pos] = mass
+            for pos, mod_name in parsed["non_target_mods"].items():
+                if pos in self.mod_coord_map:
+                    self.mod_pos_map[pos] = self.mod_coord_map[pos]
+
+            # Handle terminal modifications
+            if parsed["has_nterm"]:
                 self.mod_coord_map[NTERM_MOD] = 0.0
-                self.mod_pos_map[NTERM_MOD] = (
-                    0.0  # Add N-terminal modification position
-                )
-                seq = seq[1:]
-
-            # Process C-terminal modifications
-            if seq.endswith("]"):
+                self.mod_pos_map[NTERM_MOD] = 0.0
+            if parsed["has_cterm"]:
                 self.mod_coord_map[CTERM_MOD] = 0.0
-                self.mod_pos_map[CTERM_MOD] = len(
-                    seq
-                )  # Add C-terminal modification position
-                seq = seq[:-1]
-
-            # Process internal modifications - use same logic as Peptide class
-            mod_pep_pos = ""  # Used to track modified peptide length
-            i = 0
-            while i < len(seq):
-                if i + 9 <= len(seq) and seq[i : i + 9] == "(Phospho)":
-                    if len(mod_pep_pos) > 0:
-                        pos = len(mod_pep_pos) - 1
-                        self.mod_coord_map[pos] = PHOSPHO_MOD_MASS
-                        self.mod_pos_map[pos] = PHOSPHO_MOD_MASS
-                    i += 9
-                elif i + 14 <= len(seq) and seq[i : i + 14] == "(PhosphoDecoy)":
-                    # Treat PhosphoDecoy as phosphorylation modification
-                    if len(mod_pep_pos) > 0:
-                        pos = len(mod_pep_pos) - 1
-                        self.mod_coord_map[pos] = PHOSPHO_MOD_MASS
-                        self.mod_pos_map[pos] = PHOSPHO_MOD_MASS
-                    i += 14
-                elif i + 11 <= len(seq) and seq[i : i + 11] == "(Oxidation)":
-                    if len(mod_pep_pos) > 0:
-                        pos = len(mod_pep_pos) - 1
-                        self.mod_coord_map[pos] = OXIDATION_MASS
-                        self.mod_pos_map[pos] = OXIDATION_MASS
-                        self.non_target_mods[pos] = mod_pep_pos[-1].lower()
-                    i += 11
-                else:
-                    mod_pep_pos += seq[i]
-                    i += 1
+                self.mod_pos_map[CTERM_MOD] = 0.0
 
             # Update the peptide sequence
-            self.peptide_sequence = self.peptide.get_unmodified_sequence()
+            self.peptide_sequence = parsed["unmodified"]
 
         except Exception as e:
             logger.error(f"Error initializing modification information: {str(e)}")
@@ -636,97 +627,233 @@ class PSM:
 
     def score_permutations(self, model: Optional[object]) -> None:
         """
-        Score all permutations of the peptide sequence
+        Score all permutations using shared backbone mass computation.
+
+        This optimized version computes the unmodified backbone cumulative masses
+        once, then for each permutation just adjusts for modification positions.
+        This avoids redundant string parsing and mass lookups.
 
         Args:
             model: Optional scoring model
         """
         try:
-            # Get all permutations from pos_permutation_score_map and neg_permutation_score_map
+            # Get all permutations
             all_perms = list(self.pos_permutation_score_map.keys()) + list(
                 self.neg_permutation_score_map.keys()
             )
-            base_tolerance = self.config.get(
-                "fragment_mass_tolerance", 0.1
-            )  # Read from config, default 0.1
 
-            # Score each permutation
+            if not all_perms:
+                return
+
+            # Get charge model early
+            charge_model = model.get_charge_model(self.charge) if model else None
+            if charge_model is None:
+                logger.debug(f"No charge model found for charge {self.charge}")
+                return
+
+            # Get spectrum data once
+            mz_values, intensities = self.spectrum.get_peaks()
+            if len(mz_values) == 0:
+                return
+
+            norm_intensity = self.spectrum.norm_intensity
+
+            # Ensure spectrum has sorted indices for binary search
+            if self.spectrum._mz_sorted is None:
+                self.spectrum._update_sorted_indices()
+            mz_sorted = self.spectrum._mz_sorted
+            sort_indices = self.spectrum._mz_sorted_indices
+
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1: Compute shared backbone data (ONCE for all permutations)
+            # ═══════════════════════════════════════════════════════════════
+            unmod_seq = self._get_unmodified_sequence()
+            n = len(unmod_seq)
+            cumsum = self._compute_backbone_cumsum(unmod_seq)
+            total_unmod_mass = cumsum[n]
+
+            # Config values
+            base_tolerance = self.config.get("fragment_mass_tolerance", 0.1)
+            is_ppm = self.config.get("ms2_tolerance_units", "Da") == "ppm"
+            min_mz = self.config.get("min_mz", 0.0)
+
+            # Neutral loss masses
+            nl_masses = []
+            nl_list = self.config.get("neutral_losses", [])
+            if isinstance(nl_list, list):
+                for item in nl_list:
+                    parts = item.strip().split()
+                    if len(parts) >= 3:
+                        nl_masses.append(float(parts[2]))
+
+            # Pre-compute oxidation mass contributions (fixed mods, same for all permutations)
+            ox_positions = sorted(self.non_target_mods.keys()) if self.non_target_mods else []
+            ox_prefix = np.zeros(n + 1, dtype=int)
+            for p in ox_positions:
+                if 0 <= p < n:
+                    ox_prefix[p + 1:] += 1
+
+            # Pre-compute neutral loss eligibility based on S/T/Y presence
+            # This determines which fragment positions CAN have neutral losses
+            # (based on potential phospho sites, not actual phosphorylation in permutation)
+            b_can_nl, y_can_nl = self._precompute_nl_eligibility(unmod_seq)
+
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2: Score each permutation using backbone + delta approach
+            # ═══════════════════════════════════════════════════════════════
             for perm in all_perms:
-                # Check if it"s a decoy sequence
-                is_decoy = self._is_decoy_sequence(perm)
+                # Get modification positions for this permutation
+                phospho_pos, decoy_pos, is_decoy = self._get_mod_positions_from_perm(perm)
+                all_mod_positions = phospho_pos + decoy_pos
 
-                if is_decoy:
-                    tolerance = base_tolerance * 2.0  # decoyPadding = 2.0
-                else:
-                    tolerance = base_tolerance
+                # Tolerance adjustment for decoys
+                tolerance = base_tolerance * 2.0 if is_decoy else base_tolerance
 
-                # Calculate score
-                final_score = 0.0
-                matched_peaks = self._match_peaks(perm, tolerance)
+                # ─────────────────────────────────────────────────────────
+                # Pre-compute modification prefix counts for O(1) lookup
+                # mod_prefix[i] = count of modifications at positions < i
+                # ─────────────────────────────────────────────────────────
+                mod_prefix = np.zeros(n + 1, dtype=int)
+                for p in all_mod_positions:
+                    if 0 <= p < n:
+                        mod_prefix[p + 1:] += 1
+                total_mods = mod_prefix[n]
 
-                # Get charge model
-                charge_model = model.get_charge_model(self.charge) if model else None
+                # ─────────────────────────────────────────────────────────
+                # Compute all theoretical ion m/z values for this permutation
+                # ─────────────────────────────────────────────────────────
+                theo_mz_list = []
+                ion_types = []  # 'b' or 'y'
 
-                if charge_model is None:
-                    logger.debug(f"No charge model found for charge {self.charge}")
+                for z in range(1, self.charge):
+                    for i in range(2, n):  # b-ions from position 2 to n-1
+                        # b-ion: prefix contains positions 0..i-1
+                        # Count mods in prefix using O(1) lookup
+                        b_mod_count = int(mod_prefix[i])
+                        b_ox_count = int(ox_prefix[i])
+                        b_mass = cumsum[i] + b_mod_count * PHOSPHO_MOD_MASS + b_ox_count * OXIDATION_MASS + PROTON_MASS * z
+                        b_mz = b_mass / z
+
+                        if b_mz > min_mz:
+                            theo_mz_list.append(b_mz)
+                            ion_types.append('b')
+
+                            # Neutral losses for b-ions (if fragment contains target residues)
+                            if b_can_nl[i]:
+                                for nl_mass in nl_masses:
+                                    nl_mz = (b_mass + nl_mass) / z
+                                    if nl_mz > min_mz:
+                                        theo_mz_list.append(nl_mz)
+                                        ion_types.append('b')
+
+                    for i in range(1, n - 1):  # y-ions from position 1 to n-2
+                        # y-ion: suffix contains positions i..n-1
+                        # Count mods in suffix using O(1) lookup
+                        y_mod_count = total_mods - int(mod_prefix[i])
+                        y_ox_count = int(ox_prefix[n] - ox_prefix[i])
+                        y_mass = (total_unmod_mass - cumsum[i]) + y_mod_count * PHOSPHO_MOD_MASS + y_ox_count * OXIDATION_MASS + WATER_MASS + PROTON_MASS * z
+                        y_mz = y_mass / z
+
+                        if y_mz > min_mz:
+                            theo_mz_list.append(y_mz)
+                            ion_types.append('y')
+
+                            # Neutral losses for y-ions (if fragment contains target residues)
+                            if y_can_nl[i]:
+                                for nl_mass in nl_masses:
+                                    nl_mz = (y_mass + nl_mass) / z
+                                    if nl_mz > min_mz:
+                                        theo_mz_list.append(nl_mz)
+                                        ion_types.append('y')
+
+                if not theo_mz_list:
+                    if is_decoy:
+                        self.neg_permutation_score_map[perm] = 0.0
+                    else:
+                        self.pos_permutation_score_map[perm] = 0.0
                     continue
 
-                # Calculate score for each peak
-                for peak in matched_peaks:
-                    # Get ion type
-                    ion_type = peak.get("matched_ion_str", "")
+                # Convert to numpy arrays
+                theo_mz_array = np.array(theo_mz_list)
 
-                    # Calculate intensity score
-                    intensity_m = 0.0
-                    intensity_u = 0.0
+                # ─────────────────────────────────────────────────────────
+                # Vectorized peak matching using binary search
+                # ─────────────────────────────────────────────────────────
+                if is_ppm:
+                    ppm_err = tolerance / 1000000.0
+                    match_errs = theo_mz_array * ppm_err * 0.5
+                else:
+                    match_errs = np.full(len(theo_mz_array), tolerance * 0.5)
 
-                    if ion_type.startswith("b"):
-                        intensity_m = model.get_log_np_density_int(
-                            "b", peak["norm_intensity"], self.charge
-                        )
-                    elif ion_type.startswith("y"):
-                        intensity_m = model.get_log_np_density_int(
-                            "y", peak["norm_intensity"], self.charge
-                        )
+                lower_bounds = theo_mz_array - match_errs
+                upper_bounds = theo_mz_array + match_errs
 
+                # Binary search for all theoretical masses at once
+                left_indices = np.searchsorted(mz_sorted, lower_bounds, side='left')
+                right_indices = np.searchsorted(mz_sorted, upper_bounds, side='right')
+
+                # Track best match for each spectrum peak
+                best_match_by_peak = {}  # orig_idx -> (ion_idx, mass_diff)
+
+                for ion_idx in range(len(theo_mz_array)):
+                    left = left_indices[ion_idx]
+                    right = right_indices[ion_idx]
+
+                    if left >= right:
+                        continue
+
+                    # Get candidates
+                    sorted_candidate_indices = np.arange(left, right)
+                    original_indices = sort_indices[sorted_candidate_indices]
+                    candidate_intensities = intensities[original_indices]
+
+                    # Find most intense peak
+                    best_local_idx = np.argmax(candidate_intensities)
+                    best_orig_idx = original_indices[best_local_idx]
+                    mass_diff = mz_values[best_orig_idx] - theo_mz_array[ion_idx]
+
+                    # Keep best match per peak
+                    if best_orig_idx in best_match_by_peak:
+                        _, old_mass_diff = best_match_by_peak[best_orig_idx]
+                        if abs(mass_diff) < abs(old_mass_diff):
+                            best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff)
+                    else:
+                        best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff)
+
+                # ─────────────────────────────────────────────────────────
+                # Score matched peaks
+                # ─────────────────────────────────────────────────────────
+                final_score = 0.0
+
+                for orig_idx, (ion_idx, mass_diff) in best_match_by_peak.items():
+                    ion_type = ion_types[ion_idx]
+                    peak_norm_intensity = norm_intensity[orig_idx]
+
+                    # Intensity score
+                    intensity_m = model.get_log_np_density_int(
+                        ion_type, peak_norm_intensity, self.charge
+                    )
                     intensity_u = model.get_log_np_density_int(
-                        "n", peak["norm_intensity"], self.charge
+                        "n", peak_norm_intensity, self.charge
                     )
 
-                    # Calculate distance score
-                    dist_m = 0.0
-                    dist_u = 0.0
-
-                    if ion_type.startswith("b"):
-                        dist_m = model.get_log_np_density_dist_pos(
-                            peak["mass_diff"], self.charge
-                        )
-                    elif ion_type.startswith("y"):
-                        dist_m = model.get_log_np_density_dist_pos(
-                            peak["mass_diff"], self.charge
-                        )
-
-                    # For unmatched ions, use uniform distribution
+                    # Distance score
+                    dist_m = model.get_log_np_density_dist_pos(mass_diff, self.charge)
                     dist_u = 0.0
 
                     # Calculate score
                     intensity_score = intensity_m - intensity_u
                     distance_score = dist_m - dist_u
 
-                    # Handle invalid values
                     if np.isnan(intensity_score) or np.isinf(intensity_score):
                         intensity_score = 0.0
                     if np.isnan(distance_score) or np.isinf(distance_score):
                         distance_score = 0.0
 
-                    # Calculate final score: direct addition
                     peak_score = intensity_score + distance_score
-
-                    # If score is negative, set to 0
                     if peak_score < 0:
                         peak_score = 0.0
 
-                    # Add to total score
                     final_score += peak_score
 
                 logger.debug(
@@ -736,10 +863,8 @@ class PSM:
                 # Store scores
                 if is_decoy:
                     self.neg_permutation_score_map[perm] = final_score
-                    logger.debug(f"Stored decoy score: {perm} -> {final_score:.6f}")
                 else:
                     self.pos_permutation_score_map[perm] = final_score
-                    logger.debug(f"Stored real score: {perm} -> {final_score:.6f}")
 
             # Collect all scores into a list
             all_scores = []
@@ -805,21 +930,7 @@ class PSM:
                     pep1 = p
                     break
 
-            # Calculate delta score
-            if self.is_unambiguous:
-                # Unambiguous case: deltaScore = score1
-                self.delta_score = score1
-                logger.debug(f"Unambiguous case, delta score: {self.delta_score}")
-            else:
-                # Ambiguous case: deltaScore = score1 - score2
-                self.delta_score = score1 - score2
-                logger.debug(
-                    f"Non-unambiguous case, delta score: {score1} - {score2} = {self.delta_score}"
-                )
-
-            # Set psm_score to score1
-            self.psm_score = score1
-
+            # Store best peptides for reference (delta_score calculated by calculate_delta_score())
             self.score1_pep = pep1
             self.score2_pep = pep2
 
@@ -863,33 +974,10 @@ class PSM:
             sequence: Peptide sequence to check
 
         Returns:
-            bool: True if sequence is a decoy sequence
+            bool: True if sequence contains decoy amino acid symbols
         """
-        try:
-            # First remove modification markers, then check for decoy amino acids
-            unmod_seq = ""
-            i = 0
-            while i < len(sequence):
-                if sequence[i : i + 9] == "(Phospho)":
-                    i += 9
-                elif sequence[i : i + 14] == "(PhosphoDecoy)":
-                    i += 14
-                elif sequence[i : i + 11] == "(Oxidation)":
-                    i += 11
-                else:
-                    unmod_seq += sequence[i]
-                    i += 1
-
-            # Check if sequence contains decoy amino acid symbols after removing modifications
-            for aa in unmod_seq:
-                if aa in DECOY_AA_MAP:
-                    return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error checking decoy sequence: {str(e)}")
-            return False
+        unmod_seq = strip_modifications(sequence)
+        return any(aa in DECOY_AA_MAP for aa in unmod_seq)
 
     def _get_mod_map(self, perm: str) -> Dict[int, float]:
         """
@@ -952,6 +1040,127 @@ class PSM:
         if aa_upper in AA_MASSES:
             return AA_MASSES[aa_upper]
         return 110.0  # Default mass
+
+    def _get_unmodified_sequence(self) -> str:
+        """
+        Get the unmodified amino acid sequence (uppercase, no brackets).
+        This is the same for all permutations of a PSM.
+
+        Returns:
+            str: Unmodified sequence like "AAASPEPTIDEK"
+        """
+        # Use the first permutation or original peptide sequence
+        if self.pos_permutation_score_map:
+            perm = next(iter(self.pos_permutation_score_map.keys()))
+        else:
+            perm = self.peptide.mod_peptide
+
+        # Strip modifications and convert to uppercase (handles internal lowercase format)
+        return strip_modifications(perm).upper()
+
+    def _compute_backbone_cumsum(self, unmod_seq: str) -> np.ndarray:
+        """
+        Compute cumulative masses of unmodified backbone sequence.
+        cumsum[i] = mass of first i residues (unmodified).
+
+        Args:
+            unmod_seq: Unmodified sequence like "AAASPEPTIDEK"
+
+        Returns:
+            np.ndarray: Cumulative mass array of length n+1
+        """
+        n = len(unmod_seq)
+        cumsum = np.zeros(n + 1)
+        for i, aa in enumerate(unmod_seq):
+            if aa in AA_MASSES:
+                # AA_MASSES includes both standard amino acids and decoy symbols
+                # (decoy symbols are added with DECOY_MASS offset in constants.py)
+                cumsum[i + 1] = cumsum[i] + AA_MASSES[aa]
+            else:
+                logger.warning(f"Unknown amino acid in sequence: '{aa}' at position {i}")
+                cumsum[i + 1] = cumsum[i]
+        return cumsum
+
+    def _get_mod_positions_from_perm(self, perm: str) -> Tuple[List[int], List[int], bool]:
+        """
+        Extract modification positions from a permutation string.
+
+        Args:
+            perm: Permutation string like "AAAsPEPTIDEK" or with decoy markers
+
+        Returns:
+            Tuple of (phospho_positions, decoy_positions, is_decoy)
+            - phospho_positions: list of positions with phospho mods (lowercase s/t/y)
+            - decoy_positions: list of positions with decoy mods
+            - is_decoy: True if this is a decoy permutation
+        """
+        phospho_positions = []
+        decoy_positions = []
+        is_decoy = False
+
+        pos = 0  # Position in unmodified sequence
+        i = 0
+        while i < len(perm):
+            if perm[i:i+9] == "(Phospho)":
+                i += 9
+            elif perm[i:i+14] == "(PhosphoDecoy)":
+                i += 14
+            elif perm[i:i+11] == "(Oxidation)":
+                i += 11
+            elif perm[i] in '()[]':
+                # Skip parentheses and brackets (N-term/C-term modification markers)
+                i += 1
+            else:
+                aa = perm[i]
+                if aa.islower() and aa.upper() in "STY":
+                    phospho_positions.append(pos)
+                elif aa in DECOY_AA_MAP:
+                    decoy_positions.append(pos)
+                    is_decoy = True
+                pos += 1
+                i += 1
+
+        return phospho_positions, decoy_positions, is_decoy
+
+    def _precompute_nl_eligibility(self, unmod_seq: str) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Pre-compute which cleavage positions can have neutral losses.
+        Based on presence of target residues (from config) in the fragment.
+
+        Args:
+            unmod_seq: Unmodified sequence
+
+        Returns:
+            Tuple of (b_can_nl, y_can_nl) boolean arrays
+            - b_can_nl[i]: True if b-ion at cleavage i can have neutral loss
+            - y_can_nl[i]: True if y-ion at cleavage i can have neutral loss
+        """
+        n = len(unmod_seq)
+        b_can_nl = np.zeros(n + 1, dtype=bool)
+        y_can_nl = np.zeros(n + 1, dtype=bool)
+
+        # Get target residues from config (e.g., S, T, Y for phosphorylation)
+        target_modifications = self.config.get("target_modifications", [])
+        target_residues = extract_target_amino_acids(target_modifications)
+
+        # Use cumulative count for O(n) instead of O(n²)
+        # Count target residues seen up to each position
+        target_count = np.zeros(n + 1, dtype=int)
+        for i, aa in enumerate(unmod_seq):
+            target_count[i + 1] = target_count[i] + (1 if aa in target_residues else 0)
+
+        # b-ion at position i contains residues 0..i-1
+        # Can have NL if any target residue in prefix
+        for i in range(1, n + 1):
+            b_can_nl[i] = target_count[i] > 0
+
+        # y-ion at position i contains residues i..n-1
+        # Can have NL if any target residue in suffix
+        total_targets = target_count[n]
+        for i in range(n):
+            y_can_nl[i] = (total_targets - target_count[i]) > 0
+
+        return b_can_nl, y_can_nl
 
     def _calc_theoretical_masses(self, perm: str) -> List[float]:
         """
@@ -1154,184 +1363,98 @@ class PSM:
 
         logger.debug(f"PSM {self.scan_num} scores cleared")
 
-    def remove_modifications(self, seq):
-        # Remove all bracket modifications like (Phospho), (PhosphoDecoy), (Oxidation), etc.
-        return re.sub(r"\([A-Za-z0-9;@#%]+?\)", "", seq)
+    def _generate_permutations(
+        self, decoy: bool = False, shuffle: bool = False
+    ) -> List[Tuple[str, List[int]]]:
+        """
+        Generate permutations of modification sites.
+
+        Args:
+            decoy: If True, place mods on non-target sites (decoy). If False, on target sites (real).
+            shuffle: If True, shuffle combinations before iterating.
+
+        Returns:
+            List of (modified_sequence, site_positions) tuples.
+        """
+        peptide_seq = self.peptide.get_unmodified_sequence()
+        target_mods = self.config.get("target_modifications", [])
+        target_aas = extract_target_amino_acids(target_mods)
+
+        # Find candidate sites: target AAs for real, non-target AAs for decoy
+        if decoy:
+            cand_sites = [i for i, aa in enumerate(peptide_seq) if aa not in target_aas]
+        else:
+            cand_sites = [i for i, aa in enumerate(peptide_seq) if aa in target_aas]
+
+        if not cand_sites:
+            logger.debug(f"No {'non-target' if decoy else 'target'} sites found")
+            return []
+
+        # Count phospho modifications
+        num_mods = sum(1 for m in self.mod_coord_map.values() if abs(m - PHOSPHO_MOD_MASS) < 0.01)
+        if num_mods == 0:
+            logger.debug("No phosphorylation modifications found")
+            return []
+
+        logger.debug(f"{'Decoy' if decoy else 'Real'} permutations: {len(cand_sites)} sites, {num_mods} mods")
+
+        # Generate combinations
+        combos = list(combinations(cand_sites, num_mods))
+        if shuffle:
+            random.shuffle(combos)
+
+        perms = []
+        seen = set()
+
+        for sites in combos:
+            # Build modified sequence
+            parts = []
+            if not decoy and NTERM_MOD in self.mod_coord_map:
+                parts.append("[")
+
+            for i, aa in enumerate(peptide_seq):
+                if i in sites:
+                    # Modification site
+                    parts.append(get_decoy_symbol(aa) if decoy else aa.lower())
+                elif not decoy and i in self.non_target_mods:
+                    # Non-target mods (e.g., oxidation) - real only
+                    parts.append(aa.lower())
+                else:
+                    parts.append(aa.upper())
+
+            if not decoy and CTERM_MOD in self.mod_coord_map:
+                parts.append("]")
+
+            mod_pep = "".join(parts)
+
+            # Skip duplicates; for decoy also validate it contains decoy symbols
+            if mod_pep not in seen:
+                if not decoy or any(c in DECOY_AA_MAP for c in mod_pep):
+                    seen.add(mod_pep)
+                    perms.append((mod_pep, list(sites)))
+
+        perm_type = "decoy" if decoy else "real"
+        logger.debug(f"Generated {len(perms)} {perm_type} permutations")
+        for perm, sites in perms:
+            logger.debug(f"  {perm_type.capitalize()} permutation: {perm} with sites: {sites}")
+
+        return perms
 
     def generate_real_permutations(self) -> List[Tuple[str, List[int]]]:
-        """
-        Generate real sequence permutations
-        Returns:
-            List[Tuple[str, List[int]]]: List of real sequences and modification sites
-        """
+        """Generate real sequence permutations at target modification sites."""
         try:
-            # Get unmodified peptide sequence
-            peptide_seq = self.remove_modifications(
-                self.peptide.get_unmodified_sequence()
-            )
-
-            # Find all possible modification sites (target modification sites)
-            # Extract target amino acids from target_modifications
-            target_modifications = self.config.get("target_modifications", [])
-            target_amino_acids = extract_target_amino_acids(target_modifications)
-
-            cand_mod_sites = []
-            for i, aa in enumerate(peptide_seq):
-                if aa in target_amino_acids:  # Target modification sites
-                    cand_mod_sites.append(i)
-
-            if not cand_mod_sites:
-                logger.debug("No potential modification sites found")
-                return []
-
-            # DEBUG: Output mod_coord_map content
-            logger.debug(f"mod_coord_map: {self.mod_coord_map}")
-            logger.debug(f"Original peptide: {self.peptide.peptide}")
-            logger.debug(f"Unmodified peptide_seq: {peptide_seq}")
-            logger.debug(f"Candidate mod sites: {cand_mod_sites}")
-
-            # Get the number of modification sites in the original peptide
-            num_rps = len(
-                [
-                    m
-                    for m in self.mod_coord_map.values()
-                    if abs(m - PHOSPHO_MOD_MASS) < 0.01
-                ]
-            )
-            logger.debug(f"num_rps calculated: {num_rps}")
-
-            if num_rps == 0:
-                logger.debug("No phosphorylation modifications found in peptide")
-                return []
-
-            # Generate all possible modification site combinations
-            real_perms = []
-
-            # Generate all possible modification site combinations
-            for sites in combinations(cand_mod_sites, num_rps):
-                # Create real sequence: modification sites represented by lowercase letters
-                mod_pep = ""
-                if NTERM_MOD in self.mod_coord_map:
-                    mod_pep = "["
-
-                for i, aa in enumerate(peptide_seq):
-                    aa_lower = aa.lower()
-                    if i in sites:  # Sites that need modification
-                        mod_pep += aa_lower
-                    elif i in self.non_target_mods:
-                        mod_pep += aa_lower
-                    else:
-                        mod_pep += aa_lower.upper()
-
-                if CTERM_MOD in self.mod_coord_map:
-                    mod_pep += "]"
-
-                # Avoid duplicates
-                if mod_pep not in [x[0] for x in real_perms]:
-                    real_perms.append((mod_pep, list(sites)))
-
-            logger.debug(f"Generated {len(real_perms)} real permutations")
-            for perm, sites in real_perms:
-                logger.debug(f"  Real permutation: {perm} with sites: {sites}")
-            return real_perms
+            return self._generate_permutations(decoy=False)
         except Exception as e:
-            logger.error(f"Error generating real permutations: {str(e)}")
+            logger.error(f"Error generating real permutations: {e}")
             return []
 
     def generate_decoy_permutations(self) -> List[Tuple[str, List[int]]]:
-        """
-        Generate decoy sequence permutations at non-STY sites
-        Returns:
-            List[Tuple[str, List[int]]]: List of decoy sequences and modification sites
-        """
+        """Generate decoy sequence permutations at non-target sites."""
         try:
-            # Get unmodified peptide sequence
-            peptide_seq = self.remove_modifications(
-                self.peptide.get_unmodified_sequence()
-            )
-
-            # Extract target amino acids from target_modifications
-            target_modifications = self.config.get("target_modifications", [])
-            target_amino_acids = extract_target_amino_acids(target_modifications)
-
-            # Find non-target amino acid sites as decoy modification sites
-            cand_mod_sites = []
-            for i, aa in enumerate(peptide_seq):
-                if aa not in target_amino_acids:  # Non-target amino acid sites
-                    cand_mod_sites.append(i)
-
-            if not cand_mod_sites:
-                logger.debug(
-                    "No non-target amino acid sites available for decoy generation"
-                )
-                return []
-
-            # Calculate the number of modifications in the original peptide
-            num_mods = len(
-                [
-                    m
-                    for m in self.mod_coord_map.values()
-                    if abs(m - PHOSPHO_MOD_MASS) < 0.01
-                ]
-            )
-            if num_mods == 0:
-                logger.debug("No phosphorylation modifications found in peptide")
-                return []
-
-            # Generate all possible modification site combinations
-            decoy_perms = []
-
-            combos = list(combinations(cand_mod_sites, num_mods))
-            random.shuffle(combos)
-
-            # No limit on decoy count, use all possible combinations
-            max_decoys = len(combos)
-
-            for sites in islice(combos, max_decoys):
-                # Create decoy sequence: decoy sites represented by decoy symbols
-                mod_pep = ""
-                for i, aa in enumerate(peptide_seq):
-                    if i in sites:  # Sites that need modification
-                        decoy_char = get_decoy_symbol(aa)  # Use decoy symbol
-                        mod_pep += decoy_char
-                    else:
-                        mod_pep += (
-                            aa.upper()
-                        )  # Non-modification sites use uppercase letters
-
-                # Check if it's a valid decoy sequence
-                if self._is_valid_decoy_sequence(mod_pep):
-                    decoy_perms.append((mod_pep, list(sites)))
-
-            logger.debug(f"Generated {len(decoy_perms)} decoy permutations")
-            for perm, sites in decoy_perms:
-                logger.debug(f"  Decoy permutation: {perm} with sites: {sites}")
-            return decoy_perms
+            return self._generate_permutations(decoy=True, shuffle=True)
         except Exception as e:
-            logger.error(f"Error generating decoy permutations: {str(e)}")
+            logger.error(f"Error generating decoy permutations: {e}")
             return []
-
-    def _is_valid_decoy_sequence(self, sequence: str) -> bool:
-        """
-        Check if the sequence is a valid decoy sequence
-
-        Args:
-            sequence: Sequence to check
-
-        Returns:
-            bool: Returns True if it"s a valid decoy sequence
-        """
-        try:
-            # Check if it contains decoy amino acid symbols
-            for aa in sequence:
-                if aa in DECOY_AA_MAP:
-                    return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error validating decoy sequence: {str(e)}")
-            return False
 
     def _match_peaks(self, perm: str, tolerance: float) -> List[Dict[str, Any]]:
         """
@@ -1345,30 +1468,43 @@ class PSM:
         Returns:
             List of matched peaks
         """
-        # Create temporary Peptide object
-
         # Get modification site mapping
         mod_map = self._get_mod_map(perm)
 
-        # Use the input sequence directly, no format conversion needed
-        # Because generate_real_permutations now generates correct lowercase format
-        processed_perm = perm
-
-        # Create temporary Peptide object and initialize
-        temp_peptide = Peptide(processed_perm, self.config, charge=self.charge)
+        # Create temporary Peptide object with skip_expensive_init=True
+        # This avoids redundant permutation generation and ion ladder building
+        # since we'll set mod_pos_map externally and build ion ladders once
+        temp_peptide = Peptide(
+            perm, self.config, charge=self.charge, skip_expensive_init=True
+        )
         temp_peptide.mod_pos_map = mod_map
-        temp_peptide.build_ion_ladders()  # Build ion ladders
+        # Copy non_target_mods from PSM - needed for _to_pyopenms_format() to
+        # correctly convert internal format (lowercase letters like 'm') to
+        # PyOpenMS format (e.g., 'M(Oxidation)')
+        temp_peptide.non_target_mods = self.non_target_mods
 
-        # Temporarily modify configuration to use input tolerance
-        original_tolerance = self.config.get("fragment_mass_tolerance", 0.1)
-        temp_config = self.config.copy()
-        temp_config["fragment_mass_tolerance"] = tolerance
+        try:
+            temp_peptide.build_ion_ladders()
+        except (ValueError, RuntimeError) as e:
+            logger.warning(
+                f"Failed to build ion ladders for permutation '{perm}': {e}. "
+                f"mod_map={mod_map}, charge={self.charge}, "
+                f"non_target_mods={self.non_target_mods}"
+            )
+            return []
 
-        # Call Peptide's match_peaks method with modified configuration
+        # Pass tolerance directly instead of copying entire config
+        # Create minimal config override for tolerance
+        if tolerance != self.config.get("fragment_mass_tolerance", 0.1):
+            temp_config = {
+                **self.config,
+                "fragment_mass_tolerance": tolerance,
+            }
+        else:
+            temp_config = self.config
+
+        # Call Peptide's match_peaks method
         matched_peaks = temp_peptide.match_peaks(self.spectrum, temp_config)
-
-        # Clean up temporary object
-        temp_peptide = None
 
         return matched_peaks
 
@@ -1589,72 +1725,50 @@ class PSM:
 
     def calculate_delta_score(self, include_decoys: bool = True) -> None:
         """
-        Calculate delta score based on permutation scores
+        Calculate delta score based on permutation scores.
+
+        Sets self.delta_score and self.psm_score based on permutation scoring results.
 
         Args:
-            include_decoys: Whether to include decoy permutations (True: first round calculation, False: second round calculation)
-
-
+            include_decoys: Whether to include decoy permutations in scoring.
+                           True for first round (FLR estimation), False for second round.
         """
         try:
-            # Get scores for all real permutations
             real_scores = list(self.pos_permutation_score_map.values())
-
-            if len(real_scores) == 0:
-                logger.debug(
-                    f"PSM {self.scan_num} has no real permutation scores, setting delta_score to 0"
-                )
+            if not real_scores:
+                logger.debug(f"PSM {self.scan_num} has no real permutation scores")
                 self.delta_score = 0.0
+                self.psm_score = 0.0
                 return
 
             real_scores.sort(reverse=True)
 
-            # For unambiguous cases, delta_score should equal the top real score
-            if self.is_unambiguous:
-                top_score = real_scores[0]
-                self.delta_score = top_score
-                self.psm_score = top_score
-                logger.debug(
-                    f"PSM {self.scan_num} unambiguous: setting delta_score = top real score {top_score:.6f}"
-                )
-                return
-
-            if include_decoys and len(self.neg_permutation_score_map) > 0:
-                all_scores = real_scores + list(self.neg_permutation_score_map.values())
-                all_scores.sort(reverse=True)
-
-                if len(all_scores) == 1:
-                    # Only one permutation overall: treat as unambiguous
-                    self.delta_score = all_scores[0]
-                    self.psm_score = all_scores[0]
-                    logger.debug(
-                        f"PSM {self.scan_num} single permutation overall: delta_score = {self.delta_score:.6f}"
-                    )
-                else:
-                    top_score = all_scores[0]
-                    second_score = all_scores[1]
-                    self.delta_score = top_score - second_score
-                    logger.debug(
-                        f"PSM {self.scan_num} first round delta_score (including decoys): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}"
-                    )
+            # Determine which scores to use for delta calculation
+            if include_decoys and self.neg_permutation_score_map:
+                scores = real_scores + list(self.neg_permutation_score_map.values())
+                scores.sort(reverse=True)
+                score_type = "all (including decoys)"
             else:
-                if len(real_scores) == 1:
-                    # Only one real permutation: treat as unambiguous
-                    self.delta_score = real_scores[0]
-                    self.psm_score = real_scores[0]
-                    logger.debug(
-                        f"PSM {self.scan_num} single real permutation: delta_score = {self.delta_score:.6f}"
-                    )
-                else:
-                    top_score = real_scores[0]
-                    second_score = real_scores[1]
-                    self.delta_score = top_score - second_score
-                    logger.debug(
-                        f"PSM {self.scan_num} second round delta_score (real permutations only): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}"
-                    )
+                scores = real_scores
+                score_type = "real only"
+
+            # Calculate delta score
+            top_score = scores[0]
+            self.psm_score = top_score
+
+            if self.is_unambiguous or len(scores) == 1:
+                self.delta_score = top_score
+                logger.debug(
+                    f"PSM {self.scan_num} unambiguous/single: delta_score = {top_score:.6f}"
+                )
+            else:
+                second_score = scores[1]
+                self.delta_score = top_score - second_score
+                logger.debug(
+                    f"PSM {self.scan_num} delta_score ({score_type}): {top_score:.6f} - {second_score:.6f} = {self.delta_score:.6f}"
+                )
 
         except Exception as e:
-            logger.error(
-                f"Error calculating delta_score for PSM {self.scan_num}: {str(e)}"
-            )
+            logger.error(f"Error calculating delta_score for PSM {self.scan_num}: {e}")
             self.delta_score = 0.0
+            self.psm_score = 0.0

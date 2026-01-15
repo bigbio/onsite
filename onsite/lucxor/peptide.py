@@ -20,13 +20,18 @@ from .constants import (
     AA_DECOY_MAP,
     WATER_MASS,
     PROTON_MASS,
-    ION_TYPES,
-    NEUTRAL_LOSSES,
 )
 from .globals import get_decoy_symbol
 from .peak import Peak
 
 logger = logging.getLogger(__name__)
+
+# Regex pattern to match any modification in format (ModName)
+# Captures the modification name inside parentheses
+_MOD_PATTERN = re.compile(r"\(([^)]+)\)")
+
+# Target modification names that are handled specially for phospho site localization
+_TARGET_MOD_NAMES = {"Phospho", "PhosphoDecoy"}
 
 
 def extract_target_amino_acids(target_modifications: List[str]) -> Set[str]:
@@ -48,6 +53,114 @@ def extract_target_amino_acids(target_modifications: List[str]) -> Set[str]:
     return amino_acids
 
 
+def strip_modifications(seq: str) -> str:
+    """
+    Remove all modification markers from a peptide sequence.
+
+    Args:
+        seq: Peptide sequence with modifications like "MS(Phospho)TM(Oxidation)K"
+
+    Returns:
+        Unmodified sequence like "MSTMK"
+    """
+    return _MOD_PATTERN.sub("", seq).replace("[", "").replace("]", "")
+
+
+def parse_modifications(
+    seq: str,
+    target_mod_names: Set[str] = None,
+    get_mass_func=None,
+) -> Dict[str, Any]:
+    """
+    Parse a peptide sequence to extract modification information.
+
+    This is the single source of truth for modification parsing in LucXor.
+
+    Args:
+        seq: Peptide sequence with modifications like "MS(Phospho)TM(Oxidation)K"
+        target_mod_names: Set of target modification names (default: {"Phospho", "PhosphoDecoy"})
+        get_mass_func: Function to get modification mass by name (optional)
+
+    Returns:
+        Dict with:
+            - unmodified: Unmodified sequence (e.g., "MSTMK")
+            - internal: Internal format with lowercase for modified (e.g., "MsTmK")
+            - target_mods: Dict of position -> mass for target modifications
+            - non_target_mods: Dict of position -> mod_name for non-target modifications
+            - all_mods: Dict of position -> (mod_name, mass) for all modifications
+            - has_nterm: True if N-terminal modification marker present
+            - has_cterm: True if C-terminal modification marker present
+    """
+    if target_mod_names is None:
+        target_mod_names = _TARGET_MOD_NAMES
+
+    result = {
+        "unmodified": "",
+        "internal": "",
+        "target_mods": {},
+        "non_target_mods": {},
+        "all_mods": {},
+        "has_nterm": False,
+        "has_cterm": False,
+    }
+
+    # Handle terminal modification markers
+    if seq.startswith("["):
+        result["has_nterm"] = True
+        seq = seq[1:]
+    if seq.endswith("]"):
+        result["has_cterm"] = True
+        seq = seq[:-1]
+
+    # Parse sequence character by character
+    i = 0
+    while i < len(seq):
+        if seq[i] == "(":
+            # Found modification - extract name using regex
+            match = _MOD_PATTERN.match(seq, i)
+            if match:
+                mod_name = match.group(1)
+
+                # Get the position of the modified residue (previous character)
+                if result["unmodified"]:
+                    pos = len(result["unmodified"]) - 1
+                    residue = result["unmodified"][-1]  # The modified residue
+
+                    # Get mass if function provided (pass residue for precise lookup)
+                    mod_mass = None
+                    if get_mass_func:
+                        try:
+                            mod_mass = get_mass_func(mod_name, residue)
+                        except TypeError:
+                            # Fall back if function doesn't accept residue parameter
+                            mod_mass = get_mass_func(mod_name)
+                        except (ValueError, KeyError):
+                            pass
+
+                    # Categorize as target or non-target
+                    if mod_name in target_mod_names:
+                        result["target_mods"][pos] = mod_mass
+                    else:
+                        result["non_target_mods"][pos] = mod_name
+
+                    result["all_mods"][pos] = (mod_name, mod_mass)
+
+                    # Mark position as modified in internal format (lowercase)
+                    result["internal"] = (
+                        result["internal"][:-1] + result["internal"][-1].lower()
+                    )
+
+                i = match.end()
+                continue
+
+        # Regular amino acid character
+        result["unmodified"] += seq[i]
+        result["internal"] += seq[i]
+        i += 1
+
+    return result
+
+
 class Peptide:
     """
     Class representing a peptide sequence.
@@ -62,6 +175,7 @@ class Peptide:
         config: Dict,
         mod_pep: Optional[str] = None,
         charge: Optional[int] = None,
+        skip_expensive_init: bool = False,
     ):
         """
         Initialize a new Peptide instance.
@@ -71,6 +185,10 @@ class Peptide:
             config: Configuration dictionary
             mod_pep: Modified peptide sequence (optional)
             charge: Charge state (optional)
+            skip_expensive_init: If True, skip permutation generation and ion ladder
+                building during initialization. Use this when creating temporary
+                Peptide objects for peak matching where mod_pos_map will be set
+                externally and ion ladders built afterward.
         """
         self.peptide = peptide  # Original sequence
         self.mod_peptide = mod_pep if mod_pep else peptide  # Modified sequence
@@ -80,8 +198,8 @@ class Peptide:
         self.config = config  # Configuration
 
         # Modification related
-        self.mod_pos_map = {}  # Position -> Modification mass
-        self.non_target_mods = {}  # Position -> AA
+        self.mod_pos_map = {}  # Position -> Modification mass (target mods)
+        self.non_target_mods = {}  # Position -> Modification name (non-target mods)
 
         # Fragment ion information
         self.b_ions = {}  # Ion string -> m/z
@@ -108,121 +226,52 @@ class Peptide:
         self.permutations = []
 
         # Initialize the peptide
-        self._initialize()
+        self._initialize(skip_expensive_init=skip_expensive_init)
 
-    def _initialize(self) -> None:
-        """Initialize the peptide."""
-        # Convert modified sequence to Java style (lowercase letters represent modifications)
-        if self.mod_peptide and self.mod_peptide != self.peptide:
-            # If modified peptide is provided, use it directly
-            pass
-        else:
-            # Parse modifications from original peptide
-            mod_pep = ""
-            i = 0
-            while i < len(self.peptide):
-                # Check phosphorylation modification (9 characters)
-                if (
-                    i + 9 <= len(self.peptide)
-                    and self.peptide[i : i + 9] == "(Phospho)"
-                ):
-                    # Convert modified amino acid to lowercase
-                    if len(mod_pep) > 0:
-                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
-                    i += 9
-                    continue
-                # Check decoy phosphorylation modification (14 characters)
-                elif (
-                    i + 14 <= len(self.peptide)
-                    and self.peptide[i : i + 14] == "(PhosphoDecoy)"
-                ):
-                    # Convert modified amino acid to lowercase (treat as phosphorylation)
-                    if len(mod_pep) > 0:
-                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
-                    i += 14
-                    continue
-                # Check oxidation modification (11 characters)
-                elif (
-                    i + 11 <= len(self.peptide)
-                    and self.peptide[i : i + 11] == "(Oxidation)"
-                ):
-                    # Convert modified amino acid to lowercase
-                    if len(mod_pep) > 0:
-                        mod_pep = mod_pep[:-1] + mod_pep[-1].lower()
-                    i += 11
-                    continue
+    def _initialize(self, skip_expensive_init: bool = False) -> None:
+        """Initialize the peptide.
 
-                # If not a modification marker, add the character
-                mod_pep += self.peptide[i]
-                i += 1
+        Args:
+            skip_expensive_init: If True, skip permutation generation and ion ladder
+                building. Used for temporary Peptide objects in peak matching.
+        """
+        from .mass_provider import get_modification_mass
 
-            self.mod_peptide = mod_pep
+        # Check if mod_peptide was provided externally (different from raw peptide)
+        mod_peptide_provided = self.mod_peptide and self.mod_peptide != self.peptide
 
-        # Initialize modification mapping
-        self.mod_pos_map = {}  # Target modifications (phosphorylation)
-        self.non_target_mods = {}  # Non-target modifications (oxidation, etc.)
+        # Parse modifications using shared utility function
+        parsed = parse_modifications(self.peptide, get_mass_func=get_modification_mass)
 
-        # Parse modification positions - rebuild mod_pep to calculate correct positions
-        mod_pep_pos = ""
-        i = 0
-        while i < len(self.peptide):
-            if i + 9 <= len(self.peptide) and self.peptide[i : i + 9] == "(Phospho)":
-                # Phosphorylation modification - target modification
-                if len(mod_pep_pos) > 0:
-                    pos = len(mod_pep_pos) - 1
-                    self.mod_pos_map[pos] = 79.966  # Phosphorylation mass
-                i += 9
-            elif (
-                i + 14 <= len(self.peptide)
-                and self.peptide[i : i + 14] == "(PhosphoDecoy)"
-            ):
-                # Decoy phosphorylation modification - also treat as target modification
-                if len(mod_pep_pos) > 0:
-                    pos = len(mod_pep_pos) - 1
-                    self.mod_pos_map[pos] = 79.966  # Phosphorylation mass
-                i += 14
-            elif (
-                i + 11 <= len(self.peptide)
-                and self.peptide[i : i + 11] == "(Oxidation)"
-            ):
-                # Oxidation modification - non-target modification
-                if len(mod_pep_pos) > 0:
-                    pos = len(mod_pep_pos) - 1
-                    self.non_target_mods[pos] = mod_pep_pos[-1].lower()
-                i += 11
-            else:
-                mod_pep_pos += self.peptide[i]
-                i += 1
+        # Extract target mods (position -> mass) and non-target mods (position -> name)
+        self.mod_pos_map = {
+            pos: mass for pos, mass in parsed["target_mods"].items() if mass is not None
+        }
+        self.non_target_mods = parsed["non_target_mods"]
 
-        # Calculate potential phosphorylation sites and reported phosphorylation sites
-        # Extract target amino acids from target_modifications
+        # Use provided mod_peptide if available, otherwise use the parsed internal format
+        if not mod_peptide_provided:
+            self.mod_peptide = parsed["internal"]
+
+        # Calculate potential and reported phosphorylation sites
         target_modifications = self.config.get("target_modifications", [])
         target_amino_acids = extract_target_amino_acids(target_modifications)
 
-        # Calculate potential phosphorylation sites from original sequence (including all target amino acid sites)
-        self.num_pps = 0
-        i = 0
-        while i < len(self.peptide):
-            if self.peptide[i : i + 9] == "(Phospho)":
-                # Skip modification markers
-                i += 9
-            elif self.peptide[i : i + 14] == "(PhosphoDecoy)":
-                # Skip modification markers
-                i += 14
-            elif self.peptide[i] in target_amino_acids:
-                # This is a potential phosphorylation site
-                self.num_pps += 1
-                i += 1
-            else:
-                i += 1
+        # Count potential sites (target amino acids in unmodified sequence)
+        unmod_seq = parsed["unmodified"]
+        self.num_pps = sum(1 for aa in unmod_seq if aa in target_amino_acids)
 
-        # Calculate reported phosphorylation sites (number of (Phospho) + (PhosphoDecoy))
+        # Count reported sites (Phospho + PhosphoDecoy modifications)
         self.num_rps = self.peptide.count("(Phospho)") + self.peptide.count(
             "(PhosphoDecoy)"
         )
 
         # Check if unambiguous (number of potential sites equals number of reported sites)
         self.is_unambiguous = self.num_pps == self.num_rps
+
+        # Skip expensive operations for temporary Peptide objects used in peak matching
+        if skip_expensive_init:
+            return
 
         # Generate all possible permutations
         perms = self.get_permutations()
@@ -279,250 +328,176 @@ class Peptide:
         """
         return self.get_precursor_mass() / self.charge
 
-    def build_ion_ladders(self) -> None:
+    def _has_decoy_symbols(self) -> bool:
         """
-        Build b-ion and y-ion ladders, naming and generation method fully aligned with Java Peptide.java.
+        Check if the peptide contains decoy symbols (special characters).
+
+        These are symbols from DECOY_AA_MAP representing decoy modifications.
+        Now handled by PyOpenMS using registered PhosphoDecoy modifications.
+        """
+        return any(aa in DECOY_AA_MAP for aa in self.mod_peptide)
+
+    def _to_pyopenms_format(self) -> str:
+        """
+        Convert internal sequence representation to PyOpenMS AASequence format.
+
+        Internal format uses:
+        - Uppercase letters: unmodified amino acids
+        - Lowercase letters: modified amino acids
+        - Special characters from DECOY_AA_MAP: PhosphoDecoy on mapped amino acids
+
+        Modification disambiguation:
+        - Uses self.non_target_mods to retrieve the actual modification name
+        - Positions in non_target_mods have their stored modification name emitted
+        - Other lowercase positions are target modifications (Phospho on S/T/Y,
+          PhosphoDecoy on A or decoy residues)
+
+        PyOpenMS format uses:
+        - Uppercase letters with bracketed modifications: S(Phospho), M(Oxidation), etc.
+        - PhosphoDecoy modifications: A(PhosphoDecoy), K(PhosphoDecoy (K)), etc.
+
+        Returns:
+            PyOpenMS-compatible sequence string
+        """
+        from .mass_provider import get_phospho_decoy_mod_name
+
+        result = []
+        for pos, aa in enumerate(self.mod_peptide):
+            # Check if this position has a non-target modification
+            if pos in self.non_target_mods:
+                # Emit uppercase letter + stored modification name
+                mod_name = self.non_target_mods[pos]
+                result.append(f"{aa.upper()}({mod_name})")
+            elif aa == "s":
+                result.append("S(Phospho)")
+            elif aa == "t":
+                result.append("T(Phospho)")
+            elif aa == "y":
+                result.append("Y(Phospho)")
+            elif aa == "a":
+                # PhosphoDecoy on Alanine
+                mod_name = get_phospho_decoy_mod_name("A")
+                result.append(f"A({mod_name})")
+            elif aa in DECOY_AA_MAP:
+                # Special character represents decoy modification on mapped amino acid
+                real_aa = DECOY_AA_MAP[aa]
+                mod_name = get_phospho_decoy_mod_name(real_aa)
+                result.append(f"{real_aa}({mod_name})")
+            else:
+                result.append(aa)
+
+        return "".join(result)
+
+    def get_precursor_mass_pyopenms(self) -> Optional[float]:
+        """
+        Calculate peptide precursor mass using PyOpenMS AASequence.
+
+        This method provides validation against the custom mass calculation.
+
+        Returns:
+            Precursor mass [M+zH]^z+ or None on failure
+        """
+        seq_str = self._to_pyopenms_format()
+        if not seq_str:
+            return None
+
+        try:
+            seq = pyopenms.AASequence.fromString(seq_str)
+            # getMonoWeight returns [M+H]+ mass by default for Full type
+            mono_weight = seq.getMonoWeight(pyopenms.Residue.ResidueType.Full, 1)
+            # Adjust for charge: add (charge-1) protons
+            return mono_weight + (self.charge - 1) * PROTON_MASS
+        except Exception as e:
+            logger.warning(f"PyOpenMS precursor mass calculation failed: {e}")
+            return None
+
+    def build_ion_ladders(self) -> bool:
+        """
+        Build b-ion and y-ion ladders using PyOpenMS TheoreticalSpectrumGenerator.
+
+        This method uses PyOpenMS for theoretical spectrum generation, providing
+        consistency with other algorithms (AScore, PhosphoRS) that use PyOpenMS.
+        Handles both regular and decoy sequences using registered PhosphoDecoy
+        modifications.
+
+        Returns:
+            True if successful
+
+        Raises:
+            ValueError: If sequence cannot be converted to PyOpenMS format
+            RuntimeError: If PyOpenMS spectrum generation fails
         """
         if not self.mod_peptide:
-            return
+            raise ValueError("Cannot build ion ladders: mod_peptide is empty")
 
         self.b_ions = {}
         self.y_ions = {}
 
-        peptide = self.mod_peptide
-        pep_len = len(peptide)
-        charge = self.charge
-        NTERM_MOD = self.config.get("NTERM_MOD", -100)
-        CTERM_MOD = self.config.get("CTERM_MOD", 100)
-        nterm_mass = (
-            self.mod_pos_map.get(NTERM_MOD, 0.0)
-            if NTERM_MOD in self.mod_pos_map
-            else 0.0
-        )
-        cterm_mass = (
-            self.mod_pos_map.get(CTERM_MOD, 0.0)
-            if CTERM_MOD in self.mod_pos_map
-            else 0.0
-        )
-        min_len = 2
+        seq_str = self._to_pyopenms_format()
+        if not seq_str:
+            raise ValueError(
+                f"Cannot convert peptide to PyOpenMS format: {self.mod_peptide}"
+            )
+
+        try:
+            seq = pyopenms.AASequence.fromString(seq_str)
+        except Exception as e:
+            raise ValueError(
+                f"PyOpenMS cannot parse sequence '{seq_str}': {e}"
+            ) from e
+
+        # Configure spectrum generator
+        spec_gen = pyopenms.TheoreticalSpectrumGenerator()
+        params = spec_gen.getParameters()
+        params.setValue("add_b_ions", "true")
+        params.setValue("add_y_ions", "true")
+        params.setValue("add_first_prefix_ion", "true")
+        params.setValue("add_losses", "true")
+        params.setValue("add_metainfo", "true")
+        params.setValue("add_precursor_peaks", "false")
+        params.setValue("add_abundant_immonium_ions", "false")
+        params.setValue("isotope_model", "none")
+        spec_gen.setParameters(params)
+
         min_mz = self.config.get("min_mz", 0.0)
 
-        # Only generate ions with charge less than peptide charge
-        for z in range(1, charge):  # Only generate charge states 1 to charge-1
-            for i in range(1, pep_len):  # Fragment length at least 2
-                prefix = peptide[:i]
-                suffix = peptide[i:]
-                prefix_len = str(len(prefix))
-                suffix_len = str(len(suffix))
+        # Generate spectrum for each charge state
+        for z in range(1, self.charge):
+            theo_spectrum = pyopenms.MSSpectrum()
+            spec_gen.getSpectrum(theo_spectrum, seq, z, z)
 
-                # b ions
-                if len(prefix) >= min_len:
-                    b = f"b{prefix_len}:{prefix}"
+            # Extract ions from spectrum
+            for i in range(theo_spectrum.size()):
+                peak = theo_spectrum[i]
+                mz = peak.getMZ()
 
-                    bm = self._fragment_ion_mass(b, z, 0.0, ion_type="b") + nterm_mass
-                    bmz = bm / z
+                if mz <= min_mz:
+                    continue
 
-                    if z > 1:
-                        b += f"/+{z}"
+                # Get ion annotation from metainfo
+                ion_name = ""
+                if theo_spectrum.getStringDataArrays():
+                    for sda in theo_spectrum.getStringDataArrays():
+                        if sda.getName() == "IonNames" and i < len(sda):
+                            raw_name = sda[i]
+                            ion_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+                            break
 
-                    if bmz > min_mz:
-                        self.b_ions[b] = bmz
+                if not ion_name:
+                    continue
 
-                        # Handle neutral losses - extend neutral losses for all charge states
-                        self._record_nl_ions(b, z, bm, ion_type="b")
+                # Parse ion name and categorize (PyOpenMS format: b2-H2O1++, y3+, etc.)
+                if ion_name.startswith("b"):
+                    self.b_ions[ion_name] = mz
+                elif ion_name.startswith("y"):
+                    self.y_ions[ion_name] = mz
 
-                # y ions
-                if len(suffix) >= min_len and suffix.lower() != peptide.lower():
-                    y = f"y{suffix_len}:{suffix}"
-                    ym = (
-                        self._fragment_ion_mass(y, z, 18.01056, ion_type="y")
-                        + cterm_mass
-                    )
-                    ymz = ym / z
-
-                    if z > 1:
-                        y += f"/+{z}"
-
-                    if ymz > min_mz:
-                        self.y_ions[y] = ymz
-
-                        # Handle neutral losses - extend neutral losses for all charge states
-                        self._record_nl_ions(y, z, ym, ion_type="y")
-
-        # Theoretical mass list
+        # Build theoretical masses list
         self.theoretical_masses = list(self.b_ions.values()) + list(
             self.y_ions.values()
         )
         self.theoretical_masses.sort()
-
-    def _fragment_ion_mass(self, ion_str, z, addl_mass, ion_type="b"):
-        """
-        Calculate fragment ion mass
-        Receives complete ion string, such as "b4:FLLE" or "y2:sK"
-        """
-        mass = 0.0
-        # Parse amino acid sequence starting after colon
-        start = ion_str.find(":") + 1
-        stop = len(ion_str)
-        seq = ion_str[start:stop]
-
-        for idx, aa in enumerate(seq):
-            # Directly use mass mapping table, lowercase letters represent modified amino acids
-            if aa in AA_MASSES:
-                mass += AA_MASSES[aa]
-
-        # Both b/y ions add z proton masses, y ions also add 1 water molecule mass
-        mass += PROTON_MASS * z
-        if ion_type == "y":
-            mass += WATER_MASS
-
-        return mass
-
-    def _record_nl_ions(self, ion, z, orig_ion_mass, ion_type="b"):
-        """
-        Handle neutral loss ions
-        """
-        # Extract sequence part from ion string
-        start = ion.find(":") + 1
-        end = len(ion)
-        if "/" in ion:
-            end = ion.find("/")
-
-        seq = ion[start:end]
-
-        # Check if it's a decoy sequence
-        if self._is_decoy_seq(seq):
-            # Decoy sequence neutral loss handling
-            decoy_nl_map = self.config.get("decoy_neutral_losses", [])
-            if isinstance(decoy_nl_map, list):
-                decoy_nl_map = self._parse_neutral_losses_list(decoy_nl_map)
-
-            for nl_key, nl_mass in decoy_nl_map.items():
-                # Extract neutral loss tag from key, format: X-H3PO4 -> -H3PO4
-                nl_tag = "-" + nl_key.split("-", 1)[1]  # Split once, take second part
-                nl_str = ion + nl_tag
-                mass = orig_ion_mass + nl_mass
-                mz = round(mass / z, 4)
-
-                if mz > self.config.get("min_mz", 0.0):
-                    if ion_type == "b":
-                        self.b_ions[nl_str] = mz
-                    else:
-                        self.y_ions[nl_str] = mz
-        else:
-            # Normal sequence neutral loss handling
-            nl_map = self.config.get("neutral_losses", [])
-            if isinstance(nl_map, list):
-                nl_map = self._parse_neutral_losses_list(nl_map)
-
-            for nl_key, nl_mass in nl_map.items():
-                # Parse format: sty-H3PO4 -> check if sequence contains any amino acid in sty
-                residues = nl_key.split("-")[0]
-                # Extract neutral loss tag from key, format: sty-H3PO4 -> -H3PO4
-                nl_tag = "-" + nl_key.split("-", 1)[1]  # Split once, take second part
-
-                # Check if sequence contains amino acids that can produce neutral losses
-                num_cand_res = sum(1 for aa in seq if aa.upper() in residues.upper())
-                if num_cand_res > 0:
-                    nl_str = ion + nl_tag
-                    mass = orig_ion_mass + nl_mass
-                    mz = round(mass / z, 4)
-
-                    if mz > self.config.get("min_mz", 0.0):
-                        if ion_type == "b":
-                            self.b_ions[nl_str] = mz
-                        else:
-                            self.y_ions[nl_str] = mz
-
-    def _get_neutral_losses(self, ion_str, ion_type="b", only_main_ion=False):
-        """
-        Return neutral loss list
-        Only extend main ion names, avoid extending ion names with "-".
-        """
-        nl_list = []
-        # Only extend main ion names (without "-")
-        # Main ion name definition: after ":" to "/+" or end, without "-"
-        colon_idx = ion_str.find(":")
-        if colon_idx == -1:
-            return nl_list
-        # Find /+ position
-        slash_idx = ion_str.find("/+", colon_idx)
-        dash_idx = ion_str.find("-", colon_idx)
-        # If there"s "-" after ":" to "/+" or before "-", it"s not a main ion name
-        if only_main_ion:
-            # Only allow no "-" between after ":" to "/+" or end
-            end_idx = len(ion_str)
-            if slash_idx != -1 and (dash_idx == -1 or slash_idx < dash_idx):
-                end_idx = slash_idx
-            elif dash_idx != -1:
-                end_idx = dash_idx
-            seq_part = ion_str[colon_idx + 1 : end_idx]
-            if "-" in seq_part:
-                return nl_list
-
-        # Extract sequence part from ion string
-        start = ion_str.find(":") + 1
-        end = len(ion_str)
-        if "-" in ion_str:
-            end = ion_str.find("-")
-
-        seq = ion_str[start:end]
-
-        # Check if it's a decoy sequence
-        if self._is_decoy_seq(seq):
-            # Decoy sequence neutral loss handling
-            decoy_nl_map = self.config.get("decoy_neutral_losses", {})
-            # Handle list format decoy_neutral_losses
-            if isinstance(decoy_nl_map, list):
-                decoy_nl_map = self._parse_neutral_losses_list(decoy_nl_map)
-
-            for nl_key, nl_mass in decoy_nl_map.items():
-                residues = nl_key.split("-")[0]
-                nl_tag = "-" + nl_key.split("-")[1]
-
-                num_cand_res = sum(1 for aa in seq if aa.upper() in residues.upper())
-                if num_cand_res > 0:
-                    nl_list.append((nl_tag, nl_mass))
-        else:
-            nl_map = self.config.get("neutral_losses", {})
-            if isinstance(nl_map, list):
-                nl_map = self._parse_neutral_losses_list(nl_map)
-
-            for nl_key, nl_mass in nl_map.items():
-                residues = nl_key.split("-")[0]
-                nl_tag = "-" + nl_key.split("-")[1]
-
-                num_cand_res = sum(1 for aa in seq if aa.upper() in residues.upper())
-                if num_cand_res > 0:
-                    nl_list.append((nl_tag, nl_mass))
-
-        return nl_list
-
-    def _parse_neutral_losses_list(self, nl_list):
-        """
-        Parse list format neutral loss configuration
-        Format: ["sty -H3PO4 -97.97690"] -> {"sty-H3PO4": -97.97690}
-        """
-        nl_dict = {}
-        for item in nl_list:
-            parts = item.strip().split()
-            if len(parts) >= 3:
-                residues = parts[0]
-                nl_name = parts[1]
-                nl_mass = float(parts[2])
-                # Remove leading - from nl_name to avoid double hyphens
-                if nl_name.startswith("-"):
-                    nl_key = f"{residues}{nl_name}"  # sty-H3PO4
-                else:
-                    nl_key = f"{residues}-{nl_name}"
-                nl_dict[nl_key] = nl_mass
-        return nl_dict
-
-    def _is_decoy_seq(self, seq):
-        """
-        Check if sequence is a decoy sequence
-        """
-        return any(aa.islower() for aa in seq)
+        return True
 
     def calc_theoretical_masses(self, perm: str) -> List[float]:
         """
@@ -682,6 +657,9 @@ class Peptide:
         """
         Match peaks in the spectrum to theoretical fragment ions.
 
+        Uses vectorized NumPy operations with searchsorted for O(log n)
+        binary search instead of O(n) linear search per ion.
+
         Args:
             spectrum: Spectrum object
             config: Optional configuration dictionary (if None, uses self.config)
@@ -691,101 +669,118 @@ class Peptide:
         """
         use_config = config if config is not None else self.config
 
-        matched_peaks = []
-        best_match_map = {}  # mz -> peak
+        # Get spectrum data once (avoid repeated calls)
+        mz_values, intensities = spectrum.get_peaks()
+        if len(mz_values) == 0:
+            return []
+
+        # Pre-compute spectrum arrays for vectorized access
+        norm_intensity = spectrum.norm_intensity
+        max_i = spectrum.max_i
+
+        # Ensure m/z values are sorted and get sort indices
+        # Most spectra are already sorted, but we need indices for lookups
+        if spectrum._mz_sorted is None:
+            spectrum._update_sorted_indices()
+        mz_sorted = spectrum._mz_sorted
+        sort_indices = spectrum._mz_sorted_indices
 
         tolerance = use_config.get("fragment_mass_tolerance", 0.5)
+        is_ppm = use_config.get("ms2_tolerance_units", "Da") == "ppm"
 
+        # Combine y and b ions for batch processing
         y_ions = self.get_ion_ladder("y")
-        for ion_str, theo_mz in y_ions.items():
-            if use_config.get("ms2_tolerance_units", "Da") == "ppm":
-                ppm_err = tolerance / 1000000.0
-                match_err = theo_mz * ppm_err
-            else:
-                match_err = tolerance
-
-            match_err *= 0.5  # Split tolerance window
-            a = theo_mz - match_err
-            b = theo_mz + match_err
-
-            cand_matches = []
-            mz_values, intensities = spectrum.get_peaks()
-            for i in range(len(mz_values)):
-                if a <= mz_values[i] <= b:
-                    peak = {
-                        "mz": mz_values[i],
-                        "intensity": intensities[i],
-                        "rel_intensity": (intensities[i] / spectrum.max_i) * 100.0,
-                        "norm_intensity": spectrum.norm_intensity[i],
-                        "mass_diff": mz_values[i] - theo_mz,  # obs - expected
-                        "matched": True,
-                        "matched_ion_str": ion_str,
-                        "matched_ion_mz": theo_mz,
-                        "ion_type": "y",
-                    }
-                    cand_matches.append(peak)
-
-            if cand_matches:
-                cand_matches.sort(key=lambda x: x["intensity"], reverse=True)
-                best_peak = cand_matches[0]
-
-                if best_peak["mz"] in best_match_map:
-                    old_peak = best_match_map[best_peak["mz"]]
-                    if abs(old_peak["mass_diff"]) > abs(best_peak["mass_diff"]):
-                        best_match_map[best_peak["mz"]] = best_peak
-                else:
-                    best_match_map[best_peak["mz"]] = best_peak
-
         b_ions = self.get_ion_ladder("b")
+
+        # Build arrays of theoretical m/z values and metadata
+        all_ion_strs = []
+        all_theo_mz = []
+        all_ion_types = []
+
+        for ion_str, theo_mz in y_ions.items():
+            all_ion_strs.append(ion_str)
+            all_theo_mz.append(theo_mz)
+            all_ion_types.append("y")
+
         for ion_str, theo_mz in b_ions.items():
-            if use_config.get("ms2_tolerance_units", "Da") == "ppm":
-                ppm_err = tolerance / 1000000.0
-                match_err = theo_mz * ppm_err
+            all_ion_strs.append(ion_str)
+            all_theo_mz.append(theo_mz)
+            all_ion_types.append("b")
+
+        if not all_theo_mz:
+            return []
+
+        # Convert to numpy array for vectorized operations
+        theo_mz_array = np.array(all_theo_mz)
+
+        # Vectorized tolerance calculation
+        if is_ppm:
+            ppm_err = tolerance / 1000000.0
+            match_errs = theo_mz_array * ppm_err * 0.5
+        else:
+            match_errs = np.full(len(theo_mz_array), tolerance * 0.5)
+
+        # Calculate search bounds for all ions at once
+        lower_bounds = theo_mz_array - match_errs
+        upper_bounds = theo_mz_array + match_errs
+
+        # Use searchsorted for O(log n) binary search to find candidate ranges
+        left_indices = np.searchsorted(mz_sorted, lower_bounds, side='left')
+        right_indices = np.searchsorted(mz_sorted, upper_bounds, side='right')
+
+        # Track best match for each spectrum peak (by original index)
+        # Store: original_idx -> (ion_idx, mass_diff, intensity)
+        best_match_by_peak = {}
+
+        # Process each ion's candidate matches
+        for ion_idx in range(len(all_theo_mz)):
+            left = left_indices[ion_idx]
+            right = right_indices[ion_idx]
+
+            if left >= right:
+                continue  # No candidates in range
+
+            # Get candidate indices in sorted array
+            sorted_candidate_indices = np.arange(left, right)
+
+            # Map back to original indices
+            original_indices = sort_indices[sorted_candidate_indices]
+
+            # Get intensities for candidates
+            candidate_intensities = intensities[original_indices]
+
+            # Find the most intense peak among candidates
+            best_local_idx = np.argmax(candidate_intensities)
+            best_orig_idx = original_indices[best_local_idx]
+            best_intensity = candidate_intensities[best_local_idx]
+
+            theo_mz = all_theo_mz[ion_idx]
+            mass_diff = mz_values[best_orig_idx] - theo_mz
+
+            # Check if this peak was already matched to another ion
+            if best_orig_idx in best_match_by_peak:
+                _, old_mass_diff, _ = best_match_by_peak[best_orig_idx]
+                # Keep the match with smaller mass error
+                if abs(mass_diff) < abs(old_mass_diff):
+                    best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff, best_intensity)
             else:
-                match_err = tolerance
+                best_match_by_peak[best_orig_idx] = (ion_idx, mass_diff, best_intensity)
 
-            match_err *= 0.5  # Split tolerance window
-            a = theo_mz - match_err
-            b = theo_mz + match_err
-
-            cand_matches = []
-            mz_values, intensities = spectrum.get_peaks()
-            for i in range(len(mz_values)):
-                if a <= mz_values[i] <= b:
-                    peak = {
-                        "mz": mz_values[i],
-                        "intensity": intensities[i],
-                        "rel_intensity": (intensities[i] / spectrum.max_i) * 100.0,
-                        "norm_intensity": spectrum.norm_intensity[i],
-                        "mass_diff": mz_values[i] - theo_mz,  # obs - expected
-                        "matched": True,
-                        "matched_ion_str": ion_str,
-                        "matched_ion_mz": theo_mz,
-                        "ion_type": "b",
-                    }
-                    cand_matches.append(peak)
-
-            if cand_matches:
-                cand_matches.sort(key=lambda x: x["intensity"], reverse=True)
-                best_peak = cand_matches[0]
-
-                if best_peak["mz"] in best_match_map:
-                    old_peak = best_match_map[best_peak["mz"]]
-                    if abs(old_peak["mass_diff"]) > abs(best_peak["mass_diff"]):
-                        best_match_map[best_peak["mz"]] = best_peak
-                else:
-                    best_match_map[best_peak["mz"]] = best_peak
-
-        matched_peaks = list(best_match_map.values())
-
-        if use_config.get("debug", False):
-            output_data = {
-                "matched_peaks": matched_peaks,
-                "theoretical_ions": {"y_ions": y_ions, "b_ions": b_ions},
-                "peptide": self.peptide,
-                "modified_peptide": self.mod_peptide,
-                "charge": self.charge,
+        # Build final matched peaks list (only create dicts for final matches)
+        matched_peaks = []
+        for orig_idx, (ion_idx, mass_diff, _) in best_match_by_peak.items():
+            peak = {
+                "mz": mz_values[orig_idx],
+                "intensity": intensities[orig_idx],
+                "rel_intensity": (intensities[orig_idx] / max_i) * 100.0,
+                "norm_intensity": norm_intensity[orig_idx],
+                "mass_diff": mass_diff,
+                "matched": True,
+                "matched_ion_str": all_ion_strs[ion_idx],
+                "matched_ion_mz": all_theo_mz[ion_idx],
+                "ion_type": all_ion_types[ion_idx],
             }
+            matched_peaks.append(peak)
 
         return matched_peaks
 
@@ -969,21 +964,4 @@ class Peptide:
         Returns:
             str: Unmodified peptide sequence
         """
-        try:
-            # Remove all modification markers
-            unmod_seq = ""
-            i = 0
-            while i < len(self.peptide):
-                if self.peptide[i : i + 9] == "(Phospho)":
-                    i += 9
-                elif self.peptide[i : i + 9] == "(Oxidation)":
-                    i += 9
-                elif self.peptide[i : i + 13] == "(PhosphoDecoy)":
-                    i += 13
-                else:
-                    unmod_seq += self.peptide[i]
-                    i += 1
-            return unmod_seq
-        except Exception as e:
-            logger.error(f"Error getting unmodified sequence: {str(e)}")
-            return self.peptide
+        return strip_modifications(self.peptide)

@@ -8,7 +8,7 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
-from pyopenms import IdXMLFile, MzMLFile, MSExperiment, PeptideIdentification, PeptideHit
+from pyopenms import IdXMLFile, MzMLFile, MSExperiment, PeptideIdentification, PeptideHit, PeptideIdentificationList
 from click.testing import CliRunner
 
 # Add the parent directory to the path
@@ -67,7 +67,7 @@ class TestDataFileLoading:
         """Test parsing idXML file with PyOpenMS."""
         try:
             # Load idXML file
-            peptide_ids = []
+            peptide_ids = PeptideIdentificationList()
             protein_ids = []
             IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
             
@@ -120,7 +120,7 @@ class TestAlgorithmExecution:
         """Test AScore algorithm with real data files."""
         try:
             # Load data
-            peptide_ids = []
+            peptide_ids = PeptideIdentificationList()
             protein_ids = []
             IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
             
@@ -134,11 +134,13 @@ class TestAlgorithmExecution:
             tested_hits = 0
             max_tests = 5  # Limit to avoid long test times
             
-            for pep_id in peptide_ids[:max_tests]:
+            for i, pep_id in enumerate(peptide_ids):
+                if i >= max_tests:
+                    break
                 for hit in pep_id.getHits():
                     if tested_hits >= max_tests:
                         break
-                    
+
                     # Get corresponding spectrum
                     if pep_id.metaValueExists("spectrum_reference"):
                         spectrum_ref = pep_id.getMetaValue("spectrum_reference")
@@ -174,7 +176,7 @@ class TestAlgorithmExecution:
         """Test PhosphoRS algorithm with real data files."""
         try:
             # Load data
-            peptide_ids = []
+            peptide_ids = PeptideIdentificationList()
             protein_ids = []
             IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
             
@@ -185,11 +187,13 @@ class TestAlgorithmExecution:
             tested_hits = 0
             max_tests = 5  # Limit to avoid long test times
             
-            for pep_id in peptide_ids[:max_tests]:
+            for i, pep_id in enumerate(peptide_ids):
+                if i >= max_tests:
+                    break
                 for hit in pep_id.getHits():
                     if tested_hits >= max_tests:
                         break
-                    
+
                     # Get corresponding spectrum
                     if pep_id.metaValueExists("spectrum_reference"):
                         spectrum_ref = pep_id.getMetaValue("spectrum_reference")
@@ -372,7 +376,7 @@ class TestLucXorWithRealData:
         """Test that LucXor can load the data files."""
         try:
             # Load data
-            peptide_ids = []
+            peptide_ids = PeptideIdentificationList()
             protein_ids = []
             IdXMLFile().load(str(idxml_file), protein_ids, peptide_ids)
             

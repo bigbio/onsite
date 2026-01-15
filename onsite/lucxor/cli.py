@@ -18,6 +18,7 @@ from pyopenms import (
     MzMLFile,
     MSExperiment,
     PeptideIdentification,
+    PeptideIdentificationList,
     ProteinIdentification,
     IDFilter,
 )
@@ -324,16 +325,16 @@ class PyLuciPHOr2:
 
     def load_input_files(
         self, input_id: str, input_spectrum: str
-    ) -> Tuple[List[PeptideIdentification], List[ProteinIdentification], MSExperiment]:
+    ) -> Tuple[PeptideIdentificationList, List[ProteinIdentification], MSExperiment]:
         """Load input files"""
         # Load identifications
-        pep_ids = []
+        pep_ids = PeptideIdentificationList()
         prot_ids = []
         IdXMLFile().load(input_id, prot_ids, pep_ids)
 
         if not pep_ids:
             self.logger.warning("No peptide identifications found in input file")
-            return [], [], None
+            return PeptideIdentificationList(), [], None
 
         # Keep only best hits
         IDFilter().keepNBestHits(pep_ids, 1)
@@ -437,9 +438,13 @@ class PyLuciPHOr2:
             self.logger.error("No valid peptide identification or spectrum data found, process terminated.")
             return 1
 
-        # 1. Create scan number to spectrum mapping
+        # 1. Create scan number to spectrum mapping AND RT-sorted index for fast lookup
         spectrum_map = {}
+        rt_spectrum_list = []  # List of (RT, spectrum) tuples for binary search
+
         for spectrum in exp:
+            rt = spectrum.getRT()
+            rt_spectrum_list.append((rt, spectrum))
             try:
                 # Extract scan number from native ID
                 native_id = spectrum.getNativeID()
@@ -455,6 +460,10 @@ class PyLuciPHOr2:
                             break
             except Exception as e:
                 self.logger.warning(f"Cannot extract scan number from native ID: {native_id}, error: {str(e)}")
+
+        # Sort by RT for binary search (O(n log n) once, then O(log n) per lookup)
+        rt_spectrum_list.sort(key=lambda x: x[0])
+        rt_values = np.array([rt for rt, _ in rt_spectrum_list])
 
         # 2. Collect all PSM objects
         all_psms = []
@@ -481,10 +490,23 @@ class PyLuciPHOr2:
                 spectrum = spectrum_map[scan_num]
                 self.logger.debug(f"Found matching spectrum by scan number {scan_num}")
             else:
-                # If scan number unavailable or no match found, try RT matching
-                for spec in exp:
-                    if abs(spec.getRT() - rt) <= rt_tolerance:
-                        spectrum = spec
+                # If scan number unavailable or no match found, try RT matching with binary search
+                # O(log n) instead of O(n) per lookup
+                idx = np.searchsorted(rt_values, rt)
+
+                # Check candidates near the insertion point
+                candidates = []
+                if idx > 0:
+                    candidates.append(idx - 1)
+                if idx < len(rt_values):
+                    candidates.append(idx)
+                if idx + 1 < len(rt_values):
+                    candidates.append(idx + 1)
+
+                for candidate_idx in candidates:
+                    candidate_rt, candidate_spec = rt_spectrum_list[candidate_idx]
+                    if abs(candidate_rt - rt) <= rt_tolerance:
+                        spectrum = candidate_spec
                         self.logger.debug(f"Found matching spectrum by RT {rt}")
                         break
             
@@ -620,7 +642,7 @@ class PyLuciPHOr2:
         self.logger.info("Second round calculation completed")
 
         # 6. Write results to output file (using second round calculation results)
-        new_pep_ids = []
+        new_pep_ids = PeptideIdentificationList()
         phospho_count = 0
         for psm in all_psms:
             idx = all_psms.index(psm)
@@ -660,8 +682,7 @@ class PyLuciPHOr2:
                 new_pep_id.setScoreType("Luciphor_delta_score")
                 new_pep_id.setHigherScoreBetter(True)
                 new_pep_id.setHits([hit])
-                new_pep_id.assignRanks()
-                new_pep_ids.append(new_pep_id)
+                new_pep_ids.push_back(new_pep_id)
 
                 # Count phosphorylated peptides
                 try:

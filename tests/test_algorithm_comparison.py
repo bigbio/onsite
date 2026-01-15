@@ -69,9 +69,9 @@ def parse_phosphors_site_probs(site_probs_str: str) -> List[float]:
 
 def load_idxml_with_scores(idxml_path: str) -> Tuple[List, List, Dict[str, Dict[str, Any]]]:
     """Load idXML file and extract peptide hits with their scores."""
-    from pyopenms import IdXMLFile
-    
-    peptide_ids = []
+    from pyopenms import IdXMLFile, PeptideIdentificationList
+
+    peptide_ids = PeptideIdentificationList()
     protein_ids = []
     IdXMLFile().load(str(idxml_path), protein_ids, peptide_ids)
     

@@ -2,6 +2,8 @@
 Constants and default configurations for pyLuciPHOr2
 """
 
+from . import mass_provider
+
 # Algorithm types
 ALGORITHM_CID = 0
 ALGORITHM_HCD = 1
@@ -37,46 +39,29 @@ NEGLOGEXPECT = 2
 XTDHYPERSCORE = 3
 XCORR = 4
 
-# Physical constants
-WATER_MASS = 18.010564684
-PROTON_MASS = 1.00727646688
+# Physical constants - derived from PyOpenMS
+WATER_MASS = mass_provider.get_water_mass()
+PROTON_MASS = mass_provider.get_proton_mass()
 PPM = 1.0 / 1000000.0
 TINY_NUM = 1e-10
 MIN_DELTA_SCORE = 0.1
 FUNCTION_TIME_LIMIT = 120  # seconds
 
-# Amino acid masses (monoisotopic)
-AA_MASSES = {
-    "A": 71.03711,
-    "C": 103.00919,
-    "D": 115.02694,
-    "E": 129.04259,
-    "F": 147.06841,
-    "G": 57.02146,
-    "H": 137.05891,
-    "I": 113.08406,
-    "K": 128.09496,
-    "L": 113.08406,
-    "M": 131.04049,
-    "N": 114.04293,
-    "P": 97.05276,
-    "Q": 128.05858,
-    "R": 156.10111,
-    "S": 87.03203,
-    "T": 101.04768,
-    "V": 99.06841,
-    "W": 186.07931,
-    "Y": 163.06333,
-}
+# Modification masses - derived from PyOpenMS
+PHOSPHO_MOD_MASS = mass_provider.get_phospho_mass()
+OXIDATION_MASS = mass_provider.get_oxidation_mass()
+
+# Amino acid masses (monoisotopic) - derived from PyOpenMS ResidueDB
+AA_MASSES = mass_provider.get_all_aa_masses()
 
 # Add lowercase letter mass definitions for modification sites (including modification mass)
 AA_MASSES.update(
     {
-        "s": 87.03203 + 79.966331,  # Ser + phosphorylation
-        "t": 101.04768 + 79.966331,  # Thr + phosphorylation
-        "y": 163.06333 + 79.966331,  # Tyr + phosphorylation
-        "a": 71.03711 + 79.966331,  # Ala + PhosphoDecoy
-        "m": 131.04049 + 15.994915,  # Met + oxidation
+        "s": AA_MASSES["S"] + PHOSPHO_MOD_MASS,  # Ser + phosphorylation
+        "t": AA_MASSES["T"] + PHOSPHO_MOD_MASS,  # Thr + phosphorylation
+        "y": AA_MASSES["Y"] + PHOSPHO_MOD_MASS,  # Tyr + phosphorylation
+        "a": AA_MASSES["A"] + PHOSPHO_MOD_MASS,  # Ala + PhosphoDecoy
+        "m": AA_MASSES["M"] + OXIDATION_MASS,  # Met + oxidation
     }
 )
 
@@ -108,8 +93,8 @@ DECOY_AA_MAP = {
 AA_DECOY_MAP = {v: k for k, v in DECOY_AA_MAP.items()}
 
 # Add mass definitions for all decoy symbols
-# decoy amino acid mass = original amino acid mass + decoyMass (79.966331)
-DECOY_MASS = 79.966331
+# decoy amino acid mass = original amino acid mass + decoyMass (Phospho mass)
+DECOY_MASS = PHOSPHO_MOD_MASS
 for decoy_aa, orig_aa in DECOY_AA_MAP.items():
     if decoy_aa not in AA_MASSES and orig_aa in AA_MASSES:
         AA_MASSES[decoy_aa] = AA_MASSES[orig_aa] + DECOY_MASS
@@ -173,10 +158,10 @@ SCORE_TYPES = {
     "Sequest Xcorr": 4,
 }
 
-# Modification masses
+# Modification masses dict - derived from PyOpenMS
 MOD_MASSES = {
-    "Phospho": 79.966331,
-    "Oxidation": 15.994915,
+    "Phospho": PHOSPHO_MOD_MASS,
+    "Oxidation": OXIDATION_MASS,
 }
 
 # Decoy amino acid mapping
@@ -185,10 +170,6 @@ DECOY_AMINO_ACIDS = {
     "T": "V",  # Thr -> Val
     "Y": "F",  # Tyr -> Phe
 }
-
-# New constants
-PHOSPHO_MOD_MASS = 79.966331
-OXIDATION_MASS = 15.994915
 
 # Character types
 SINGLE_CHAR = 0
@@ -200,6 +181,6 @@ REAL = 1
 # Minimum values
 MIN_NUM_NEG_PKS = 50000
 
-# Physical constants
-WATER = 18.01056
-PROTON = 1.00728
+# Physical constants (aliases for backward compatibility)
+WATER = WATER_MASS
+PROTON = PROTON_MASS

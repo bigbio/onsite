@@ -10,7 +10,7 @@ import sys
 import os
 import tempfile
 import time
-from pyopenms import IdXMLFile, PeptideIdentification, PeptideHit
+from pyopenms import IdXMLFile, PeptideIdentification, PeptideHit, PeptideIdentificationList
 from onsite.lucxor.cli import lucxor
 from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
@@ -248,10 +248,10 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
     - A combined score (using LucXor's delta score as primary)
     """
     # Load all three result files
-    ascore_prot_ids, ascore_pep_ids = [], []
-    phosphors_prot_ids, phosphors_pep_ids = [], []
-    lucxor_prot_ids, lucxor_pep_ids = [], []
-    
+    ascore_prot_ids, ascore_pep_ids = [], PeptideIdentificationList()
+    phosphors_prot_ids, phosphors_pep_ids = [], PeptideIdentificationList()
+    lucxor_prot_ids, lucxor_pep_ids = [], PeptideIdentificationList()
+
     IdXMLFile().load(ascore_file, ascore_prot_ids, ascore_pep_ids)
     IdXMLFile().load(phosphors_file, phosphors_prot_ids, phosphors_pep_ids)
     IdXMLFile().load(lucxor_file, lucxor_prot_ids, lucxor_pep_ids)

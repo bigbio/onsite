@@ -8,7 +8,7 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from pyopenms import IdXMLFile, MzMLFile, MSExperiment
+from pyopenms import IdXMLFile, MzMLFile, MSExperiment, PeptideIdentificationList
 from click.testing import CliRunner
 
 # Add the parent directory to the path
@@ -63,7 +63,7 @@ class TestOutputValidation:
                 
                 # Validate with PyOpenMS
                 try:
-                    peptide_ids = []
+                    peptide_ids = PeptideIdentificationList()
                     protein_ids = []
                     IdXMLFile().load(output_file, protein_ids, peptide_ids)
                     assert len(peptide_ids) >= 0, "Output should be loadable by PyOpenMS"

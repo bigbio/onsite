@@ -6,7 +6,7 @@ import time
 import logging
 import traceback
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import click
 from pyopenms import *
@@ -147,7 +147,7 @@ def phosphors(
         }
 
         start_time = time.time()
-        processed_peptide_ids = []
+        processed_peptide_ids = PeptideIdentificationList()
 
         # Sequential or parallel processing
         if max(1, int(threads)) == 1:
@@ -161,7 +161,7 @@ def phosphors(
                         pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, scan_map
                     )
                     if result["status"] == "success":
-                        processed_peptide_ids.append(result["new_pid"])
+                        processed_peptide_ids.push_back(result["new_pid"])
                         stats["processed"] += 1
                         stats["phospho"] += len([h for h in result["new_pid"].getHits() 
                                               if "(Phospho)" in h.getSequence().toString()])
@@ -177,11 +177,12 @@ def phosphors(
         else:
             workers = max(1, int(threads))
             click.echo(
-                f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} processes"
+                f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} threads"
             )
             if debug:
                 logger.info(f"Starting parallel processing with {workers} workers")
 
+            # Build tasks - with threads we can pass objects directly (shared memory)
             params = {
                 "fragment_mass_tolerance": fragment_mass_tolerance,
                 "fragment_mass_unit": fragment_mass_unit,
@@ -194,15 +195,16 @@ def phosphors(
                     seq_str = hit.getSequence().toString()
                     proforma = hit.getMetaValue("ProForma") if hit.metaValueExists("ProForma") else None
                     hit_payloads.append({"sequence": seq_str, "proforma": proforma})
-                
+
                 # Extract spectrum_reference for scan number lookup
                 spectrum_reference = None
                 if pid.metaValueExists("spectrum_reference"):
                     spectrum_reference = pid.getMetaValue("spectrum_reference")
-                
+
                 tasks.append({
                     "idx": idx,
-                    "mzml_path": in_file,
+                    "exp": exp,  # Pass spectrum object directly - shared between threads
+                    "scan_map": scan_map,  # Pass scan map directly - shared between threads
                     "params": params,
                     "pid": {
                         "mz": pid.getMZ(),
@@ -213,8 +215,8 @@ def phosphors(
                 })
 
             indexed_results = {}
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_worker_process_pid, t): t["idx"] for t in tasks}
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_worker_process_pid_threaded, t): t["idx"] for t in tasks}
                 for fut in as_completed(futures):
                     idx = futures[fut]
                     try:
@@ -270,7 +272,7 @@ def phosphors(
                         new_hits.append(new_hit)
 
                     new_pid.setHits(new_hits)
-                    processed_peptide_ids.append(new_pid)
+                    processed_peptide_ids.push_back(new_pid)
                     stats["processed"] += 1
                     stats["phospho"] += len(
                         [
@@ -329,7 +331,7 @@ def load_identifications(idxml_file):
     """Load identification results with metadata validation"""
     print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
     protein_ids = []
-    peptide_ids = []
+    peptide_ids = PeptideIdentificationList()
     IdXMLFile().load(idxml_file, protein_ids, peptide_ids)
     print(f"Loaded {len(peptide_ids)} peptide identifications")
     return protein_ids, peptide_ids
@@ -464,54 +466,37 @@ def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
     return best_match
 
 
-# ----------------------- Multiprocessing worker utilities -----------------------
-_WORKER_EXP = None
-_WORKER_SCAN_MAP = None
+# ----------------------- Threading worker utilities -----------------------
+# Note: Using ThreadPoolExecutor instead of ProcessPoolExecutor allows threads
+# to share the spectrum data (exp object) directly without reloading the file.
+# This provides significant performance improvement for parallel processing.
 
-def _worker_get_exp(mzml_file):
-    global _WORKER_EXP
-    if _WORKER_EXP is None:
-        exp = MSExperiment()
-        FileHandler().loadExperiment(mzml_file, exp)
-        # Warm up spectrum cache in worker
-        if exp.size() > 0:
-            if hasattr(find_spectrum_by_mz, "spectrum_list"):
-                delattr(find_spectrum_by_mz, "spectrum_list")
-            _ = find_spectrum_by_mz(exp, 0.0, None)
-        _WORKER_EXP = exp
-    return _WORKER_EXP
-    
-    
-def _worker_get_scan_map(exp):
-    """Get or build the scan map for the worker process. Cached per worker."""
-    global _WORKER_SCAN_MAP
-    if _WORKER_SCAN_MAP is None:
-        _WORKER_SCAN_MAP = build_scan_to_spectrum_map(exp)
-    return _WORKER_SCAN_MAP
-    
-    
-def _worker_process_pid(task):
+
+def _worker_process_pid_threaded(task):
+    """Thread-safe worker that uses shared spectrum data.
+
+    Unlike process-based workers, threads share memory so we can pass
+    the exp and scan_map objects directly without serialization or file reloading.
+    """
     try:
-        mzml_path = task["mzml_path"]
+        exp = task["exp"]  # Shared spectrum object - no file reload needed
+        scan_map = task["scan_map"]  # Shared scan map - no rebuild needed
         pid_info = task["pid"]
         params = task["params"]
 
-        exp = _worker_get_exp(mzml_path)
-        
         # First, try to find by scan number from spectrum_reference
         spectrum = None
         scan_number = None
-        
+
         if pid_info.get("spectrum_reference"):
             scan_number = extract_scan_number_from_reference(pid_info["spectrum_reference"])
             if scan_number is not None:
-                scan_map = _worker_get_scan_map(exp)
                 spectrum = find_spectrum_by_scan(exp, scan_number, scan_map)
-        
+
         # Fallback to m/z and RT matching if scan number lookup failed
         if spectrum is None:
             spectrum = find_spectrum_by_mz(exp, pid_info["mz"], pid_info.get("rt"))
-        
+
         if spectrum is None:
             return {"status": "error", "reason": "spectrum_not_found"}
 
@@ -553,7 +538,6 @@ def _worker_process_pid(task):
             meta_fields.append(("PhosphoRS_pep_score", final_score))
             meta_fields.append(("PhosphoRS_site_probs", str(simple_site_probs)))
 
-            # strict comparison removed
             if hit.metaValueExists("MS:1002052"):
                 meta_fields.append(
                     ("SpecEValue_score", float(hit.getMetaValue("MS:1002052")))

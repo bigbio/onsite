@@ -91,16 +91,14 @@ class FLRCalculator:
         self.n_decoy = len(self.neg)
 
     def initialize_tick_marks(self) -> None:
-        """Initialize tick marks"""
+        """Initialize tick marks (vectorized)"""
         # First prepare arrays
         self.prep_arrays()
 
         self.max_delta_score *= 1.001  # Need to be slightly larger for binning
 
-        self.tick_marks = np.zeros(self.NMARKS)
-        for i in range(self.NMARKS):
-            x = (i * self.max_delta_score) / self.NMARKS
-            self.tick_marks[i] = x
+        # Vectorized tick mark creation using linspace
+        self.tick_marks = np.linspace(0, self.max_delta_score, self.NMARKS)
 
         # Initialize other arrays
         self.local_fdr = np.zeros(self.n_real)
@@ -138,38 +136,20 @@ class FLRCalculator:
             self.bw_decoy = result
 
     def calc_delta_score_mean(self) -> None:
-        """Calculate delta score mean"""
-        # Target sequence
-        sum_pos = 0.0
-        for d in self.pos:
-            sum_pos += d
-        N_pos = float(self.n_real)
-        self.delta_score_mu_pos = sum_pos / N_pos if N_pos > 0 else 0.0
+        """Calculate delta score mean (vectorized)"""
+        # Target sequence - use NumPy's optimized mean
+        self.delta_score_mu_pos = np.mean(self.pos) if self.n_real > 0 else 0.0
 
-        # Decoy sequence
-        sum_neg = 0.0
-        for d in self.neg:
-            sum_neg += d
-        N_neg = float(self.n_decoy)
-        self.delta_score_mu_neg = sum_neg / N_neg if N_neg > 0 else 0.0
+        # Decoy sequence - use NumPy's optimized mean
+        self.delta_score_mu_neg = np.mean(self.neg) if self.n_decoy > 0 else 0.0
 
     def calc_delta_score_var(self) -> None:
-        """Calculate delta score variance"""
-        # Target sequence
-        v = 0.0
-        for d in self.pos:
-            x = d - self.delta_score_mu_pos
-            v += x * x
-        N = float(self.n_real - 1)
-        self.delta_score_var_pos = v / N if N > 0 else 0.0
+        """Calculate delta score variance (vectorized)"""
+        # Target sequence - use NumPy's optimized variance (ddof=1 for sample variance)
+        self.delta_score_var_pos = np.var(self.pos, ddof=1) if self.n_real > 1 else 0.0
 
-        # Decoy sequence
-        v = 0.0
-        for d in self.neg:
-            x = d - self.delta_score_mu_neg
-            v += x * x
-        N = float(self.n_decoy - 1)
-        self.delta_score_var_neg = v / N if N > 0 else 0.0
+        # Decoy sequence - use NumPy's optimized variance (ddof=1 for sample variance)
+        self.delta_score_var_neg = np.var(self.neg, ddof=1) if self.n_decoy > 1 else 0.0
 
     def normal_density(self, cur_tick_mark: float, cur_score: float, h: float) -> float:
         """
@@ -188,7 +168,7 @@ class FLRCalculator:
 
     def eval_tick_marks(self, data_type: int) -> None:
         """
-        Evaluate tick marks, kernel density estimation implementation
+        Evaluate tick marks, kernel density estimation implementation (VECTORIZED)
         Args:
             data_type: Data type (REAL or DECOY)
         """
@@ -196,12 +176,10 @@ class FLRCalculator:
             data_ary = self.neg
             bw = self.bw_decoy
             N = float(self.n_decoy)
-            self.f0 = np.zeros(self.NMARKS)
         else:  # REAL
             data_ary = self.pos
             bw = self.bw_real
             N = float(self.n_real)
-            self.f1 = np.zeros(self.NMARKS)
 
         if N == 0 or bw == 0:
             # Avoid division by zero
@@ -211,31 +189,43 @@ class FLRCalculator:
                 self.f1 = np.full(self.NMARKS, TINY_NUM)
             return
 
-        # Kernel density estimation implementation
+        # VECTORIZED kernel density estimation - O(n+m) instead of O(n*m)
+        # Use broadcasting: tick_marks (NMARKS,) and data_ary (N,)
+        # Compute (tick_marks[:, None] - data_ary[None, :]) / bw for all pairs
+        # For large datasets, process in chunks to avoid memory issues
+        CHUNK_SIZE = 5000  # Process data in chunks to avoid huge memory allocation
+
         NORMAL_CONSTANT = 1.0 / np.sqrt(2.0 * np.pi)
+        kernel_result = np.zeros(self.NMARKS)
 
-        for i in range(self.NMARKS):
-            tic = self.tick_marks[i]
-            kernel_result = 0.0
+        if len(data_ary) <= CHUNK_SIZE:
+            # Small dataset: fully vectorized computation
+            # Shape: (NMARKS, N_data)
+            diff = (self.tick_marks[:, np.newaxis] - data_ary[np.newaxis, :]) / bw
+            kernel = NORMAL_CONSTANT * np.exp(-0.5 * diff * diff)
+            kernel_result = kernel.sum(axis=1)  # Accumulate only, normalize later
+        else:
+            # Large dataset: process in chunks to avoid memory issues
+            for chunk_start in range(0, len(data_ary), CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, len(data_ary))
+                chunk_data = data_ary[chunk_start:chunk_end]
 
-            # Loop to calculate kernel density
-            for score in data_ary:
-                x = (tic - score) / bw
-                kernel_result += NORMAL_CONSTANT * np.exp(-0.5 * x * x)
+                diff = (self.tick_marks[:, np.newaxis] - chunk_data[np.newaxis, :]) / bw
+                kernel = NORMAL_CONSTANT * np.exp(-0.5 * diff * diff)
+                kernel_result += kernel.sum(axis=1)
 
-            # Normalize
-            kernel_result /= N * bw
+        # Single normalization after accumulation for both branches
+        # This is critical for numerical stability - normalizing once at the end
+        # preserves precision better than normalizing during accumulation
+        kernel_result /= N * bw
 
-            if kernel_result > TINY_NUM:
-                if data_type == DECOY:
-                    self.f0[i] = kernel_result
-                else:
-                    self.f1[i] = kernel_result
-            else:
-                if data_type == DECOY:
-                    self.f0[i] = TINY_NUM
-                else:
-                    self.f1[i] = TINY_NUM
+        # Apply minimum threshold
+        kernel_result = np.maximum(kernel_result, TINY_NUM)
+
+        if data_type == DECOY:
+            self.f0 = kernel_result
+        else:
+            self.f1 = kernel_result
 
         # Add debug information
         if data_type == DECOY:
@@ -253,9 +243,112 @@ class FLRCalculator:
                 f"REAL density range: min={np.min(self.f1):.6e}, max={np.max(self.f1):.6e}"
             )
 
+    def _interpolate_density_vectorized(self, x_values: np.ndarray, f: np.ndarray) -> np.ndarray:
+        """
+        Vectorized linear interpolation of density values at given points.
+
+        Uses binary search (O(log n)) instead of linear search (O(n)).
+
+        Args:
+            x_values: Array of score values to interpolate at
+            f: Density array (f0 or f1)
+
+        Returns:
+            Array of interpolated density values
+        """
+        # Use searchsorted for O(log n) binary search to find intervals
+        # Returns index where x would be inserted to maintain sorted order
+        indices = np.searchsorted(self.tick_marks, x_values, side='right') - 1
+
+        # Clamp indices to valid range [0, NMARKS-2] for interpolation
+        indices = np.clip(indices, 0, self.NMARKS - 2)
+
+        # Get interval boundaries
+        a = self.tick_marks[indices]      # Left boundary
+        b = self.tick_marks[indices + 1]  # Right boundary
+
+        # Linear interpolation weights
+        t = (x_values - a) / (b - a)  # Interpolation parameter [0, 1]
+
+        # Interpolated values: f[i] * (1-t) + f[i+1] * t
+        result = f[indices] * (1 - t) + f[indices + 1] * t
+
+        # Handle boundary cases
+        result = np.where(x_values <= self.tick_marks[0], f[0], result)
+        result = np.where(x_values >= self.tick_marks[-1], f[-1], result)
+
+        return result
+
+    def _compute_cumulative_auc_from_end(self, f: np.ndarray) -> np.ndarray:
+        """
+        Pre-compute cumulative AUC from end of tick_marks array.
+
+        This allows O(1) lookup of the area from any tick mark to the end.
+
+        Args:
+            f: Density array (f0 or f1)
+
+        Returns:
+            Array where cumulative_auc[i] = area from tick_marks[i] to end
+        """
+        # Compute trapezoid areas between consecutive tick marks
+        # Area of trapezoid = (b - a) * (f[i] + f[i+1]) / 2
+        dx = np.diff(self.tick_marks)  # Width of each interval
+        trapezoid_areas = dx * 0.5 * (f[:-1] + f[1:])
+
+        # Cumulative sum from end (reverse cumsum)
+        # cumulative_auc[i] = sum of all trapezoid areas from i to end
+        cumulative_auc = np.zeros(self.NMARKS)
+        cumulative_auc[:-1] = np.cumsum(trapezoid_areas[::-1])[::-1]
+
+        return cumulative_auc
+
+    def _global_auc_vectorized(self, x_values: np.ndarray, f: np.ndarray,
+                                cumulative_auc: np.ndarray) -> np.ndarray:
+        """
+        Vectorized global AUC calculation (area from x to end of distribution).
+
+        Uses pre-computed cumulative AUC and binary search for O(log n) per value.
+
+        Args:
+            x_values: Array of score values
+            f: Density array (f0 or f1)
+            cumulative_auc: Pre-computed cumulative AUC from end
+
+        Returns:
+            Array of AUC values (area from each x to end)
+        """
+        # Find which interval each x falls into
+        indices = np.searchsorted(self.tick_marks, x_values, side='right') - 1
+        indices = np.clip(indices, 0, self.NMARKS - 2)
+
+        # Get interval boundaries
+        a = self.tick_marks[indices]      # Left boundary of interval containing x
+        b = self.tick_marks[indices + 1]  # Right boundary
+
+        # Interpolate density at x
+        t = (x_values - a) / (b - a)
+        fx = f[indices] * (1 - t) + f[indices + 1] * t
+
+        # Area from x to right boundary of current interval
+        # Trapezoid with vertices at (x, 0), (x, fx), (b, f[i+1]), (b, 0)
+        partial_area = (b - x_values) * 0.5 * (fx + f[indices + 1])
+
+        # Total area = partial area in current interval + cumulative area from next interval
+        result = partial_area + cumulative_auc[indices + 1]
+
+        # Handle boundary cases
+        result = np.where(x_values <= self.tick_marks[0], cumulative_auc[0], result)
+        result = np.where(x_values >= self.tick_marks[-1], 0.0, result)
+
+        return result
+
     def get_local_auc(self, x: float, which_f: int) -> float:
         """
-        Calculate local density value (density at point x)
+        Calculate local density value (density at point x).
+
+        Note: This is kept for backwards compatibility. For batch processing,
+        use _interpolate_density_vectorized() directly.
 
         Args:
             x: Score
@@ -264,71 +357,15 @@ class FLRCalculator:
         Returns:
             Density value
         """
-        result = 0.0
-        a = 0.0
-        b = 0.0
-        tmp1 = 0.0
-        tmp2 = 0.0
-        fx = 0.0
-
-        start_tick = self.tick_marks[0]
-        end_tick = self.tick_marks[self.NMARKS - 1]
-        start_val = 0.0
-        end_val = 0.0
-
-        # For f0 (decoy)
-        if which_f == DECOY:
-            start_val = self.f0[0]
-            end_val = self.f0[self.NMARKS - 1]
-
-            # Find interval containing x from back to front
-            for j in range(self.NMARKS - 1, 0, -1):
-                i = j - 1
-                a = self.tick_marks[i]
-                b = self.tick_marks[j]
-
-                if x >= a:
-                    # Found interval containing x, calculate density value at x (linear interpolation)
-                    tmp1 = (b - x) / (b - a)
-                    tmp2 = (x - a) / (b - a)
-                    fx = (tmp1 * self.f0[i]) + (tmp2 * self.f0[j])
-                    result = fx
-                    break
-
-            if x <= start_tick:
-                result = start_val
-            elif x >= end_tick:
-                result = end_val
-
-        # For f1 (real)
-        elif which_f == REAL:
-            start_val = self.f1[0]
-            end_val = self.f1[self.NMARKS - 1]
-
-            # Find interval containing x from back to front
-            for j in range(self.NMARKS - 1, 0, -1):
-                i = j - 1
-                a = self.tick_marks[i]
-                b = self.tick_marks[j]
-
-                if x >= a:
-                    # Found interval containing x, calculate density value at x (linear interpolation)
-                    tmp1 = (b - x) / (b - a)
-                    tmp2 = (x - a) / (b - a)
-                    fx = (tmp1 * self.f1[i]) + (tmp2 * self.f1[j])
-                    result = fx
-                    break
-
-            if x <= start_tick:
-                result = start_val
-            elif x >= end_tick:
-                result = end_val
-
-        return result
+        f = self.f0 if which_f == DECOY else self.f1
+        return float(self._interpolate_density_vectorized(np.array([x]), f)[0])
 
     def get_global_auc(self, x: float, which_f: int) -> float:
         """
-        Calculate global AUC
+        Calculate global AUC (area from x to end of distribution).
+
+        Note: This is kept for backwards compatibility. For batch processing,
+        use calc_both_fdrs() which uses vectorized computation.
 
         Args:
             x: Score
@@ -337,55 +374,26 @@ class FLRCalculator:
         Returns:
             AUC value
         """
-        a = 0.0
-        b = 0.0
-        sum_val = 0.0
-        tmp1 = 0.0
-        tmp2 = 0.0
-        fx = 0.0
-
-        # For f0 (decoy)
         if which_f == DECOY:
-            sum_val = 0.0
-            # Find interval containing x from back to front
-            for j in range(self.NMARKS - 1, 0, -1):
-                i = j - 1
-                a = self.tick_marks[i]
-                b = self.tick_marks[j]
+            f = self.f0
+            if not hasattr(self, '_cumulative_auc_f0'):
+                self._cumulative_auc_f0 = self._compute_cumulative_auc_from_end(self.f0)
+            cumulative_auc = self._cumulative_auc_f0
+        else:
+            f = self.f1
+            if not hasattr(self, '_cumulative_auc_f1'):
+                self._cumulative_auc_f1 = self._compute_cumulative_auc_from_end(self.f1)
+            cumulative_auc = self._cumulative_auc_f1
 
-                if x < a:
-                    sum_val += (b - a) * (0.5 * (self.f0[j] + self.f0[i]))
-                else:
-                    # Found interval containing x, calculate area under curve up to x
-                    tmp1 = (b - x) / (b - a)
-                    tmp2 = (x - a) / (b - a)
-                    fx = (tmp1 * self.f0[i]) + (tmp2 * self.f0[j])
-                    sum_val += (b - x) * (0.5 * (fx + self.f0[j]))
-                    break
-
-        # For f1 (real)
-        elif which_f == REAL:
-            sum_val = 0.0
-            # Find interval containing x from back to front
-            for j in range(self.NMARKS - 1, 0, -1):
-                i = j - 1
-                a = self.tick_marks[i]
-                b = self.tick_marks[j]
-
-                if x < a:
-                    sum_val += (b - a) * (0.5 * (self.f1[j] + self.f1[i]))
-                else:
-                    # Found interval containing x, calculate area under curve up to x
-                    tmp1 = (b - x) / (b - a)
-                    tmp2 = (x - a) / (b - a)
-                    fx = (tmp1 * self.f1[i]) + (tmp2 * self.f1[j])
-                    sum_val += (b - x) * (0.5 * (fx + self.f1[j]))
-                    break
-
-        return sum_val
+        return float(self._global_auc_vectorized(np.array([x]), f, cumulative_auc)[0])
 
     def calc_both_fdrs(self) -> None:
-        """Calculate global and local FDR"""
+        """
+        Calculate global and local FDR for all PSMs.
+
+        Fully vectorized implementation using NumPy for O(n log m) complexity
+        where n = number of PSMs and m = number of tick marks.
+        """
         Nreal2 = float(self.n_real)
         Ndecoy2 = float(self.n_decoy)
 
@@ -393,33 +401,44 @@ class FLRCalculator:
             f"FDR calculation - Real PSM count: {Nreal2}, Decoy PSM count: {Ndecoy2}"
         )
 
-        for i in range(self.n_real):
-            x = self.pos[i]
-            if x < 0.1:
-                x = 0.1
+        # Pre-compute cumulative AUC arrays for global FDR (O(m) once)
+        cumulative_auc_f0 = self._compute_cumulative_auc_from_end(self.f0)
+        cumulative_auc_f1 = self._compute_cumulative_auc_from_end(self.f1)
 
-            # Calculate global FDR
-            g_auc_f0 = self.get_global_auc(x, DECOY)
-            g_auc_f1 = self.get_global_auc(x, REAL)
+        # Cache for potential reuse
+        self._cumulative_auc_f0 = cumulative_auc_f0
+        self._cumulative_auc_f1 = cumulative_auc_f1
 
-            ratio = (Ndecoy2 / Nreal2) * (g_auc_f0 / g_auc_f1)
-            self.global_fdr[i] = ratio
+        # Apply minimum threshold to all scores at once
+        x_values = np.maximum(self.pos, 0.1)
 
-            # Calculate local FDR
-            l_auc_f0 = self.get_local_auc(x, DECOY)
-            l_auc_f1 = self.get_local_auc(x, REAL)
+        # Vectorized global AUC calculation (O(n log m))
+        g_auc_f0 = self._global_auc_vectorized(x_values, self.f0, cumulative_auc_f0)
+        g_auc_f1 = self._global_auc_vectorized(x_values, self.f1, cumulative_auc_f1)
 
-            ratio = (Ndecoy2 / Nreal2) * (l_auc_f0 / l_auc_f1)
-            self.local_fdr[i] = ratio
+        # Vectorized local density calculation (O(n log m))
+        l_auc_f0 = self._interpolate_density_vectorized(x_values, self.f0)
+        l_auc_f1 = self._interpolate_density_vectorized(x_values, self.f1)
 
-            # Add debug information (only for first few PSMs)
-            if i < 5:
-                logger.info(
-                    f"PSM {i}: delta_score={x:.6f}, g_auc_f0={g_auc_f0:.6f}, g_auc_f1={g_auc_f1:.6f}, global_fdr={self.global_fdr[i]:.6f}"
-                )
-                logger.info(
-                    f"PSM {i}: l_auc_f0={l_auc_f0:.6f}, l_auc_f1={l_auc_f1:.6f}, local_fdr={self.local_fdr[i]:.6f}"
-                )
+        # Vectorized FDR calculation
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.global_fdr = (Ndecoy2 / Nreal2) * (g_auc_f0 / g_auc_f1)
+            self.local_fdr = (Ndecoy2 / Nreal2) * (l_auc_f0 / l_auc_f1)
+
+        # Handle division by zero (set to large value)
+        self.global_fdr = np.where(np.isfinite(self.global_fdr), self.global_fdr, 1e10)
+        self.local_fdr = np.where(np.isfinite(self.local_fdr), self.local_fdr, 1e10)
+
+        # Debug output for first few PSMs
+        for i in range(min(5, self.n_real)):
+            logger.info(
+                f"PSM {i}: delta_score={x_values[i]:.6f}, g_auc_f0={g_auc_f0[i]:.6f}, "
+                f"g_auc_f1={g_auc_f1[i]:.6f}, global_fdr={self.global_fdr[i]:.6f}"
+            )
+            logger.info(
+                f"PSM {i}: l_auc_f0={l_auc_f0[i]:.6f}, l_auc_f1={l_auc_f1[i]:.6f}, "
+                f"local_fdr={self.local_fdr[i]:.6f}"
+            )
 
         # Statistics of FDR value distribution
         global_fdr_vals = self.global_fdr[: min(10, len(self.global_fdr))]
@@ -447,29 +466,15 @@ class FLRCalculator:
             if n == 0:
                 continue
 
-            # Initialize arrays
-            x = np.zeros(n)
-            f = np.zeros(n)
-            fcopy = np.zeros(n)
-            forig = np.zeros(n)
+            # Fill data (vectorized)
+            pairs = [minor_map[i] for i in range(n)]
+            x = np.array([p[0] for p in pairs])  # delta scores
+            f = np.array([p[1] for p in pairs])  # FDR values
             is_minor_point = np.zeros(n, dtype=bool)
 
-            # Fill data
-            for i in range(n):
-                pair = minor_map[i]
-                x[i] = pair[0]  # delta score
-                f[i] = pair[1]  # FDR
-                forig[i] = f[i]
-                fcopy[i] = 0
-                is_minor_point[i] = False
-
-            # Find minimum value and its index
-            min_idx = 0
-            min_val = f[0]
-            for i in range(1, n):
-                if f[i] < min_val:
-                    min_val = f[i]
-                    min_idx = i
+            # Find minimum value and its index (vectorized)
+            min_idx = np.argmin(f)
+            min_val = f[min_idx]
 
             # Calculate slope and apply
             slope = (0.0 - min_val) / (self.max_delta_score * 1.1 - x[min_idx])
@@ -495,9 +500,8 @@ class FLRCalculator:
                 f[i] = max_val - slope * (x[max_idx] - x[i])
                 i -= 1
 
-            # Mark minor points
-            for i in range(max_idx):
-                is_minor_point[i] = True
+            # Mark minor points (vectorized)
+            is_minor_point[:max_idx] = True
 
             cur_start = max_idx
             cur_end = max_idx + 1
@@ -519,12 +523,12 @@ class FLRCalculator:
                 while cur_end < n and not is_minor_point[cur_end]:
                     cur_end += 1
 
-            # Map results back to FDR array
+            # Map results back to FDR array - O(n) with dictionary lookup instead of O(n²)
+            # Use reversed iteration to keep FIRST occurrence (matching original behavior)
+            x_to_idx = {x[j]: j for j in range(n - 1, -1, -1)}
             for i in range(n):
-                for j in range(n):
-                    if self.pos[i] == x[j]:
-                        fdr_array[i] = f[j]
-                        break
+                if self.pos[i] in x_to_idx:
+                    fdr_array[i] = f[x_to_idx[self.pos[i]]]
 
             if iter_type == "global":
                 self.global_fdr = fdr_array
