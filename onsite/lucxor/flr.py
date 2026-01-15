@@ -523,12 +523,13 @@ class FLRCalculator:
                 while cur_end < n and not is_minor_point[cur_end]:
                     cur_end += 1
 
-            # Map results back to FDR array
-            for i in range(n):
-                for j in range(n):
-                    if self.pos[i] == x[j]:
-                        fdr_array[i] = f[j]
-                        break
+            # Map results back to FDR array using original indices
+            # Since pairs were built from minor_map which uses sequential indices,
+            # we can create a reverse mapping from sorted x back to original indices
+            original_indices = np.argsort(np.argsort(self.pos[:n]))  # Maps sorted position to original
+            for j in range(n):
+                orig_idx = original_indices[j]
+                fdr_array[orig_idx] = f[j]
 
             if iter_type == "global":
                 self.global_fdr = fdr_array
@@ -742,10 +743,13 @@ class FLRCalculator:
         self.sorted_global_flr = np.array([d['global_flr'] for d in flr_data])
         self.sorted_local_flr = np.array([d['local_flr'] for d in flr_data])
         
-        logger.info(
-            f"Created sorted FLR mapping with {len(self.sorted_delta_scores)} entries, "
-            f"delta_score range: [{self.sorted_delta_scores[0]:.4f}, {self.sorted_delta_scores[-1]:.4f}]"
-        )
+        if len(self.sorted_delta_scores) > 0:
+            logger.info(
+                f"Created sorted FLR mapping with {len(self.sorted_delta_scores)} entries, "
+                f"delta_score range: [{self.sorted_delta_scores[0]:.4f}, {self.sorted_delta_scores[-1]:.4f}]"
+            )
+        else:
+            logger.warning("Created empty sorted FLR mapping - no valid FLR data available")
 
     def calculate_flr_estimates(self, psms: List) -> None:
         """
