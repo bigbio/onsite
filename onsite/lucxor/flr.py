@@ -472,14 +472,6 @@ class FLRCalculator:
             f = np.array([p[1] for p in pairs])  # FDR values
             is_minor_point = np.zeros(n, dtype=bool)
             
-            # Validate that data is sorted (critical for minorization algorithm)
-            is_sorted = all(x[i] <= x[i+1] for i in range(len(x)-1))
-            if not is_sorted:
-                logger.error(f"[ERROR] {iter_type} FDR data is NOT sorted! Minorization will fail!")
-                logger.error(f"First 10 delta scores: {x[:10]}")
-            else:
-                logger.debug(f"[OK] {iter_type} FDR data is properly sorted")
-
             # Find minimum value and its index (vectorized)
             min_idx = np.argmin(f)
             min_val = f[min_idx]
