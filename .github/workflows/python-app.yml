@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   build:
@@ -207,8 +208,10 @@ jobs:
     
     - name: Post algorithm comparison results to PR
       if: github.event_name == 'pull_request' && always()
+      continue-on-error: true
       uses: actions/github-script@v7
       with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
           const fs = require('fs');
           const resultsFile = 'algorithm_comparison_results.txt';
