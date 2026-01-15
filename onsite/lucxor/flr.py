@@ -523,13 +523,18 @@ class FLRCalculator:
                 while cur_end < n and not is_minor_point[cur_end]:
                     cur_end += 1
 
-            # Map results back to FDR array using original indices
-            # Since pairs were built from minor_map which uses sequential indices,
-            # we can create a reverse mapping from sorted x back to original indices
-            original_indices = np.argsort(np.argsort(self.pos[:n]))  # Maps sorted position to original
-            for j in range(n):
-                orig_idx = original_indices[j]
-                fdr_array[orig_idx] = f[j]
+            # Map results back to FDR array - O(n) with dictionary lookup instead of O(n²)
+            # Build a mapping from delta_score to its index in the sorted x array
+            # Use reversed iteration to keep FIRST occurrence (matching original behavior)
+            x_to_idx = {}
+            for j in range(n - 1, -1, -1):
+                x_to_idx[x[j]] = j
+            
+            # Map back to original FDR array positions
+            for i in range(n):
+                if self.pos[i] in x_to_idx:
+                    j = x_to_idx[self.pos[i]]
+                    fdr_array[i] = f[j]
 
             if iter_type == "global":
                 self.global_fdr = fdr_array
