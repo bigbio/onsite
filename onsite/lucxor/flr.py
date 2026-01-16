@@ -85,8 +85,8 @@ class FLRCalculator:
 
     def prep_arrays(self) -> None:
         """Prepare arrays"""
-        self.pos = np.array(self.real_psms)
-        self.neg = np.array(self.decoy_psms)
+        self.pos = np.array(sorted(self.real_psms))  # Sort delta_scores for minorization
+        self.neg = np.array(sorted(self.decoy_psms))  # Sort delta_scores for minorization
         self.n_real = len(self.pos)
         self.n_decoy = len(self.neg)
 
@@ -466,11 +466,23 @@ class FLRCalculator:
             if n == 0:
                 continue
 
-            # Fill data (vectorized)
+            # Fill data and sort by delta_score (critical for minorization algorithm)
             pairs = [minor_map[i] for i in range(n)]
-            x = np.array([p[0] for p in pairs])  # delta scores
-            f = np.array([p[1] for p in pairs])  # FDR values
+            
+            # Sort pairs by delta_score (first element)
+            pairs_sorted = sorted(pairs, key=lambda p: p[0])
+            
+            x = np.array([p[0] for p in pairs_sorted])  # delta scores (now sorted)
+            f = np.array([p[1] for p in pairs_sorted])  # FDR values
             is_minor_point = np.zeros(n, dtype=bool)
+            
+            # Validate that data is sorted (should always be true now)
+            is_sorted = all(x[i] <= x[i+1] for i in range(len(x)-1))
+            if not is_sorted:
+                logger.info(f"[ERROR] {iter_type} FDR data is NOT sorted! Minorization will fail!")
+                logger.info(f"First 10 delta scores: {x[:10]}")
+            else:
+                logger.info(f"[OK] {iter_type} FDR data is properly sorted")
             
             # Find minimum value and its index (vectorized)
             min_idx = np.argmin(f)
