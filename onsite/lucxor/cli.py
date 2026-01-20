@@ -487,22 +487,25 @@ class PyLuciPHOr2:
             score = float(hit.getMetaValue(score_type))
         
         # Normalize score based on type
-        # For "lower is better" scores, we need to handle them carefully
-        if not higher_score_better:
+        score_type_lower = (score_type or "").lower()
+        is_probability_score = any(k in score_type_lower for k in [
+            "posterior error probability", "pep", "q-value", "qvalue",
+            "ms:1001493", "ms:1001491"
+        ])
+        
+        if is_probability_score:
             # For probability-based scores (PEP, Q-value), convert to 1-score
-            if "posterior error probability" in score_type.lower() or \
-               "MS:1001493" in score_type or \
-               "MS:1001491" in score_type:  # Q-value
-                # These are already probabilities between 0 and 1
-                if 0 <= score <= 1:
-                    return 1.0 - score
-                else:
-                    self.logger.warning(f"PEP/Q-value out of range [0,1]: {score}, using as-is")
-                    return score
+            # These are already probabilities between 0 and 1
+            if 0 <= score <= 1:
+                return 1.0 - score
             else:
-                # For E-values and other "lower is better" scores, keep as-is
-                # Don't transform them - they will be handled differently in filtering
+                self.logger.warning(f"PEP/Q-value out of range [0,1]: {score}, using as-is")
                 return score
+        
+        # For E-values and other "lower is better" scores, keep as-is
+        # Don't transform them - they will be handled differently in filtering
+        if not higher_score_better:
+            return score
         
         return score
 
@@ -524,6 +527,14 @@ class PyLuciPHOr2:
         
         # Select best score type based on priority
         score_type_param, higher_score_better = self.select_score_type(pep_ids, user_score_type=score_type)
+        
+        # Override higher_score_better for probability scores after conversion
+        # Since we convert PEP/Q-value to 1-score, they become "higher is better"
+        if score_type_param and any(k in score_type_param.lower() for k in [
+            "posterior error probability", "pep", "q-value", "qvalue",
+            "ms:1001493", "ms:1001491"
+        ]):
+            higher_score_better = True
         
         # Store score info for later use
         self.score_type = score_type_param
@@ -744,37 +755,45 @@ class PyLuciPHOr2:
             # Auto-adjust threshold based on detected score type
             score_type_lower = self.score_type.lower()
             
-            if not self.higher_score_better:
-                # For "lower is better" scores (E-values)
-                if any(keyword in score_type_lower for keyword in ["evalue", "e-value", "expect", "specevalue", "ms:1002052", "ms:1002257"]):
-                    modeling_score_threshold_val = 0.01  # Suitable for E-values
-                    self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val} for E-value score type")
-                elif any(keyword in score_type_lower for keyword in ["posterior error probability", "pep", "q-value", "qvalue"]):
-                    # For PEP/Q-value (already transformed to 1-score, so higher is better)
-                    modeling_score_threshold_val = 0.95
-                    self.logger.info(f"Using default modeling_score_threshold {modeling_score_threshold_val} for probability-based score")
+            # Check if it's a probability score (case-insensitive)
+            is_probability_score = any(keyword in score_type_lower for keyword in [
+                "posterior error probability", "pep", "q-value", "qvalue",
+                "ms:1001493", "ms:1001491"
+            ])
+            
+            # Check if it's an E-value score
+            is_evalue_score = any(keyword in score_type_lower for keyword in [
+                "evalue", "e-value", "expect", "specevalue", "ms:1002052", "ms:1002257"
+            ])
+            
+            # Check if it's a raw score
+            is_raw_score = any(keyword in score_type_lower for keyword in [
+                "rawscore", "ms:1002049", "xcorr", "comet:xcorr"
+            ])
+            
+            if is_probability_score:
+                # For PEP/Q-value (already transformed to 1-score, so higher is better)
+                modeling_score_threshold_val = 0.95
+                self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val} for probability-based score")
+            elif is_evalue_score:
+                # For E-values (lower is better)
+                modeling_score_threshold_val = 0.01
+                self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val} for E-value score type")
+            elif is_raw_score:
+                # For raw scores, use percentile-based approach
+                all_scores = [psm.psm_score for psm in all_psms if hasattr(psm, "psm_score") and not np.isnan(psm.psm_score)]
+                if all_scores:
+                    # Use 50th percentile (median) as threshold for raw scores
+                    # This balances quality and quantity, keeping top 50% of PSMs
+                    modeling_score_threshold_val = np.percentile(all_scores, 50)
+                    self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val:.2f} (50th percentile) for raw score type")
                 else:
-                    # Unknown "lower is better" score, use conservative threshold
-                    modeling_score_threshold_val = 0.01
-                    self.logger.warning(f"Unknown 'lower is better' score type, using conservative threshold {modeling_score_threshold_val}")
+                    modeling_score_threshold_val = 0.0  # Fallback: accept all
+                    self.logger.warning(f"No valid scores found, using threshold {modeling_score_threshold_val}")
             else:
-                # For "higher is better" scores
-                if any(keyword in score_type_lower for keyword in ["rawscore", "ms:1002049", "xcorr", "comet:xcorr"]):
-                    # For raw scores, we need to check the actual score distribution
-                    # Use a percentile-based approach instead of fixed threshold
-                    all_scores = [psm.psm_score for psm in all_psms if hasattr(psm, "psm_score") and not np.isnan(psm.psm_score)]
-                    if all_scores:
-                        # Use 50th percentile (median) as threshold for raw scores
-                        # This balances quality and quantity, keeping top 50% of PSMs
-                        modeling_score_threshold_val = np.percentile(all_scores, 50)
-                        self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val:.2f} (50th percentile) for raw score type")
-                    else:
-                        modeling_score_threshold_val = 0.0  # Fallback: accept all
-                        self.logger.warning(f"No valid scores found, using threshold {modeling_score_threshold_val}")
-                else:
-                    # For other "higher is better" scores (like transformed PEP), keep default
-                    modeling_score_threshold_val = 0.95
-                    self.logger.info(f"Using default modeling_score_threshold {modeling_score_threshold_val} for 'higher is better' score")
+                # Unknown score type, keep default
+                modeling_score_threshold_val = 0.95
+                self.logger.info(f"Using default modeling_score_threshold {modeling_score_threshold_val} for unknown score type")
             
             # Update config with adjusted threshold
             config["modeling_score_threshold"] = modeling_score_threshold_val
