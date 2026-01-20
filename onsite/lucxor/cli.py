@@ -129,7 +129,13 @@ logger = logging.getLogger(__name__)
     "--modeling-score-threshold",
     type=float,
     default=0.95,
-    help="Minimum score for modeling (default: 0.95)"
+    help="Score threshold for selecting high-quality PSMs for model training. "
+         "If not specified (default 0.95), the threshold will be auto-adjusted based on detected score type: "
+         "E-values (SpecEValue, expect) -> 0.01; "
+         "Raw scores (RawScore, xcorr) -> 50th percentile (median); "
+         "Probability scores (PEP) -> 0.95. "
+         "For 'higher is better' scores: PSMs with score >= threshold are used. "
+         "For 'lower is better' scores: PSMs with score <= threshold are used."
 )
 @click.option(
     "--scoring-threshold",
@@ -179,6 +185,12 @@ logger = logging.getLogger(__name__)
     default=False,
     help="Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results",
 )
+@click.option(
+    "--score-type",
+    type=str,
+    default=None,
+    help="Score type to use for PSM filtering (default: auto-detect with priority: PEP > MSGF+ RawScore > Comet xcorr > SpecEValue)",
+)
 def lucxor(
     input_spectrum,
     input_id,
@@ -203,6 +215,7 @@ def lucxor(
     log_file,
     disable_split_by_charge,
     compute_all_scores,
+    score_type,
 ):
     """
     Modification site localization using pyLuciPHOr2 algorithm.
@@ -255,6 +268,7 @@ def lucxor(
             rt_tolerance=rt_tolerance,
             debug=debug,
             disable_split_by_charge=disable_split_by_charge,
+            score_type=score_type,
         )
         
         # Only call sys.exit if not being called from compute_all_scores
@@ -322,9 +336,181 @@ class PyLuciPHOr2:
         self.model = None
         self.psms = []
         self.config = {}
+        
+    def select_score_type(self, pep_ids: PeptideIdentificationList, user_score_type: Optional[str] = None) -> Tuple[str, bool]:
+        """
+        Select the best available score type based on priority.
+        
+        Priority order (context-aware):
+        1. Posterior Error Probability (Percolator PEP) - always highest priority
+        2. Search engine specific:
+           - MSGF+: RawScore (MS:1002049) > SpecEValue (MS:1002052)
+           - Comet: xcorr (COMET:xcorr) > expect
+        
+        Rationale:
+        - PEP: Machine learning calibrated, most reliable
+        - RawScore/xcorr: Direct match quality, better for model training
+        - E-values: Statistical significance, but database-size dependent
+        
+        Args:
+            pep_ids: List of peptide identifications
+            user_score_type: User-specified score type (optional)
+        
+        Returns:
+            Tuple of (score_type, higher_score_better)
+        """
+        if not pep_ids or len(pep_ids) == 0:
+            self.logger.warning("No peptide identifications to determine score type")
+            return None, True
+        
+        # If user specified a score type, try to use it
+        if user_score_type:
+            # Determine if it's higher or lower better based on known score types
+            higher_better = True
+            lower_better_scores = [
+                "posterior error probability", "pep", "q-value", "qvalue",
+                "expect", "evalue", "e-value", "specevalue", "ms:1002052", "ms:1002053",
+                "ms:1002257",  # Comet expect MS ID
+                "ms:1001491", "ms:1001493"
+            ]
+            
+            if any(keyword in user_score_type.lower() for keyword in lower_better_scores):
+                higher_better = False
+            
+            self.logger.info(f"Using user-specified score type: {user_score_type} (higher_better={higher_better})")
+            return user_score_type, higher_better
+            
+        # Get current score type from first peptide identification
+        current_score_type = pep_ids[0].getScoreType() if hasattr(pep_ids[0], "getScoreType") else ""
+        current_score_type_lower = current_score_type.lower()
+        
+        # Define priority list: (score_type_pattern, higher_is_better, priority_level)
+        # Priority levels (lower number = higher priority):
+        #   1: Percolator PEP (machine learning calibrated, most reliable)
+        #   2: Raw scores (RawScore, xcorr - direct match quality, best for model training)
+        #   3: E-values (SpecEValue, expect - statistical significance, both search engines)
+        # Note: When priority is the same, order in the list matters - earlier entries are preferred
+        preferred_scores = [
+            ("posterior error probability", False, 1),  # Percolator PEP - always highest
+            ("ms:1002049", True, 2),   # MSGF+ RawScore - best for MSGF+
+            ("comet:xcorr", True, 2),  # Comet xcorr - best for Comet (same priority as RawScore)
+            ("specevalue", False, 3),  # MSGF+ SpecEValue (matches score_type="SpecEValue") - checked first
+            ("ms:1002052", False, 3),  # MSGF+ SpecEValue MS ID (matches UserParam "MS:1002052") - checked second
+            ("expect", False, 3),      # Comet E-value (matches score_type="expect") - checked third
+            ("ms:1002257", False, 3),  # Comet expect MS ID (matches UserParam "MS:1002257") - checked fourth
+        ]
+        
+        # Check current score type priority
+        current_priority = 999  # Default low priority
+        current_higher_better = True
+        for score_pattern, higher_better, priority in preferred_scores:
+            if score_pattern in current_score_type_lower:
+                current_priority = priority
+                current_higher_better = higher_better
+                break
+        
+        # Check UserParam scores and find the highest priority one
+        best_userparam_score = None
+        best_userparam_priority = 999
+        best_userparam_higher_better = True
+        
+        if len(pep_ids[0].getHits()) > 0:
+            hit = pep_ids[0].getHits()[0]
+            
+            for score_pattern, higher_better, priority in preferred_scores:
+                # Check if this score exists as a UserParam (case-insensitive)
+                # Try exact match first, then case-insensitive
+                score_exists = False
+                actual_score_name = None
+                
+                # Try exact pattern match
+                if hit.metaValueExists(score_pattern):
+                    score_exists = True
+                    actual_score_name = score_pattern
+                else:
+                    # Try common variations
+                    variations = [
+                        score_pattern,
+                        score_pattern.upper(),
+                        score_pattern.title(),
+                        "COMET:xcorr" if score_pattern == "comet:xcorr" else None,
+                        "MS:1002049" if score_pattern == "ms:1002049" else None,
+                        "MS:1002052" if score_pattern == "ms:1002052" else None,
+                        "MS:1002257" if score_pattern == "ms:1002257" else None,
+                    ]
+                    
+                    for variation in variations:
+                        if variation and hit.metaValueExists(variation):
+                            score_exists = True
+                            actual_score_name = variation
+                            break
+                
+                if score_exists and priority < best_userparam_priority:
+                    best_userparam_score = actual_score_name
+                    best_userparam_priority = priority
+                    best_userparam_higher_better = higher_better
+        
+        # Compare current score type with best UserParam score
+        # When priorities are equal, prefer UserParam score (as it appears earlier in preferred_scores list)
+        if best_userparam_score and best_userparam_priority <= current_priority:
+            return best_userparam_score, best_userparam_higher_better
+        elif current_priority < 999:
+            return current_score_type, current_higher_better
+        
+        # Fallback: use current score type and try to determine direction
+        higher_score_better = True
+        if hasattr(pep_ids[0], "isHigherScoreBetter"):
+            higher_score_better = pep_ids[0].isHigherScoreBetter()
+        elif hasattr(pep_ids[0], "getHigherScoreBetter"):
+            higher_score_better = pep_ids[0].getHigherScoreBetter()
+        
+        self.logger.warning(f"Using fallback score type: {current_score_type} (higher_better={higher_score_better})")
+        return current_score_type, higher_score_better
+    
+    def get_psm_score(self, pep_id: PeptideIdentification, hit, score_type: str, higher_score_better: bool) -> float:
+        """
+        Extract score from peptide hit based on score type.
+        
+        Args:
+            pep_id: PeptideIdentification object
+            hit: PeptideHit object
+            score_type: Name of the score type to extract
+            higher_score_better: Whether higher scores are better
+            
+        Returns:
+            Normalized score (always higher is better, range 0-1 for probability-based scores)
+        """
+        score = hit.getScore()
+        
+        # Check if score exists as UserParam
+        if hit.metaValueExists(score_type):
+            score = float(hit.getMetaValue(score_type))
+        
+        # Normalize score based on type
+        score_type_lower = (score_type or "").lower()
+        is_probability_score = any(k in score_type_lower for k in [
+            "posterior error probability", "pep", "q-value", "qvalue",
+            "ms:1001493", "ms:1001491"
+        ])
+        
+        if is_probability_score:
+            # For probability-based scores (PEP, Q-value), convert to 1-score
+            # These are already probabilities between 0 and 1
+            if 0 <= score <= 1:
+                return 1.0 - score
+            else:
+                self.logger.warning(f"PEP/Q-value out of range [0,1]: {score}, using as-is")
+                return score
+        
+        # For E-values and other "lower is better" scores, keep as-is
+        # Don't transform them - they will be handled differently in filtering
+        if not higher_score_better:
+            return score
+        
+        return score
 
     def load_input_files(
-        self, input_id: str, input_spectrum: str
+        self, input_id: str, input_spectrum: str, score_type: Optional[str] = None
     ) -> Tuple[PeptideIdentificationList, List[ProteinIdentification], MSExperiment]:
         """Load input files"""
         # Load identifications
@@ -338,6 +524,21 @@ class PyLuciPHOr2:
 
         # Keep only best hits
         IDFilter().keepNBestHits(pep_ids, 1)
+        
+        # Select best score type based on priority
+        score_type_param, higher_score_better = self.select_score_type(pep_ids, user_score_type=score_type)
+        
+        # Override higher_score_better for probability scores after conversion
+        # Since we convert PEP/Q-value to 1-score, they become "higher is better"
+        if score_type_param and any(k in score_type_param.lower() for k in [
+            "posterior error probability", "pep", "q-value", "qvalue",
+            "ms:1001493", "ms:1001491"
+        ]):
+            higher_score_better = True
+        
+        # Store score info for later use
+        self.score_type = score_type_param
+        self.higher_score_better = higher_score_better
 
         # Load spectra
         exp = MSExperiment()
@@ -385,6 +586,7 @@ class PyLuciPHOr2:
         rt_tolerance: float,
         debug: bool,
         disable_split_by_charge: bool = False,
+        score_type: Optional[str] = None,
     ) -> int:
         """
         LuciPHOr2 main workflow:
@@ -433,7 +635,7 @@ class PyLuciPHOr2:
         self.logger.debug(f"Debug mode: {debug}")
         self.logger.debug(f"Log level: {logging.getLogger().level}")
 
-        pep_ids, prot_ids, exp = self.load_input_files(input_id, input_spectrum)
+        pep_ids, prot_ids, exp = self.load_input_files(input_id, input_spectrum, score_type)
         if not pep_ids or exp is None:
             self.logger.error("No valid peptide identification or spectrum data found, process terminated.")
             return 1
@@ -523,22 +725,17 @@ class PyLuciPHOr2:
                 # Set search_engine_sequence to the original sequence
                 psm.search_engine_sequence = sequence
                 
-                # Automatically determine score type and assign values
-                score_type = pep_id.getScoreType() if hasattr(pep_id, "getScoreType") else None
-                score = hit.getScore()
-                higher_score_better = True
-                if hasattr(pep_id, "isHigherScoreBetter"):
-                    higher_score_better = pep_id.isHigherScoreBetter()
-                elif hasattr(pep_id, "getHigherScoreBetter"):
-                    higher_score_better = pep_id.getHigherScoreBetter()
+                # Get score using the selected score type
+                score = self.get_psm_score(pep_id, hit, self.score_type, self.higher_score_better)
                 
-                # If it"s a PEP score (lower is better), convert to 1-PEP
-                if (score_type and "posterior error probability" in score_type.lower()) or (higher_score_better is False):
-                    psm.psm_score = 1.0 - score
-                    peptide.score = 1.0 - score
-                else:
-                    psm.psm_score = score
-                    peptide.score = score
+                # Assign score to PSM and peptide
+                psm.psm_score = score
+                peptide.score = score
+                
+                # Store score metadata for filtering
+                psm.score_type = self.score_type
+                psm.higher_score_better = self.higher_score_better
+                
                 all_psms.append(psm)
             else:
                 self.logger.warning(f'No matching spectrum found - RT: {rt}, Scan: {scan_num if scan_num else "N/A"}')
@@ -549,6 +746,62 @@ class PyLuciPHOr2:
 
         # 3. Train model with high-scoring PSMs
         modeling_score_threshold_val = config.get("modeling_score_threshold", 0.95)
+        
+        # Auto-adjust modeling_score_threshold based on score_type if using default value
+        # Only adjust if user didn't explicitly set a non-default threshold
+        user_set_threshold = modeling_score_threshold != 0.95  # Check if user changed from default
+        
+        if not user_set_threshold:
+            # Auto-adjust threshold based on detected score type
+            score_type_lower = self.score_type.lower()
+            
+            # Check if it's a probability score (case-insensitive)
+            is_probability_score = any(keyword in score_type_lower for keyword in [
+                "posterior error probability", "pep", "q-value", "qvalue",
+                "ms:1001493", "ms:1001491"
+            ])
+            
+            # Check if it's an E-value score
+            is_evalue_score = any(keyword in score_type_lower for keyword in [
+                "evalue", "e-value", "expect", "specevalue", "ms:1002052", "ms:1002257"
+            ])
+            
+            # Check if it's a raw score
+            is_raw_score = any(keyword in score_type_lower for keyword in [
+                "rawscore", "ms:1002049", "xcorr", "comet:xcorr"
+            ])
+            
+            if is_probability_score:
+                # For PEP/Q-value (already transformed to 1-score, so higher is better)
+                modeling_score_threshold_val = 0.95
+                self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val} for probability-based score")
+            elif is_evalue_score:
+                # For E-values (lower is better)
+                modeling_score_threshold_val = 0.01
+                self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val} for E-value score type")
+            elif is_raw_score:
+                # For raw scores, use percentile-based approach
+                all_scores = [psm.psm_score for psm in all_psms if hasattr(psm, "psm_score") and not np.isnan(psm.psm_score)]
+                if all_scores:
+                    # Use 50th percentile (median) as threshold for raw scores
+                    # This balances quality and quantity, keeping top 50% of PSMs
+                    modeling_score_threshold_val = np.percentile(all_scores, 50)
+                    self.logger.info(f"Auto-adjusted modeling_score_threshold to {modeling_score_threshold_val:.2f} (50th percentile) for raw score type")
+                else:
+                    modeling_score_threshold_val = 0.0  # Fallback: accept all
+                    self.logger.warning(f"No valid scores found, using threshold {modeling_score_threshold_val}")
+            else:
+                # Unknown score type, keep default
+                modeling_score_threshold_val = 0.95
+                self.logger.info(f"Using default modeling_score_threshold {modeling_score_threshold_val} for unknown score type")
+            
+            # Update config with adjusted threshold
+            config["modeling_score_threshold"] = modeling_score_threshold_val
+        
+        # Log the score type and threshold being used
+        self.logger.info(f"Using score type '{self.score_type}' for PSM filtering")
+        self.logger.info(f"Score direction: {'higher is better' if self.higher_score_better else 'lower is better'}")
+        self.logger.info(f"Final modeling score threshold: {modeling_score_threshold_val}")
         
         # First filter PSMs with modification sites
         phospho_psms = []
@@ -563,9 +816,28 @@ class PyLuciPHOr2:
                     phospho_psms.append(psm)
         
         # Then filter high-scoring PSMs from PSMs with modification sites
-        high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "psm_score") and psm.psm_score >= modeling_score_threshold_val]
-        if not high_score_psms:
-            high_score_psms = [psm for psm in phospho_psms if hasattr(psm, "peptide") and hasattr(psm.peptide, "score") and psm.peptide.score >= modeling_score_threshold_val]
+        # Use correct comparison based on score direction
+        high_score_psms = []
+        for psm in phospho_psms:
+            if hasattr(psm, "psm_score"):
+                # For "higher is better" scores, use >= threshold
+                # For "lower is better" scores (like E-values), use <= threshold
+                if self.higher_score_better:
+                    if psm.psm_score >= modeling_score_threshold_val:
+                        high_score_psms.append(psm)
+                else:
+                    # For "lower is better" scores (E-values), use the modeling_score_threshold directly
+                    # Lower threshold means more stringent filtering
+                    if psm.psm_score <= modeling_score_threshold_val:
+                        high_score_psms.append(psm)
+            elif hasattr(psm, "peptide") and hasattr(psm.peptide, "score"):
+                if self.higher_score_better:
+                    if psm.peptide.score >= modeling_score_threshold_val:
+                        high_score_psms.append(psm)
+                else:
+                    # For "lower is better" scores, use the modeling_score_threshold directly
+                    if psm.peptide.score <= modeling_score_threshold_val:
+                        high_score_psms.append(psm)
         
         self.logger.info(f"Total PSMs: {len(all_psms)}")
         self.logger.info(f"PSMs with modification sites: {len(phospho_psms)}")
