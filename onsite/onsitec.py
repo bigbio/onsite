@@ -753,8 +753,10 @@ def batch(
             click.echo(f"\n{'='*60}")
             click.echo(f"[{time.strftime('%H:%M:%S')}] Calculating global FLR across all files...")
             click.echo(f"{'='*60}")
+            click.echo(f"  FLR = PhosphoDecoy / (Phospho + PhosphoDecoy)")
+            click.echo(f"  Processing order: 1-site -> 2-site -> 3-site peptides")
 
-            global_flr_calc = GlobalFLRCalculator(min_delta_score=0.1)
+            global_flr_calc = GlobalFLRCalculator()
 
             # Extract data from all processed files
             for out_path in processed_outputs:
@@ -769,28 +771,38 @@ def batch(
             total_counts = global_flr_calc.get_total_counts()
 
             click.echo(f"\n  Global FLR Results (threshold={global_flr_threshold}):")
-            click.echo(f"    Total PSMs: {total_counts['total_psms']}")
-            click.echo(f"    Target PSMs: {total_counts['target_psms']}")
-            click.echo(f"    Decoy PSMs: {total_counts['decoy_psms']}")
-            click.echo(f"    Passing at {global_flr_threshold*100:.1f}% FLR: {counts['TOTAL']['passing']}")
+            click.echo(f"    Total peptides: {total_counts['total_peptides']}")
+            click.echo(f"    Phospho sites: {total_counts['phospho_sites']}")
+            click.echo(f"    PhosphoDecoy sites: {total_counts['phosphodecoy_sites']}")
+            click.echo(f"    Unambiguous (excluded): {total_counts['unambiguous_peptides']}")
+            if counts['achieved']:
+                click.echo(f"    Sites at {global_flr_threshold*100:.1f}% FLR: {counts['phospho_sites']} Phospho, {counts['phosphodecoy_sites']} PhosphoDecoy")
+            else:
+                click.echo(f"    {global_flr_threshold*100:.1f}% FLR threshold not achieved (final FLR: {counts['observed_flr']*100:.2f}%)")
 
             # Generate report if requested
             if global_flr_report:
                 click.echo(f"\n  Generating FLR report: {global_flr_report}")
                 global_flr_calc.generate_summary_report(global_flr_report, global_flr_threshold)
 
+                # Also export raw FLR data
+                flr_data_path = global_flr_report.replace('.tsv', '_data.csv')
+                global_flr_calc.export_flr_data(flr_data_path)
+                click.echo(f"  FLR data exported to: {flr_data_path}")
+
             # Generate plot if requested
             if global_flr_plot:
                 click.echo(f"\n  Generating FLR plot: {global_flr_plot}")
                 try:
                     global_flr_calc.plot_cumulative_flr_curve(global_flr_plot)
+                    click.echo(f"  Plot saved (PNG and PDF formats)")
                 except ImportError as e:
                     click.echo(f"  Warning: {str(e)}")
 
             # Update idXML files if requested
             if update_with_global_flr:
-                click.echo(f"\n  Updating idXML files with cross-file global FLR...")
-                global_flr_calc.update_idxml_files(processed_outputs)
+                click.echo(f"\n  Note: Cross-file FLR injection is not supported with sequence-based FLR.")
+                click.echo(f"  Use the summary report for FLR threshold analysis.")
 
         # Print summary
         elapsed = time.time() - start_time
