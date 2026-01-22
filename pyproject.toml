@@ -27,6 +27,9 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[project.optional-dependencies]
+plot = ["matplotlib>=3.5.0"]
+
 [project.urls]
 Homepage = "https://github.com/bigbio/onsite"
 Repository = "https://github.com/bigbio/onsite"

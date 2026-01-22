@@ -500,6 +500,323 @@ def run_all_algorithms_from_single_cli(
 cli.add_command(all)
 
 
+@click.command()
+@click.option(
+    "-in",
+    "--in-file",
+    "in_files",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True),
+    help="Input mzML file(s). Specify multiple files with repeated -in options.",
+)
+@click.option(
+    "-id",
+    "--id-file",
+    "id_files",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True),
+    help="Input idXML file(s). Specify multiple files with repeated -id options.",
+)
+@click.option(
+    "-out",
+    "--out-file",
+    "out_files",
+    multiple=True,
+    required=False,
+    type=click.Path(),
+    help="Output idXML file(s). If not specified, generates <input>_localized.idXML.",
+)
+@click.option(
+    "--global-flr-report",
+    "global_flr_report",
+    type=click.Path(),
+    help="Output path for global FLR summary report (TSV).",
+)
+@click.option(
+    "--global-flr-threshold",
+    "global_flr_threshold",
+    type=float,
+    default=0.01,
+    help="Global FLR threshold for filtering (default: 0.01).",
+)
+@click.option(
+    "--global-flr-plot",
+    "global_flr_plot",
+    type=click.Path(),
+    help="Output path for cumulative FLR curve plot (requires matplotlib).",
+)
+@click.option(
+    "--update-with-global-flr",
+    "update_with_global_flr",
+    is_flag=True,
+    help="Update idXML files with cross-file global FLR metadata.",
+)
+@click.option(
+    "--fragment-mass-tolerance",
+    "fragment_mass_tolerance",
+    type=float,
+    default=0.05,
+    help="Fragment mass tolerance value (default: 0.05).",
+)
+@click.option(
+    "--fragment-mass-unit",
+    "fragment_mass_unit",
+    type=click.Choice(["Da", "ppm"]),
+    default="Da",
+    help="Tolerance unit (default: Da).",
+)
+@click.option(
+    "--threads",
+    "threads",
+    type=int,
+    default=1,
+    help="Number of parallel threads (default: 1).",
+)
+@click.option(
+    "--debug",
+    "debug",
+    is_flag=True,
+    help="Enable debug output.",
+)
+@click.option(
+    "--add-decoys",
+    "add_decoys",
+    is_flag=True,
+    default=False,
+    help="Include A (PhosphoDecoy) as potential phosphorylation site for FLR estimation.",
+)
+def batch(
+    in_files,
+    id_files,
+    out_files,
+    global_flr_report,
+    global_flr_threshold,
+    global_flr_plot,
+    update_with_global_flr,
+    fragment_mass_tolerance,
+    fragment_mass_unit,
+    threads,
+    debug,
+    add_decoys,
+):
+    """
+    Process multiple file pairs with all algorithms and calculate global FLR.
+
+    This command processes multiple mzML/idXML file pairs, running all three
+    phosphorylation site localization algorithms (AScore, PhosphoRS, LucXor)
+    on each pair, then calculates global FLR across all files.
+
+    Examples:
+      # Process 2 file pairs
+      onsite batch -in file1.mzML -id file1.idXML -in file2.mzML -id file2.idXML
+
+      # Process with global FLR report
+      onsite batch -in file1.mzML -id file1.idXML -in file2.mzML -id file2.idXML \\
+        --global-flr-report summary.tsv --add-decoys
+
+      # Process with specific output files
+      onsite batch -in file1.mzML -id file1.idXML -out file1_out.idXML \\
+        -in file2.mzML -id file2.idXML -out file2_out.idXML
+    """
+    from onsite.validation import FileValidator, FileValidationError
+    from onsite.global_flr import GlobalFLRCalculator
+
+    try:
+        start_time = time.time()
+        click.echo(f"[{time.strftime('%H:%M:%S')}] Starting OnSite batch processing")
+        click.echo(f"  Input files: {len(in_files)} mzML, {len(id_files)} idXML")
+        click.echo(f"  Fragment tolerance: {fragment_mass_tolerance} {fragment_mass_unit}")
+        click.echo(f"  Threads: {threads}")
+        click.echo(f"  Add decoys: {add_decoys}")
+        click.echo(f"  Debug: {debug}")
+
+        # Step 1: Validate file pairs
+        click.echo(f"\n[{time.strftime('%H:%M:%S')}] Validating file pairs...")
+        try:
+            file_pairs = FileValidator.validate_file_pairs(in_files, id_files)
+        except FileValidationError as e:
+            click.echo(f"Error: {str(e)}", err=True)
+            sys.exit(1)
+
+        # Step 2: Generate output paths if needed
+        try:
+            output_paths = FileValidator.validate_output_paths(
+                out_files, in_files, len(file_pairs)
+            )
+        except FileValidationError as e:
+            click.echo(f"Error: {str(e)}", err=True)
+            sys.exit(1)
+
+        click.echo(f"  Validated {len(file_pairs)} file pair(s)")
+
+        # Step 3: Process each file pair
+        processed_outputs = []
+        for i, ((mzml_path, idxml_path), out_path) in enumerate(
+            zip(file_pairs, output_paths), 1
+        ):
+            click.echo(f"\n{'='*60}")
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Processing file {i}/{len(file_pairs)}: {os.path.basename(mzml_path)}")
+            click.echo(f"{'='*60}")
+
+            # Create temporary directory for intermediate results
+            with tempfile.TemporaryDirectory() as tmpdir:
+                ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
+                phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
+                lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
+
+                # Run AScore
+                click.echo(f"\n[{time.strftime('%H:%M:%S')}] Running AScore...")
+                from onsite.ascore.cli import ascore as ascore_func
+                ctx = click.Context(ascore_func)
+                ctx.invoke(
+                    ascore_func,
+                    in_file=mzml_path,
+                    id_file=idxml_path,
+                    out_file=ascore_out,
+                    fragment_mass_tolerance=fragment_mass_tolerance,
+                    fragment_mass_unit=fragment_mass_unit,
+                    threads=threads,
+                    debug=debug,
+                    add_decoys=add_decoys,
+                )
+
+                # Run PhosphoRS
+                click.echo(f"\n[{time.strftime('%H:%M:%S')}] Running PhosphoRS...")
+                from onsite.phosphors.cli import phosphors as phosphors_func
+                ctx = click.Context(phosphors_func)
+                ctx.invoke(
+                    phosphors_func,
+                    in_file=mzml_path,
+                    id_file=idxml_path,
+                    out_file=phosphors_out,
+                    fragment_mass_tolerance=fragment_mass_tolerance,
+                    fragment_mass_unit=fragment_mass_unit,
+                    threads=threads,
+                    debug=debug,
+                    add_decoys=add_decoys,
+                )
+
+                # Run LucXor
+                click.echo(f"\n[{time.strftime('%H:%M:%S')}] Running LucXor...")
+                from onsite.lucxor.cli import PyLuciPHOr2, setup_logging as lucxor_setup_logging
+
+                # Setup logging for LucXor
+                lucxor_setup_logging(debug, None, lucxor_out)
+
+                # Configure target modifications based on add_decoys flag
+                if add_decoys:
+                    target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
+                else:
+                    target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
+
+                # Create tool instance and run
+                tool = PyLuciPHOr2()
+                exit_code = tool.run(
+                    input_spectrum=mzml_path,
+                    input_id=idxml_path,
+                    output=lucxor_out,
+                    fragment_method="CID",
+                    fragment_mass_tolerance=fragment_mass_tolerance,
+                    fragment_error_units=fragment_mass_unit,
+                    min_mz=150.0,
+                    target_modifications=target_mods,
+                    neutral_losses=("sty -H3PO4 -97.97690",),
+                    decoy_mass=79.966331,
+                    decoy_neutral_losses=("X -H3PO4 -97.97690",),
+                    max_charge_state=5,
+                    max_peptide_length=40,
+                    max_num_perm=16384,
+                    modeling_score_threshold=0.95,
+                    scoring_threshold=0.0,
+                    min_num_psms_model=50,
+                    threads=threads,
+                    rt_tolerance=0.01,
+                    debug=debug,
+                    disable_split_by_charge=False,
+                )
+
+                if exit_code != 0:
+                    click.echo(f"Warning: LucXor failed for {mzml_path} with exit code {exit_code}")
+                    continue
+
+                # Merge results
+                click.echo(f"\n[{time.strftime('%H:%M:%S')}] Merging algorithm results...")
+                merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_path)
+                processed_outputs.append(out_path)
+
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Completed file {i}/{len(file_pairs)}: {out_path}")
+
+        # Step 4: Calculate global FLR if requested
+        if global_flr_report or global_flr_plot or update_with_global_flr:
+            click.echo(f"\n{'='*60}")
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Calculating global FLR across all files...")
+            click.echo(f"{'='*60}")
+
+            global_flr_calc = GlobalFLRCalculator(min_delta_score=0.1)
+
+            # Extract data from all processed files
+            for out_path in processed_outputs:
+                click.echo(f"  Extracting data from: {os.path.basename(out_path)}")
+                global_flr_calc.extract_from_idxml(out_path)
+
+            # Calculate global FLR
+            global_flr_calc.calculate_global_flr()
+
+            # Get counts at specified threshold
+            counts = global_flr_calc.get_counts_at_threshold(global_flr_threshold)
+            total_counts = global_flr_calc.get_total_counts()
+
+            click.echo(f"\n  Global FLR Results (threshold={global_flr_threshold}):")
+            click.echo(f"    Total PSMs: {total_counts['total_psms']}")
+            click.echo(f"    Target PSMs: {total_counts['target_psms']}")
+            click.echo(f"    Decoy PSMs: {total_counts['decoy_psms']}")
+            click.echo(f"    Passing at {global_flr_threshold*100:.1f}% FLR: {counts['TOTAL']['passing']}")
+
+            # Generate report if requested
+            if global_flr_report:
+                click.echo(f"\n  Generating FLR report: {global_flr_report}")
+                global_flr_calc.generate_summary_report(global_flr_report, global_flr_threshold)
+
+            # Generate plot if requested
+            if global_flr_plot:
+                click.echo(f"\n  Generating FLR plot: {global_flr_plot}")
+                try:
+                    global_flr_calc.plot_cumulative_flr_curve(global_flr_plot)
+                except ImportError as e:
+                    click.echo(f"  Warning: {str(e)}")
+
+            # Update idXML files if requested
+            if update_with_global_flr:
+                click.echo(f"\n  Updating idXML files with cross-file global FLR...")
+                global_flr_calc.update_idxml_files(processed_outputs)
+
+        # Print summary
+        elapsed = time.time() - start_time
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Batch processing completed!")
+        click.echo(f"  Files processed: {len(processed_outputs)}/{len(file_pairs)}")
+        click.echo(f"  Total time: {elapsed:.2f} seconds")
+        click.echo(f"{'='*60}")
+
+        for i, out_path in enumerate(processed_outputs, 1):
+            click.echo(f"  Output {i}: {os.path.abspath(out_path)}")
+
+    except KeyboardInterrupt:
+        click.echo("\nOperation cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+# Add the 'batch' command to the CLI group
+cli.add_command(batch)
+
+
 def main():
     """Main entry point for OnSite CLI."""
     try:
