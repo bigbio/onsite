@@ -1089,6 +1089,167 @@ def calculate_phosphors_score(
         return -LOG10_ZERO_REPLACEMENT
 
 
+# --- phosphoRS dynamic per-window peak-depth optimization (Taus et al. 2011, ---
+# --- pseudocode sections 9-12): per 100 m/z window, choose the peak depth   ---
+# --- that maximizes the separation between the best and second-best isoform.---
+# Faithful, tested reimplementation replacing the buggy _reduce_by_delta_selection
+# (whose depth-selection ratio was inverted and used the experimental peak count
+# as the binomial n). See bigbio/onsite#40.
+
+ENABLE_PEAK_DEPTH_OPTIMIZATION = True  # if False, score against the filtered spectrum directly
+
+
+def _isoform_theo_mz(spec_gen, seq_profile, precursor_charge):
+    """Sorted theoretical fragment-ion m/z for one isoform, using a pre-configured
+    TheoreticalSpectrumGenerator (same ion types / losses as the scoring step)."""
+    spec = MSSpectrum()
+    try:
+        spec_gen.getSpectrum(spec, seq_profile, 1, max(1, int(precursor_charge)))
+    except Exception:
+        return []
+    if spec.size() == 0:
+        return []
+    return sorted(float(m) for m in spec.get_peaks()[0])
+
+
+def _window_has_site_determining_ions(isoform_theo_in_window, tol_da):
+    """Pseudocode section 10: True if the isoforms differ in their (tolerance-binned)
+    theoretical ion m/z within this window, i.e. the window can distinguish them."""
+    if len(isoform_theo_in_window) < 2 or tol_da <= 0:
+        return False
+
+    def binned(theo):
+        return frozenset(int(round(mz / tol_da)) for mz in theo)
+
+    sets = [binned(t) for t in isoform_theo_in_window]
+    return any(s != sets[0] for s in sets[1:])
+
+
+def _isoform_peptide_scores(selected_mz_sorted, isoform_theo_in_window, tol_da, window_width):
+    """phosphoRS peptide score (-10*log10 P_random) for each isoform against the
+    selected peaks of one window. n = theoretical ions in window, k = matched,
+    p = getp_style(N, window, tol) with N = number of selected peaks (section 9)."""
+    n_sel = len(selected_mz_sorted)
+    p = getp_style(n_sel, window_width, tol_da)
+    scores = []
+    for theo in isoform_theo_in_window:
+        if not theo:
+            scores.append(0.0)
+            continue
+        # consume-once matcher (Da tolerance within the window)
+        n, k = _count_matched_ions(theo, selected_mz_sorted, tol_da, False)
+        big_p = binomial_tail_probability(k, n if n > 0 else 1, p)
+        scores.append(-10.0 * math.log10(max(big_p, 1e-300)))
+    return scores
+
+
+def _choose_window_depth(window_peaks, isoform_theo_in_window, has_sdi, tol_da,
+                         window_width=WINDOW_SIZE, max_depth=MAX_DEPTH):
+    """Pseudocode sections 9 & 11: pick the peak depth (1..max_depth) for one window.
+
+    For each depth, score every isoform against the top-`depth` most intense peaks
+    and rank them. When the window holds site-determining ions, choose the depth
+    that maximizes rank1-rank2 (then rank1-rank3, rank1-rank4, then the best score)
+    -- i.e. the depth that best SEPARATES isoforms. Otherwise maximize the best
+    absolute score. Ties prefer the smaller depth (fewer noisy peaks).
+
+    Args:
+        window_peaks: list of (mz, intensity) in the window (any order).
+        isoform_theo_in_window: per-isoform list of theoretical m/z within the window.
+    Returns:
+        chosen depth (int); 0 if the window has no peaks.
+    """
+    if not window_peaks:
+        return 0
+    by_intensity = sorted(window_peaks, key=lambda pk: pk[1], reverse=True)
+    max_d = min(max_depth, len(by_intensity))
+
+    best_depth = 0
+    best_crit = None
+    for depth in range(1, max_d + 1):
+        selected = sorted(mz for mz, _it in by_intensity[:depth])
+        scores = sorted(
+            _isoform_peptide_scores(selected, isoform_theo_in_window, tol_da, window_width),
+            reverse=True,
+        )
+        r1 = scores[0] if len(scores) > 0 else 0.0
+        r2 = scores[1] if len(scores) > 1 else 0.0
+        r3 = scores[2] if len(scores) > 2 else 0.0
+        r4 = scores[3] if len(scores) > 3 else 0.0
+        if has_sdi:
+            crit = (r1 - r2, r1 - r3, r1 - r4, r1)   # maximize isoform separation
+        else:
+            crit = (r1, r1 - r2, r1 - r3, r1 - r4)   # maximize best absolute score
+        # strict ">" so equal criteria keep the earlier (smaller) depth
+        if best_crit is None or crit > best_crit:
+            best_crit = crit
+            best_depth = depth
+    return best_depth
+
+
+def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_tolerance,
+                                       fragment_method_ppm, add_neutral_losses):
+    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window,
+    the top-`depth` peaks where `depth` is chosen to best separate the isoforms.
+    Returns the reduced MSSpectrum (or the input unchanged if it has no peaks)."""
+    peaks = filtered_spec.get_peaks()
+    if not peaks or len(peaks[0]) == 0:
+        return filtered_spec
+
+    # work on m/z-sorted arrays (the matcher and windowing require ascending m/z)
+    order = sorted(range(len(peaks[0])), key=lambda i: peaks[0][i])
+    mz_arr = [float(peaks[0][i]) for i in order]
+    it_arr = [float(peaks[1][i]) for i in order]
+    min_mz, max_mz = mz_arr[0], mz_arr[-1]
+
+    precursor_charge = 2
+    if filtered_spec.getPrecursors():
+        precursor_charge = filtered_spec.getPrecursors()[0].getCharge() or 2
+
+    # one generator, matching the scoring step's ion model (b/y + optional losses)
+    spec_gen = TheoreticalSpectrumGenerator()
+    pr = spec_gen.getParameters()
+    pr.setValue("add_metainfo", "false")
+    pr.setValue("add_precursor_peaks", "false")
+    pr.setValue("add_losses", "true" if add_neutral_losses else "false")
+    for ion_type in ["a", "b", "c", "x", "y", "z"]:
+        pr.setValue(f"add_{ion_type}_ions", "true" if ion_type in ("b", "y") else "false")
+    spec_gen.setParameters(pr)
+
+    isoform_theo = [
+        _isoform_theo_mz(spec_gen, seq_profile, precursor_charge)
+        for seq_profile, _sites in profiles
+    ]
+
+    keep = []
+    cur = min_mz
+    while cur < max_mz:
+        hi = cur + WINDOW_SIZE
+        w_start, w_end = _get_window_indexes(mz_arr, cur, hi)
+        if w_end - w_start > 0:
+            if fragment_method_ppm:
+                tol_da = (cur + WINDOW_SIZE / 2.0) * fragment_tolerance / 1_000_000.0
+            else:
+                tol_da = fragment_tolerance
+            win_peaks = [(mz_arr[i], it_arr[i]) for i in range(w_start, w_end)]
+            theo_in_win = [[mz for mz in theo if cur <= mz < hi] for theo in isoform_theo]
+            has_sdi = _window_has_site_determining_ions(theo_in_win, tol_da)
+            depth = _choose_window_depth(win_peaks, theo_in_win, has_sdi, tol_da)
+            if depth > 0:
+                top = sorted(
+                    range(w_start, w_end), key=lambda i: it_arr[i], reverse=True
+                )[:depth]
+                keep.extend(top)
+        cur = hi
+
+    if not keep:
+        return filtered_spec
+    keep = sorted(set(keep))
+    # map back to original (unsorted) indices for _copy_spectrum_subset
+    original_idx = sorted(order[i] for i in keep)
+    return _copy_spectrum_subset(filtered_spec, original_idx)
+
+
 # --- Main PhosphoRS-like Localization Function ---
 def calculate_phospho_localization_compomics_style(
     peptide_hit: PeptideHit,
@@ -1296,8 +1457,14 @@ def calculate_phospho_localization_compomics_style(
             print("Warning: No isomer profiles generated.")
             return None, None
 
-        # 3) Use filtered spectrum directly (delta-based reduction disabled)
-        phospho_rs_spec = filtered_spec
+        # 3) Dynamic per-window peak-depth optimization (phosphoRS, sections 9-12).
+        if ENABLE_PEAK_DEPTH_OPTIMIZATION:
+            phospho_rs_spec = _reduce_by_peak_depth_optimization(
+                filtered_spec, profiles, fragment_tolerance,
+                fragment_method_ppm, add_neutral_losses,
+            )
+        else:
+            phospho_rs_spec = filtered_spec
 
         # --- Generate Theoretical Spectra and Score Against Reduced Spectrum ---
         spec_gen = TheoreticalSpectrumGenerator()

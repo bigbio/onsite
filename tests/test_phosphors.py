@@ -116,3 +116,46 @@ def test_site_deltas_from_isomers():
     # Underflowed P_random stays finite (floored), not +inf.
     assert site_deltas_from_isomers([("PEPS(Phospho)K", 0.0)])[3] < 1e6
     assert site_deltas_from_isomers([]) == {}
+
+
+# ── phosphoRS dynamic per-window peak-depth optimization (sections 9-12) ──
+def test_window_site_determining_ions():
+    from onsite.phosphors.phosphors import _window_has_site_determining_ions
+
+    # Isoforms differ within the window -> site-determining.
+    assert _window_has_site_determining_ions([[200.0, 300.0], [200.0, 350.0]], 0.05) is True
+    # Identical in-window ion sets -> not site-determining.
+    assert _window_has_site_determining_ions([[200.0], [200.0]], 0.05) is False
+    # A single isoform cannot be site-determining.
+    assert _window_has_site_determining_ions([[200.0, 300.0]], 0.05) is False
+
+
+def test_choose_window_depth_maximizes_separation():
+    """With site-determining ions, pick the depth that best separates isoforms."""
+    from onsite.phosphors.phosphors import _choose_window_depth
+
+    iso_a = [200.0, 300.0]   # 300 is site-determining for A
+    iso_b = [200.0, 350.0]   # 350 for B (out of selection at depth 2)
+    peaks = [(200.0, 100.0), (300.0, 50.0), (350.0, 10.0)]
+    # depth 1 selects only the shared 200 (no separation); depth 2 adds 300,
+    # which A matches and B doesn't -> maximal rank1-rank2 at depth 2.
+    assert _choose_window_depth(peaks, [iso_a, iso_b], True, 0.05, window_width=100.0) == 2
+
+
+def test_choose_window_depth_no_sdi_maximizes_best_score():
+    """Without site-determining ions, pick the depth that maximizes the best score
+    (here depth 2, which is needed to capture the matching ion)."""
+    from onsite.phosphors.phosphors import _choose_window_depth
+
+    iso = [260.0]  # identical for both -> no site-determining ions
+    peaks = [(250.0, 100.0), (260.0, 50.0)]  # 250 noise (top), 260 matches
+    assert _choose_window_depth(peaks, [iso, iso], False, 0.05, window_width=100.0) == 2
+
+
+def test_choose_window_depth_ties_prefer_smaller_and_empty():
+    from onsite.phosphors.phosphors import _choose_window_depth
+
+    # No theoretical ions -> every depth ties -> smallest depth chosen.
+    assert _choose_window_depth([(250.0, 9.0), (260.0, 5.0)], [[], []], False, 0.05) == 1
+    # No peaks -> depth 0.
+    assert _choose_window_depth([], [[200.0]], True, 0.05) == 0
