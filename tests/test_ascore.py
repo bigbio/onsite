@@ -53,3 +53,44 @@ def test_ascore_with_peptide():
     except Exception as e:
         # AScore might fail for non-phosphorylated peptides, which is expected
         assert "phosphorylation" in str(e).lower() or "modification" in str(e).lower()
+
+
+def test_getsites_sorted_with_decoys():
+    """Decoy (A) sites must be returned in ascending position order.
+
+    Regression for bigbio/onsite#40: getSites_ appended A sites after the
+    S/T/Y sites, leaving the list unsorted (e.g. [0, 4, 1, 2, 3] for SAAAYK).
+    """
+    ascore = AScore()
+    ascore.setAddDecoys(True)
+    sites = ascore.getSites_("SAAAYK")
+    assert sites == sorted(sites), f"site positions not ascending: {sites}"
+    assert sites == [0, 1, 2, 3, 4]
+
+    # combinations() over the (now sorted) sites must yield ascending combos
+    for perm in ascore.computePermutations_(sites, 2):
+        assert perm == sorted(perm), f"unsorted permutation produced: {perm}"
+
+
+def test_decoy_modification_not_dropped():
+    """An out-of-order permutation must not silently drop a modification.
+
+    Regression for bigbio/onsite#40: createTheoreticalSpectra_ walked positions
+    ascending and dropped any site whose index was smaller than a preceding one,
+    so a descending combo like [4, 1] on SAAAYK lost the decoy A entirely.
+    """
+    ascore = AScore()
+    ascore.setAddDecoys(True)
+    seq = AASequence.fromString("SAAAYK")
+
+    # Descending and ascending forms of the same site set must be identical,
+    # and must place BOTH modifications (decoy A@1 + phospho Y@4).
+    expected = "SA(PhosphoDecoy)AAY(Phospho)K"
+    for combo in ([4, 1], [1, 4]):
+        name = ascore.createTheoreticalSpectra_([combo], seq)[0].getName()
+        assert name == expected, f"{combo} -> {name}"
+
+    # Three sites (2 decoys + 1 target) fed descending must keep all three.
+    name3 = ascore.createTheoreticalSpectra_([[4, 3, 1]], seq)[0].getName()
+    assert name3.count("(PhosphoDecoy)") == 2
+    assert name3.count("(Phospho)") == 1

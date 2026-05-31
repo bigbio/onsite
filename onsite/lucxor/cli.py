@@ -935,7 +935,12 @@ class PyLuciPHOr2:
                 hit.setMetaValue("Luciphor_pep_score", psm.psm_score)
                 hit.setMetaValue("Luciphor_global_flr", psm.global_flr)  # Second round assigned FLR value
                 hit.setMetaValue("Luciphor_local_flr", psm.local_flr)    # Second round assigned FLR value
-                
+
+                # Per-site localization confidence (see bigbio/onsite#40): derived
+                # from the real-permutation scores so a site-level decoy-AA FLR can
+                # rank individual sites. {residue_index: score}, higher = better.
+                hit.setMetaValue("Luciphor_site_scores", str(psm.get_site_scores()))
+
                 # Update the sequence to the best scoring sequence from permutations
                 best_sequence = psm.get_best_sequence(include_decoys=False)  # Use second round (real permutations only)
                 if best_sequence != psm.peptide.peptide:
