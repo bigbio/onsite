@@ -14,6 +14,7 @@ from onsite.decoy_flr import (
     _collapse_sites,
     parse_tool_idxml,
     compute_tool_flr,
+    compute_decoy_flr,
     PSMRecord,
 )
 
@@ -120,6 +121,7 @@ _PHOSPHORS_IDXML = """<?xml version="1.0" encoding="UTF-8"?>
    <UserParam type="string" name="target_decoy" value="target"/>
    <UserParam type="float" name="q-value" value="0.002"/>
    <UserParam type="string" name="PhosphoRS_site_probs" value="{5: 0.01, 10: 42.3, 12: 57.6}"/>
+   <UserParam type="string" name="PhosphoRS_site_delta" value="{5: -30.0, 10: -5.0, 12: 12.5}"/>
   </PeptideHit>
  </PeptideIdentification>
 </IdXML>
@@ -127,7 +129,8 @@ _PHOSPHORS_IDXML = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def test_parse_tool_idxml_phosphors(tmp_path):
-    """The PhosphoRS leg: position-keyed PhosphoRS_site_probs parses correctly."""
+    """The PhosphoRS leg ranks on the peptide-score delta (not the saturated
+    probability); parse_tool_idxml picks up PhosphoRS_site_delta."""
     p = tmp_path / "phosphors.idXML"
     p.write_text(_PHOSPHORS_IDXML)
     recs = parse_tool_idxml(str(p), "phosphors")
@@ -136,7 +139,9 @@ def test_parse_tool_idxml_phosphors(tmp_path):
     assert r.spectrum_ref == "scan=42"
     assert r.unmod_seq == "FLLEPTDVVTSRSK"
     assert r.sites == [(12, "S", "Phospho")]
-    assert r.site_scores == {5: 0.01, 10: 42.3, 12: 57.6}
+    # ranked on the peptide-score delta; winning S@12 has the largest delta
+    assert r.site_scores == {5: -30.0, 10: -5.0, 12: 12.5}
+    assert max(r.site_scores, key=r.site_scores.get) == 12
     assert r.is_ident_decoy is False
     assert r.q_value == 0.002
 
@@ -169,3 +174,56 @@ def test_compute_tool_flr_filters_intersect_and_normalizes():
     # At 5% FLR only the top target site qualifies.
     total, target, decoy = sites_at_flr(res.curve, 0.05)
     assert (total, target, decoy) == (1, 1, 0)
+
+
+# ───────────────────── extensive 3-tool file-based integration ─────────────
+def _make_idxml(score_meta, psms):
+    """Minimal idXML for one tool. psms: list of (spectrum_ref, sequence, {pos: score})."""
+    rows = []
+    for sref, seq, scores in psms:
+        rows.append(
+            f'  <PeptideIdentification score_type="X" spectrum_reference="{sref}">\n'
+            f'   <PeptideHit score="0.0" sequence="{seq}" charge="2">\n'
+            f'    <UserParam type="string" name="target_decoy" value="target"/>\n'
+            f'    <UserParam type="float" name="q-value" value="0.001"/>\n'
+            f'    <UserParam type="string" name="{score_meta}" value="{scores}"/>\n'
+            f"   </PeptideHit>\n"
+            f"  </PeptideIdentification>"
+        )
+    return '<?xml version="1.0"?>\n<IdXML>\n' + "\n".join(rows) + "\n</IdXML>\n"
+
+
+def test_compute_decoy_flr_three_tool_integration(tmp_path):
+    """End-to-end: parse three idXMLs -> shared filtered intersection -> collapse
+    -> Eq. 2 -> threshold, for all three tools and their respective score-meta
+    keys (AScore_site_scores / PhosphoRS_site_delta / Luciphor_site_scores).
+
+    Peptide AGSYK has candidates S2, Y3 (target) and A0 (decoy). Three PSMs
+    localize to S2, Y3, and A0 respectively, with the decoy scored lowest, so
+    at 5% FLR the two target sites are recovered and the decoy is excluded.
+    """
+    psms = [
+        ("scan=1", "AGS(Phospho)YK", {2: 50.0, 0: 10.0, 3: 5.0}),       # target S2
+        ("scan=2", "AGSY(Phospho)K", {3: 40.0, 0: 8.0, 2: 6.0}),        # target Y3
+        ("scan=3", "A(PhosphoDecoy)GSYK", {0: 30.0, 2: 5.0, 3: 4.0}),   # decoy A0 (lowest)
+    ]
+    tool_meta = {
+        "ascore": "AScore_site_scores",
+        "phosphors": "PhosphoRS_site_delta",
+        "lucxor": "Luciphor_site_scores",
+    }
+    paths = {}
+    for tool, meta in tool_meta.items():
+        p = tmp_path / f"{tool}.idXML"
+        p.write_text(_make_idxml(meta, psms))
+        paths[tool] = str(p)
+
+    res = compute_decoy_flr(paths, q_threshold=0.01, flr_threshold=0.05)
+    assert set(res) == {"ascore", "phosphors", "lucxor"}
+    for tool, r in res.items():
+        assert r.n_in_intersection == 3, tool       # all spectra shared
+        assert r.n_analyzed_psms == 3, tool          # all ambiguous, all scored
+        assert (r.t_c, r.x_c) == (6, 3), tool        # STY=2, A=1 per PSM x 3
+        # Decoy (A0, score lowest) ranks last; factor 2*(6/3)=4 -> FLR hits 1.0
+        # at rank 3, so 5% FLR recovers the two target sites only.
+        assert sites_at_flr(r.curve, 0.05) == (2, 2, 0), tool

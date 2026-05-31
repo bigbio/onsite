@@ -45,9 +45,14 @@ DECOY_RESIDUE = "A"
 
 # Per-tool meta value holding the position-keyed {residue_index: score} dict,
 # and whether a higher score means more confident.
+# Per-tool position-keyed {residue_index: score} meta value used to RANK sites
+# for the FLR (higher = more confident). PhosphoRS is ranked on its peptide-score
+# delta (phosphoRS's own discrimination signal) rather than the normalized site
+# probability, which saturates at ~100% and carries no ranking resolution; the
+# probability is still emitted as PhosphoRS_site_probs for reporting.
 TOOL_SCORE_META = {
     "ascore": "AScore_site_scores",
-    "phosphors": "PhosphoRS_site_probs",
+    "phosphors": "PhosphoRS_site_delta",
     "lucxor": "Luciphor_site_scores",
 }
 

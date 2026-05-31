@@ -11,7 +11,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import click
 from pyopenms import *
 
-from .phosphors import calculate_phospho_localization_compomics_style
+from .phosphors import (
+    calculate_phospho_localization_compomics_style,
+    site_deltas_from_isomers,
+)
 
 
 @click.command()
@@ -254,6 +257,7 @@ def phosphors(
                             "phospho_decoy_count",
                             "PhosphoRS_pep_score",
                             "PhosphoRS_site_probs",
+                            "PhosphoRS_site_delta",
                             "SpecEValue_score",
                         ]:
                             if new_hit.metaValueExists(k):
@@ -362,6 +366,8 @@ def save_identifications(out_file, protein_ids, peptide_ids):
                     hit.setMetaValue("PhosphoRS_pep_score", float(hit.getScore()))
                 if not hit.metaValueExists("PhosphoRS_site_probs"):
                     hit.setMetaValue("PhosphoRS_site_probs", "{}")
+                if not hit.metaValueExists("PhosphoRS_site_delta"):
+                    hit.setMetaValue("PhosphoRS_site_delta", "{}")
                 if not hit.metaValueExists("SpecEValue_score") and hit.metaValueExists(
                     "MS:1002052"
                 ):
@@ -537,6 +543,9 @@ def _worker_process_pid_threaded(task):
             meta_fields.append(("phospho_decoy_count", decoy_count))
             meta_fields.append(("PhosphoRS_pep_score", final_score))
             meta_fields.append(("PhosphoRS_site_probs", str(simple_site_probs)))
+            meta_fields.append(
+                ("PhosphoRS_site_delta", str(site_deltas_from_isomers(isomer_list)))
+            )
 
             if hit.metaValueExists("MS:1002052"):
                 meta_fields.append(
@@ -655,7 +664,10 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             new_hit.setMetaValue("phospho_decoy_count", decoy_count)
             new_hit.setMetaValue("PhosphoRS_pep_score", float(final_score))
             new_hit.setMetaValue("PhosphoRS_site_probs", str(simple_site_probs))
-            
+            new_hit.setMetaValue(
+                "PhosphoRS_site_delta", str(site_deltas_from_isomers(isomer_list))
+            )
+
             # Save MSGF score
             if new_hit.metaValueExists("MS:1002052"):
                 new_hit.setMetaValue("SpecEValue_score", float(new_hit.getMetaValue("MS:1002052")))

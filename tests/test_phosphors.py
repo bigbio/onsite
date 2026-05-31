@@ -92,3 +92,27 @@ def test_count_matched_ions_no_double_counting():
     # No experimental peaks -> no matches.
     n, k = _count_matched_ions([300.0, 400.0], [], 0.05, False)
     assert n == 2 and k == 0
+
+
+def test_site_deltas_from_isomers():
+    """Per-site phosphoRS peptide-score delta = best-with minus best-without,
+    on the -10*log10(P) scale; preserves resolution (no 0/100 saturation)."""
+    from onsite.phosphors.phosphors import site_deltas_from_isomers
+
+    # S clearly best (smallest P_random -> highest peptide score).
+    iso = [
+        ("PEPS(Phospho)TYK", 1e-30),  # S@3, score 300
+        ("PEPST(Phospho)YK", 1e-10),  # T@4, score 100
+        ("PEPSTY(Phospho)K", 1e-05),  # Y@5, score 50
+    ]
+    d = site_deltas_from_isomers(iso)
+    assert round(d[3], 1) == 200.0   # 300 - max(100, 50)
+    assert round(d[4], 1) == -200.0  # 100 - 300
+    assert round(d[5], 1) == -250.0  # 50 - 300
+    assert max(d, key=d.get) == 3    # winning site has the largest delta
+
+    # Single candidate: no competing isoform -> full peptide score.
+    assert round(site_deltas_from_isomers([("PEPS(Phospho)K", 1e-20)])[3], 1) == 200.0
+    # Underflowed P_random stays finite (floored), not +inf.
+    assert site_deltas_from_isomers([("PEPS(Phospho)K", 0.0)])[3] < 1e6
+    assert site_deltas_from_isomers([]) == {}

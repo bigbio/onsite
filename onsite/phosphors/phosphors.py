@@ -272,6 +272,69 @@ def _count_matched_ions(theo_mz, exp_mz_sorted, fragment_tolerance, fragment_met
     return len(theo_unique), k
 
 
+def _isomer_phospho_positions(seq_str):
+    """0-based residue indices carrying Phospho or PhosphoDecoy in a modified
+    peptide string (e.g. 'AS(Phospho)A(PhosphoDecoy)K' -> {1, 2})."""
+    positions = set()
+    i = 0
+    pos = -1
+    while i < len(seq_str):
+        c = seq_str[i]
+        if c == "(":
+            j = seq_str.find(")", i)
+            if j == -1:
+                break
+            if seq_str[i + 1 : j] in ("Phospho", "PhosphoDecoy") and pos >= 0:
+                positions.add(pos)
+            i = j + 1
+        elif c.isalpha():
+            pos += 1
+            i += 1
+        else:
+            i += 1
+    return positions
+
+
+def site_deltas_from_isomers(isomer_list):
+    """Per-site phosphoRS peptide-score delta - phosphoRS's own ranking signal.
+
+    The phosphoRS peptide score is ``-10*log10(P_random)``; for each candidate
+    site the delta is (best score among isoforms that phosphorylate the site)
+    minus (best score among those that do not) - the rank1-vs-alternative score
+    gap that phosphoRS itself maximizes when choosing peak depth (Taus et al.
+    2011). Higher = more confident the site is phosphorylated. Unlike the
+    normalized site probability it does NOT saturate toward 0/100, so it
+    preserves the ranking resolution needed to threshold a global FLR.
+
+    Args:
+        isomer_list: list of (modified_sequence_str, P_random) over all isoforms.
+    Returns:
+        dict {residue_index: delta} (0-based); empty if no isoforms.
+    """
+    if not isomer_list:
+        return {}
+
+    _FLOOR = 1e-300  # keep -10*log10(P) finite if P_random underflowed to 0
+    parsed = []
+    sites = set()
+    for seq_str, p_random in isomer_list:
+        pep = -10.0 * math.log10(max(float(p_random), _FLOOR))
+        occ = _isomer_phospho_positions(seq_str)
+        parsed.append((occ, pep))
+        sites |= occ
+
+    deltas = {}
+    for s in sites:
+        best_with = max((pep for occ, pep in parsed if s in occ), default=None)
+        best_without = max((pep for occ, pep in parsed if s not in occ), default=None)
+        if best_with is None:
+            continue
+        # No competing isoform (single candidate) -> full score, like the per-PSM
+        # convention; otherwise the rank1-vs-best-alternative gap.
+        deltas[s] = best_with if best_without is None else (best_with - best_without)
+    return deltas
+
+
 # --- Window reduction helpers ---
 def _get_intensity_thresholds(mz: list, intensity: list, start: int, end: int) -> list:
     """Return up to MAX_DEPTH descending unique intensity thresholds in window [start, end)."""
