@@ -227,6 +227,51 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
     return result
 
 
+def _count_matched_ions(theo_mz, exp_mz_sorted, fragment_tolerance, fragment_method_ppm):
+    """Count theoretical fragment ions matched to experimental peaks.
+
+    Two corrections vs. a naive scan, both of which otherwise inflate the
+    binomial counts (and asymmetrically favor decoy isomers, which carry extra
+    phospho neutral-loss ions):
+
+    1. Theoretical ions falling within one tolerance window of each other are
+       merged - an experimental peak cannot distinguish them, so they must count
+       as ONE trial, not several (avoids counting the same theoretical ion
+       multiple times).
+    2. Each experimental peak is consumed by at most one theoretical ion, so a
+       single peak cannot satisfy several theoretical ions.
+
+    Args:
+        theo_mz: iterable of theoretical m/z (any order).
+        exp_mz_sorted: experimental peak m/z, ascending.
+        fragment_tolerance: match tolerance (Da, or ppm if fragment_method_ppm).
+        fragment_method_ppm: interpret tolerance as ppm.
+
+    Returns:
+        (n_expected, k_matches): unique theoretical ions, and how many matched.
+    """
+    def tol(mz):
+        return (mz * fragment_tolerance / 1_000_000.0) if fragment_method_ppm else fragment_tolerance
+
+    theo_unique = []
+    for mz in sorted(theo_mz):
+        if not theo_unique or (mz - theo_unique[-1]) > tol(mz):
+            theo_unique.append(mz)
+
+    k = 0
+    ri = 0
+    m = len(exp_mz_sorted)
+    for mz in theo_unique:
+        t = tol(mz)
+        while ri < m and exp_mz_sorted[ri] < mz - t:
+            ri += 1
+        if ri < m and exp_mz_sorted[ri] <= mz + t:
+            k += 1
+            ri += 1  # consume this experimental peak
+
+    return len(theo_unique), k
+
+
 # --- Window reduction helpers ---
 def _get_intensity_thresholds(mz: list, intensity: list, start: int, end: int) -> list:
     """Return up to MAX_DEPTH descending unique intensity thresholds in window [start, end)."""
@@ -1218,7 +1263,7 @@ def calculate_phospho_localization_compomics_style(
         if not red_peaks or len(red_peaks[0]) == 0:
             print("Warning: Reduced spectrum contains no peaks.")
             return None, None
-        red_mz_arr = list(red_peaks[0])
+        red_mz_arr = sorted(red_peaks[0])  # ascending: required by w and _count_matched_ions
 
         # p uses number of peaks and window width of reduced spectrum, tolerance in Da
         w = float(red_mz_arr[-1] - red_mz_arr[0]) if len(red_mz_arr) > 1 else float(0.0)
@@ -1254,29 +1299,13 @@ def calculate_phospho_localization_compomics_style(
             except Exception:
                 pass
             theo_mz = [theo_mz_all[i] for i in theo_keep_idx]
-            n_expected = len(theo_mz)
 
-            # Count matches k using reduced spectrum and tolerance
-            k_matches = 0
-            red_len = len(red_mz_arr)
-            red_idx = 0
-            for mz_theo in theo_mz:
-                tol_da = (
-                    (mz_theo * fragment_tolerance / 1_000_000.0)
-                    if fragment_method_ppm
-                    else fragment_tolerance
-                )
-                min_b = mz_theo - tol_da
-                max_b = mz_theo + tol_da
-                while red_idx < red_len and red_mz_arr[red_idx] < min_b:
-                    red_idx += 1
-                cur_idx = red_idx
-                matched = False
-                while cur_idx < red_len and red_mz_arr[cur_idx] < max_b:
-                    matched = True
-                    break
-                if matched:
-                    k_matches += 1
+            # Count unique theoretical ions and matches, merging indistinguishable
+            # theoretical ions and consuming each experimental peak at most once
+            # (red_mz_arr is ascending; see w/n_exp_peaks above).
+            n_expected, k_matches = _count_matched_ions(
+                theo_mz, red_mz_arr, fragment_tolerance, fragment_method_ppm
+            )
 
             big_p = binomial_tail_probability(
                 k_matches, n_expected if n_expected > 0 else 1, p_calc
