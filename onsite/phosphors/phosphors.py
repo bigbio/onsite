@@ -1121,10 +1121,16 @@ def calculate_phospho_localization_compomics_style(
         if not red_peaks or len(red_peaks[0]) == 0:
             print("Warning: Reduced spectrum contains no peaks.")
             return None, None
-        red_mz_arr = sorted(red_peaks[0])  # ascending: required by w and _count_matched_ions
+        red_mz_arr = sorted(red_peaks[0])  # ascending: required by _count_matched_ions
 
-        # p uses number of peaks and window width of reduced spectrum, tolerance in Da
-        w = float(red_mz_arr[-1] - red_mz_arr[0]) if len(red_mz_arr) > 1 else float(0.0)
+        # Random single-ion match probability p = N*d/w (phosphoRS, section 13):
+        #   N = number of extracted peaks, d = fragment tolerance,
+        #   w = FULL m/z range of the MS/MS spectrum (NOT the extracted-peak span).
+        full_mz = spectrum.get_peaks()[0]
+        if full_mz is not None and len(full_mz) > 1:
+            w = float(np.max(full_mz) - np.min(full_mz))
+        else:
+            w = float(red_mz_arr[-1] - red_mz_arr[0]) if len(red_mz_arr) > 1 else 0.0
         n_exp_peaks = int(len(red_mz_arr))
         p_calc = getp_style(n_exp_peaks, w, tolerance_da_for_p)
 
