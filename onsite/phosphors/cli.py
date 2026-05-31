@@ -240,27 +240,9 @@ def phosphors(
                     new_hits = []
                     for hit_src, hit_res in zip(pid_src.getHits(), res["hits"]):
                         if hit_res.get("status") != "success":
-                            # Preserve original hit with -1 score when failed, but
-                            # clear managed PhosphoRS metadata (mirroring the success
-                            # branch) so stale fields can't leak downstream.
-                            failed_hit = PeptideHit(hit_src)
-                            failed_hit.setScore(-1.0)
-                            for k in [
-                                "search_engine_sequence",
-                                "regular_phospho_count",
-                                "phospho_decoy_count",
-                                "PhosphoRS_pep_score",
-                                "PhosphoRS_site_probs",
-                                "PhosphoRS_site_delta",
-                                "SpecEValue_score",
-                                "ProForma",
-                            ]:
-                                if failed_hit.metaValueExists(k):
-                                    try:
-                                        failed_hit.removeMetaValue(k)
-                                    except Exception:
-                                        pass
-                            new_hits.append(failed_hit)
+                            # Preserve original hit with -1 score when failed,
+                            # clearing managed PhosphoRS metadata.
+                            new_hits.append(make_unscored_hit(hit_src))
                             continue
 
                         new_hit = PeptideHit(hit_src)
@@ -489,6 +471,39 @@ def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
     return best_match
 
 
+# Managed PhosphoRS metadata keys, written on scored hits and stripped from
+# hits PhosphoRS does not score (so stale values can't leak downstream).
+_MANAGED_PHOSPHORS_METAS = (
+    "search_engine_sequence",
+    "regular_phospho_count",
+    "phospho_decoy_count",
+    "PhosphoRS_pep_score",
+    "PhosphoRS_site_probs",
+    "PhosphoRS_site_delta",
+    "SpecEValue_score",
+    "ProForma",
+)
+
+
+def make_unscored_hit(hit_src):
+    """Build the output hit for a peptide PhosphoRS does not score (no phospho
+    site, or scoring returned no result): the original hit with score -1 and
+    all managed PhosphoRS metadata removed.
+
+    Both the serial (threads=1) and threaded (threads>1) paths route their
+    skip branches through this so the two produce byte-identical output.
+    """
+    h = PeptideHit(hit_src)
+    h.setScore(-1.0)
+    for k in _MANAGED_PHOSPHORS_METAS:
+        if h.metaValueExists(k):
+            try:
+                h.removeMetaValue(k)
+            except Exception:
+                pass
+    return h
+
+
 # ----------------------- Threading worker utilities -----------------------
 # Note: Using ThreadPoolExecutor instead of ProcessPoolExecutor allows threads
 # to share the spectrum data (exp object) directly without reloading the file.
@@ -642,9 +657,7 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
                     break
                     
             if not has_phospho:
-                new_hit.setScore(-1.0)
-                new_hit.setMetaValue("PhosphoRS_pep_score", float(-1.0))
-                scored_peptides.append(new_hit)
+                scored_peptides.append(make_unscored_hit(hit))
                 continue
             
             # Execute PhosphoRS calculation
@@ -657,9 +670,7 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             )
 
             if site_probs is None or isomer_list is None:
-                new_hit.setScore(-1.0)
-                new_hit.setMetaValue("PhosphoRS_pep_score", float(-1.0))
-                scored_peptides.append(new_hit)
+                scored_peptides.append(make_unscored_hit(hit))
                 continue
 
             # Get the best scoring isomer
