@@ -504,6 +504,25 @@ def make_unscored_hit(hit_src):
     return h
 
 
+def _has_localizable_phospho(seq_str):
+    """True if the (normalized) sequence carries an explicit (Phospho)/
+    (PhosphoDecoy) on a localizable residue (S/T/Y/A).
+
+    Both the serial (threads=1) and threaded (threads>1) paths gate on this
+    BEFORE calling the scorer, so they skip exactly the same hits. Without a
+    shared gate the threaded worker would fall through to the scorer's
+    mass-based modification inference (phosphors.py: abs_tol=0.1 Da around the
+    phospho mass) and could (mis)score a non-phospho modification that is
+    near-isobaric with phospho (e.g. Sulfation, +79.9568, 0.0095 Da away) which
+    the serial path skips - diverging threads=1 vs threads>1 output. See the
+    PR #41 review (bigbio/onsite#40).
+    """
+    for aa in ("S", "T", "Y", "A"):
+        if f"{aa}(Phospho)" in seq_str or f"{aa}(PhosphoDecoy)" in seq_str:
+            return True
+    return False
+
+
 # ----------------------- Threading worker utilities -----------------------
 # Note: Using ThreadPoolExecutor instead of ProcessPoolExecutor allows threads
 # to share the spectrum data (exp object) directly without reloading the file.
@@ -545,6 +564,13 @@ def _worker_process_pid_threaded(task):
             hit.setSequence(seq)
             if hit_info.get("proforma") is not None:
                 hit.setMetaValue("ProForma", hit_info["proforma"])
+
+            # Same localizable-phospho gate as the serial path, so the two paths
+            # skip identical hits (the rebuild routes "no_result" through
+            # make_unscored_hit, mirroring the serial make_unscored_hit branch).
+            if not _has_localizable_phospho(seq.toString()):
+                results.append({"status": "no_result"})
+                continue
 
             site_probs, isomer_list = calculate_phospho_localization_compomics_style(
                 hit,
@@ -649,14 +675,9 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             original_seq_str = new_hit.getSequence().toString()
             new_hit.setMetaValue("search_engine_sequence", original_seq_str)
             
-            # Check for phosphorylation sites
-            has_phospho = False
-            for aa in ["S", "T", "Y", "A"]:
-                if f"{aa}(Phospho)" in original_seq_str or f"{aa}(PhosphoDecoy)" in original_seq_str:
-                    has_phospho = True
-                    break
-                    
-            if not has_phospho:
+            # Skip hits with no localizable phospho site (identical gate in the
+            # threaded worker so both paths skip the same hits).
+            if not _has_localizable_phospho(original_seq_str):
                 scored_peptides.append(make_unscored_hit(hit))
                 continue
             

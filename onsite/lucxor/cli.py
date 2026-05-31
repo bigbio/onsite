@@ -9,6 +9,7 @@ import sys
 import logging
 import time
 import json
+import random
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
@@ -156,6 +157,16 @@ logger = logging.getLogger(__name__)
     help="Number of threads to use (default: 1)"
 )
 @click.option(
+    "--seed",
+    type=int,
+    default=42,
+    help="RNG seed for reproducible decoy permutations / model subsampling "
+         "(default: 42). Guarantees deterministic, reproducible output for the "
+         "default single-threaded run (--threads 1); with --threads > 1 the "
+         "global RNG is shared across threads so exact reproducibility is not "
+         "guaranteed.",
+)
+@click.option(
     "--rt-tolerance",
     type=float,
     default=0.01,
@@ -210,6 +221,7 @@ def lucxor(
     scoring_threshold,
     min_num_psms_model,
     threads,
+    seed,
     rt_tolerance,
     debug,
     log_file,
@@ -265,6 +277,7 @@ def lucxor(
             scoring_threshold=scoring_threshold,
             min_num_psms_model=min_num_psms_model,
             threads=threads,
+            seed=seed,
             rt_tolerance=rt_tolerance,
             debug=debug,
             disable_split_by_charge=disable_split_by_charge,
@@ -587,6 +600,7 @@ class PyLuciPHOr2:
         debug: bool,
         disable_split_by_charge: bool = False,
         score_type: Optional[str] = None,
+        seed: int = 42,
     ) -> int:
         """
         LuciPHOr2 main workflow:
@@ -595,6 +609,14 @@ class PyLuciPHOr2:
         3. Score all PSMs with the trained model.
         4. Exit with error if insufficient high-scoring PSMs.
         """
+        # Seed the RNGs before any stochastic step (decoy permutation shuffling in
+        # psm.py, model-subsampling np.random.choice in models.py) so a default
+        # single-threaded run is fully reproducible. Done once here because both
+        # the standalone CLI and the `onsite all` path funnel through run().
+        random.seed(seed)
+        np.random.seed(seed)
+        self.logger.debug(f"Seeded RNGs (random, numpy) with seed={seed}")
+
         config = DEFAULT_CONFIG.copy()
 
         # Parse target_modifications to handle comma-separated format
