@@ -424,7 +424,7 @@ def _generate_isomer_profiles(
     profiles = []
 
     # Get the original sequence string and parse it to preserve non-phosphorylation modifications
-    original_seq_str = str(original_sequence)
+    original_seq_str = original_sequence.toString()
     unmodified_seq_str = original_sequence.toUnmodifiedString()
 
     # Find all non-phosphorylation modifications in the original sequence
@@ -1133,7 +1133,7 @@ def calculate_phospho_localization_compomics_style(
                 aa = unmodified_sequence_str[idx]
                 if aa in MODIFICATION_TYPES:
                     isomer_seq.setModification(idx, MODIFICATION_TYPES[aa])
-            isomer_list = [(str(isomer_seq), 0.0)]
+            isomer_list = [(isomer_seq.toString(), 0.0)]
             return trivial_probs, isomer_list
 
         # --- Pre-calculate for Scoring ---
@@ -1318,7 +1318,7 @@ def calculate_phospho_localization_compomics_style(
 
         # Format output: return bigP for each profile for transparency
         isomer_list_out = [
-            (str(item["isomer_seq"]), item["big_p"]) for item in isomer_scores
+            (item["isomer_seq"].toString(), item["big_p"]) for item in isomer_scores
         ]
 
         return site_probabilities, isomer_list_out

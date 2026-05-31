@@ -117,6 +117,7 @@ class AScore:
 
             proforma = self.generateProFormaString_(phospho.getSequence(), site_scores)
             phospho.setMetaValue("ProForma", proforma)
+            phospho.setMetaValue("AScore_site_scores", str(site_scores))
             phospho.setMetaValue("AScore_pep_score", self.unambiguous_score_)
 
             for i, site in enumerate(sites):
@@ -241,6 +242,9 @@ class AScore:
 
         proforma = self.generateProFormaString_(phospho.getSequence(), site2score)
         phospho.setMetaValue("ProForma", proforma)
+        # Position-keyed per-site AScores for a site-level decoy-AA FLR
+        # (mirrors PhosphoRS_site_probs / Luciphor_site_scores; see #40).
+        phospho.setMetaValue("AScore_site_scores", str(site2score))
         phospho.setScore(best_Ascore)
 
         return phospho

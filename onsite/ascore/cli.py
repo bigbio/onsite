@@ -501,6 +501,8 @@ def _worker_process_pid_threaded(task):
                 meta_fields.append((f"AScore_{i}", score))
             if scored_hit.metaValueExists("ProForma"):
                 meta_fields.append(("ProForma", scored_hit.getMetaValue("ProForma")))
+            if scored_hit.metaValueExists("AScore_site_scores"):
+                meta_fields.append(("AScore_site_scores", scored_hit.getMetaValue("AScore_site_scores")))
 
             results.append({
                 "new_sequence": new_seq_str,
@@ -617,6 +619,8 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
                 meta_fields.append((f"AScore_{i}", score))
             if scored_hit.metaValueExists("ProForma"):
                 meta_fields.append(("ProForma", scored_hit.getMetaValue("ProForma")))
+            if scored_hit.metaValueExists("AScore_site_scores"):
+                meta_fields.append(("AScore_site_scores", scored_hit.getMetaValue("AScore_site_scores")))
 
             # Preserve existing ProForma
             proforma_value = None

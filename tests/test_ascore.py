@@ -94,3 +94,23 @@ def test_decoy_modification_not_dropped():
     name3 = ascore.createTheoreticalSpectra_([[4, 3, 1]], seq)[0].getName()
     assert name3.count("(PhosphoDecoy)") == 2
     assert name3.count("(Phospho)") == 1
+
+
+def test_ascore_emits_position_keyed_site_scores():
+    """AScore emits a position-keyed AScore_site_scores dict (for the unified
+    site-level decoy-AA FLR, #40). Exercised via the unambiguous branch."""
+    import ast
+
+    ascore = AScore()
+    # Single candidate S, single phospho -> unambiguous localization.
+    seq = AASequence.fromString("AS(Phospho)K")
+    hit = PeptideHit()
+    hit.setSequence(seq)
+    spectrum = MSSpectrum()
+    spectrum.set_peaks([(100.0, 1000.0), (200.0, 2000.0)])
+
+    result = ascore.compute(hit, spectrum)
+    assert result.metaValueExists("AScore_site_scores")
+    site_scores = ast.literal_eval(result.getMetaValue("AScore_site_scores"))
+    # Position-keyed by 0-based residue index; S is at index 1.
+    assert set(site_scores) == {1}
