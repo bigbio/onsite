@@ -853,14 +853,18 @@ def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_toleran
     cur = min_mz
     while cur < max_mz:
         hi = cur + WINDOW_SIZE
-        w_start, w_end = _get_window_indexes(mz_arr, cur, hi)
+        # Final window: extend the (exclusive) upper bound past max_mz so a peak
+        # sitting exactly on the boundary at max_mz is still included. `cur` still
+        # advances by WINDOW_SIZE via `hi`, so the loop terminates.
+        sel_hi = hi if hi < max_mz else max_mz + 1.0
+        w_start, w_end = _get_window_indexes(mz_arr, cur, sel_hi)
         if w_end - w_start > 0:
             if fragment_method_ppm:
                 tol_da = (cur + WINDOW_SIZE / 2.0) * fragment_tolerance / 1_000_000.0
             else:
                 tol_da = fragment_tolerance
             win_peaks = [(mz_arr[i], it_arr[i]) for i in range(w_start, w_end)]
-            theo_in_win = [[mz for mz in theo if cur <= mz < hi] for theo in isoform_theo]
+            theo_in_win = [[mz for mz in theo if cur <= mz < sel_hi] for theo in isoform_theo]
             has_sdi = _window_has_site_determining_ions(theo_in_win, tol_da)
             depth = _choose_window_depth(win_peaks, theo_in_win, has_sdi, tol_da)
             if depth > 0:

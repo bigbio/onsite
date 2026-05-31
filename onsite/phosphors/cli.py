@@ -240,9 +240,26 @@ def phosphors(
                     new_hits = []
                     for hit_src, hit_res in zip(pid_src.getHits(), res["hits"]):
                         if hit_res.get("status") != "success":
-                            # Preserve original hit with -1 score when failed
+                            # Preserve original hit with -1 score when failed, but
+                            # clear managed PhosphoRS metadata (mirroring the success
+                            # branch) so stale fields can't leak downstream.
                             failed_hit = PeptideHit(hit_src)
                             failed_hit.setScore(-1.0)
+                            for k in [
+                                "search_engine_sequence",
+                                "regular_phospho_count",
+                                "phospho_decoy_count",
+                                "PhosphoRS_pep_score",
+                                "PhosphoRS_site_probs",
+                                "PhosphoRS_site_delta",
+                                "SpecEValue_score",
+                                "ProForma",
+                            ]:
+                                if failed_hit.metaValueExists(k):
+                                    try:
+                                        failed_hit.removeMetaValue(k)
+                                    except Exception:
+                                        pass
                             new_hits.append(failed_hit)
                             continue
 
