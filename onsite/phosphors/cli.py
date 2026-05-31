@@ -666,6 +666,11 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             best_isomer = min(isomer_list, key=lambda x: x[1])
             final_score = best_isomer[1]
             new_sequence = best_isomer[0]
+            # Re-localize: write the best-scoring isomer back as the hit
+            # sequence (mirrors the threaded path at the worker apply-back).
+            # Without this, threads=1 kept the original search-engine
+            # localization while threads>1 rewrote it, diverging the FLR.
+            new_hit.setSequence(AASequence.fromString(new_sequence))
             new_hit.setScore(final_score)
             
             # Count phosphorylation sites
