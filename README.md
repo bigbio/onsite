@@ -209,6 +209,7 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | `--scoring-threshold` | 0.0 | Minimum LucXor score to report |
 | `--min-num-psms-model` | 50 | Minimum number of high-scoring PSMs required for modeling |
 | `--threads` | 1 | Number of threads for parallel processing |
+| `--seed` | 42 | RNG seed for reproducible decoy permutations / model subsampling (deterministic for the default single-threaded run) |
 | `--rt-tolerance` | 0.01 | RT tolerance used when matching spectra by retention time |
 | `--disable-split-by-charge` | False | Disable splitting PSMs by charge state for model training |
 | `--compute-all-scores` | False | Run all three algorithms and merge results |
@@ -222,28 +223,62 @@ The AScore algorithm provides phosphorylation site localization by analyzing MS/
 
 **Output Metrics:**
 
-- `AScore_pep_score`: Overall peptide score
-- `AScore_1, AScore_2, ...`: Individual site scores
-- `ProForma`: Standardized sequence notation with confidence scores
+- Hit score: the best per-site AScore (**higher = more confident**).
+- `AScore_pep_score`: overall peptide-level AScore.
+- `AScore_site_scores`: `{position: AScore}` dict, one entry per candidate site (0-based positions).
+- `AScore_1, AScore_2, ...`: per-rank individual site scores.
+- `ProForma`: standardized sequence notation with confidence scores.
+- *Typical threshold:* **AScore ≥ 13** (~99% site-level confidence; Beausoleil et al. 2006).
 
 ### PhosphoRS Algorithm
 
 The PhosphoRS algorithm implements a comprehensive approach using isomer generation, theoretical spectrum matching, and probability scoring for confident phosphorylation site assignment.
 
 **Output Metrics:**
-- Site-specific probability scores (0-100%)
-- Isomer details with sequence and score
-- Detailed confidence metrics
+- `PhosphoRS_site_probs`: `{position: probability}` on a **0–100% scale** (**higher = more confident**) — the classic phosphoRS site probability.
+- `PhosphoRS_site_delta`: `{position: Δ}` — the `−10·log10 P` gap between the best and best-alternative isoform (rank1 − rank2). Used to rank a global FLR because, unlike the probability, it does not saturate at 100%.
+- `PhosphoRS_pep_score`: peptide-level binomial probability *P* (**lower = more confident**).
+- `regular_phospho_count` / `phospho_decoy_count`: number of phospho / decoy sites placed.
+- *Typical threshold:* **site probability ≥ 75%** (or 90 / 99% for stricter sets).
 
 ### LucXor (LuciPHOr2) Algorithm
 
 LucXor implements the complete LuciPHOr2 algorithm with two-stage processing for accurate PTM localization with false localization rate (FLR) estimation.
 
 **Output Metrics:**
-- `Luciphor_delta_score`: Main localization score
-- `Luciphor_pep_score`: Peptide identification score
-- `Luciphor_global_flr`: Global false localization rate
-- `Luciphor_local_flr`: Local false localization rate
+- `Luciphor_delta_score`: main localization score (the hit score type; **higher = more confident**).
+- `Luciphor_pep_score`: per-PSM delta score.
+- `Luciphor_global_flr` / `Luciphor_local_flr`: LucXor's **native false-localization-rate** estimates per PSM (**lower = more confident**) — the only tool that emits an FLR directly.
+- `Luciphor_site_scores`: `{position: Δ}` per-site confidence derived from the permutation scores.
+- *Typical threshold:* **local FLR ≤ 0.05** (or global FLR ≤ 0.01).
+
+## Interpreting the output: PSM-FDR vs localization FLR
+
+These tools assume your input idXML is **already filtered at the PSM level** (e.g. 1% PSM-FDR). That FDR answers *"is the peptide identification correct?"* and is left untouched. Localization adds a **second, orthogonal** error axis: *"is the PTM on the right residue?"* — the **false localization rate (FLR)**. A confident identification can still carry an ambiguous site, so the two rates are independent and you typically control both.
+
+Running any tool on a 1%-PSM-FDR idXML re-localizes each hit to its best-scoring site and writes these scores:
+
+| | primary score | per-site confidence | typical cutoff | native FLR? |
+|---|---|---|---|---|
+| **AScore** | hit score = best AScore (higher = better) | `AScore_site_scores` | AScore ≥ 13 | no |
+| **PhosphoRS** | `PhosphoRS_site_probs`, 0–100% (higher = better) | `PhosphoRS_site_probs` / `PhosphoRS_site_delta` | prob ≥ 75% | no |
+| **LucXor** | `Luciphor_delta_score` (higher = better) | `Luciphor_site_scores` | `Luciphor_local_flr` ≤ 0.05 | **yes** |
+
+Positions in the per-site dicts are **0-based** indices into the unmodified peptide.
+
+**Quickest single-tool answer:** run LucXor and keep `Luciphor_local_flr ≤ 0.05` — it is the only tool that reports an FLR out of the box.
+
+### Unified decoy-amino-acid global FLR (compare tools, or get an FLR for AScore/PhosphoRS)
+
+AScore and PhosphoRS report a per-site *confidence* but no global FLR. To put all three on one comparable FLR scale, run each tool with **`--add-decoys`** (adds Alanine as a `PhosphoDecoy`; A cannot be phosphorylated, so a localization onto A is a known false one), then:
+
+```bash
+python -m onsite.decoy_flr \
+    --ascore a.idXML --phosphors p.idXML --lucxor l.idXML \
+    --q-value-threshold 0.01 --flr-threshold 0.05
+```
+
+This reads the `target_decoy` and `q-value` UserParams from your FDR-filtered idXML, re-applies the q-value cutoff, intersects the PSM set across the supplied tools, and reports the sites recovered at your global FLR threshold (decoy-amino-acid method of Ramsbottom et al. 2022; **5%** is the recommended cutoff). `--add-decoys` is only needed for this FLR estimation — for plain localization you can omit it. Any subset of `--ascore` / `--phosphors` / `--lucxor` may be passed.
 
 ## Example Results
 

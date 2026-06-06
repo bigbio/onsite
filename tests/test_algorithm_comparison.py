@@ -158,9 +158,8 @@ def filter_phosphors(peptide_data: Dict[str, Dict], q_value_threshold: float, pr
         prob_threshold: Probability threshold as percentage (e.g., 75 for 75%)
     """
     filtered = set()
-    # Convert percentage threshold to decimal
-    prob_threshold_decimal = prob_threshold / 100.0
-    
+    # prob_threshold and the stored site probabilities are both percentages (0-100)
+
     for key, data in peptide_data.items():
         q_value = data.get('q_value')
         site_probs = data.get('phosphors_site_probs', [])
@@ -183,7 +182,7 @@ def filter_phosphors(peptide_data: Dict[str, Dict], q_value_threshold: float, pr
             # Check if the top N probabilities (where N = phospho_count) all exceed threshold
             if len(sorted_probs) >= phospho_count:
                 top_n_probs = sorted_probs[:phospho_count]
-                if all(prob > prob_threshold_decimal for prob in top_n_probs):
+                if all(prob > prob_threshold for prob in top_n_probs):
                     filtered.add(key)
     
     return filtered

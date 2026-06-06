@@ -34,7 +34,6 @@ MAX_ION_CHARGE = 2  # Adjust based on typical fragmentation
 ADD_NEUTRAL_LOSSES = True  # Include neutral losses
 WINDOW_SIZE = 100.0
 MAX_DEPTH = 8
-MIN_DEPTH = 2
 
 # --- Constants ---
 LOG10_ZERO_REPLACEMENT = -100.0  # Value to use for log10(0) or very small numbers
@@ -227,92 +226,112 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
     return result
 
 
-# --- Window reduction helpers ---
-def _get_intensity_thresholds(mz: list, intensity: list, start: int, end: int) -> list:
-    """Return up to MAX_DEPTH descending unique intensity thresholds in window [start, end)."""
-    window_intensities = sorted(set(intensity[start:end]), reverse=True)
-    return window_intensities[:MAX_DEPTH]
+def _count_matched_ions(theo_mz, exp_mz_sorted, fragment_tolerance, fragment_method_ppm):
+    """Count theoretical fragment ions matched to experimental peaks.
 
+    Two corrections vs. a naive scan, both of which otherwise inflate the
+    binomial counts (and asymmetrically favor decoy isomers, which carry extra
+    phospho neutral-loss ions):
 
-def _count_peaks_above_threshold(
-    intensity: list, start: int, end: int, thr: float
-) -> int:
-    c = 0
-    for i in range(start, end):
-        if intensity[i] >= thr:
-            c += 1
-    return c
+    1. Theoretical ions falling within one tolerance window of each other are
+       merged - an experimental peak cannot distinguish them, so they must count
+       as ONE trial, not several (avoids counting the same theoretical ion
+       multiple times).
+    2. Each experimental peak is consumed by at most one theoretical ion, so a
+       single peak cannot satisfy several theoretical ions.
 
+    Args:
+        theo_mz: iterable of theoretical m/z (any order).
+        exp_mz_sorted: experimental peak m/z, ascending.
+        fragment_tolerance: match tolerance (Da, or ppm if fragment_method_ppm).
+        fragment_method_ppm: interpret tolerance as ppm.
 
-def _reduce_spectrum_by_windows(
-    exp_spectrum: MSSpectrum,
-    tol_da_for_p: float,
-    is_ppm: bool,
-    fragment_tolerance_value: float,
-) -> tuple:
+    Returns:
+        (n_expected, k_matches): unique theoretical ions, and how many matched.
     """
-    Reduce spectrum: split into WINDOW_SIZE mz windows, choose best depth between MIN_DEPTH..MAX_DEPTH
-    that minimizes bigP with p computed using window nPeaks and tolerance.
-    Returns reduced mz and intensity arrays.
-    """
-    peaks = exp_spectrum.get_peaks()
-    mz_arr = list(peaks[0])
-    it_arr = list(peaks[1])
-    if len(mz_arr) == 0:
-        return mz_arr, it_arr
-    min_mz = float(mz_arr[0])
-    max_mz = float(mz_arr[-1])
-    reduced_indexes = []
-    cur_min = min_mz
-    half_window = WINDOW_SIZE / 2.0
-    while cur_min < max_mz:
-        temp_max = cur_min + WINDOW_SIZE
-        # determine tolerance d in Da at window center if ppm
-        if is_ppm:
-            ref_mz = cur_min + half_window
-            d = ref_mz * (fragment_tolerance_value) / 1_000_000.0
+    def tol(mz):
+        return (mz * fragment_tolerance / 1_000_000.0) if fragment_method_ppm else fragment_tolerance
+
+    theo_unique = []
+    for mz in sorted(theo_mz):
+        if not theo_unique or (mz - theo_unique[-1]) > tol(mz):
+            theo_unique.append(mz)
+
+    k = 0
+    ri = 0
+    m = len(exp_mz_sorted)
+    for mz in theo_unique:
+        t = tol(mz)
+        while ri < m and exp_mz_sorted[ri] < mz - t:
+            ri += 1
+        if ri < m and exp_mz_sorted[ri] <= mz + t:
+            k += 1
+            ri += 1  # consume this experimental peak
+
+    return len(theo_unique), k
+
+
+def _isomer_phospho_positions(seq_str):
+    """0-based residue indices carrying Phospho or PhosphoDecoy in a modified
+    peptide string (e.g. 'AS(Phospho)A(PhosphoDecoy)K' -> {1, 2})."""
+    positions = set()
+    i = 0
+    pos = -1
+    while i < len(seq_str):
+        c = seq_str[i]
+        if c == "(":
+            j = seq_str.find(")", i)
+            if j == -1:
+                break
+            if seq_str[i + 1 : j] in ("Phospho", "PhosphoDecoy") and pos >= 0:
+                positions.add(pos)
+            i = j + 1
+        elif c.isalpha():
+            pos += 1
+            i += 1
         else:
-            d = tol_da_for_p
-        # window indexes [start, end)
-        # binary search could be used; linear scan ok for modest N
-        start = 0
-        while start < len(mz_arr) and mz_arr[start] < cur_min:
-            start += 1
-        end = start
-        while end < len(mz_arr) and mz_arr[end] < temp_max:
-            end += 1
-        if end - start > 0:
-            thresholds = _get_intensity_thresholds(mz_arr, it_arr, start, end)
-            if thresholds:
-                best_i = 0
-                best_bigp = 1.0
-                for depth_idx in range(1, len(thresholds) + 1):
-                    thr = thresholds[depth_idx - 1]
-                    n_peaks = _count_peaks_above_threshold(it_arr, start, end, thr)
-                    p_win = getp_style(n_peaks, WINDOW_SIZE, d)
-                    # approximate expected ions: use n_peaks as n for window selection
-                    bigp = binomial_tail_probability(
-                        max(1, min(n_peaks, 1)), n_peaks if n_peaks > 0 else 1, p_win
-                    )
-                    if bigp < best_bigp:
-                        best_bigp = bigp
-                        best_i = depth_idx - 1
-                # enforce depth bounds
-                if best_i < MIN_DEPTH - 1 and (MIN_DEPTH - 1) < len(thresholds):
-                    best_i = MIN_DEPTH - 1
-                if best_i > MAX_DEPTH - 1:
-                    best_i = MAX_DEPTH - 1
-                best_thr = thresholds[best_i]
-                window_best = [i for i in range(start, end) if it_arr[i] >= best_thr]
-                if window_best:
-                    reduced_indexes.extend(window_best)
-        cur_min = temp_max
-    if not reduced_indexes:
-        return mz_arr, it_arr
-    reduced_indexes.sort()
-    red_mz = [mz_arr[i] for i in reduced_indexes]
-    red_it = [it_arr[i] for i in reduced_indexes]
-    return red_mz, red_it
+            i += 1
+    return positions
+
+
+def site_deltas_from_isomers(isomer_list):
+    """Per-site phosphoRS peptide-score delta - phosphoRS's own ranking signal.
+
+    The phosphoRS peptide score is ``-10*log10(P_random)``; for each candidate
+    site the delta is (best score among isoforms that phosphorylate the site)
+    minus (best score among those that do not) - the rank1-vs-alternative score
+    gap that phosphoRS itself maximizes when choosing peak depth (Taus et al.
+    2011). Higher = more confident the site is phosphorylated. Unlike the
+    normalized site probability it does NOT saturate toward 0/100, so it
+    preserves the ranking resolution needed to threshold a global FLR.
+
+    Args:
+        isomer_list: list of (modified_sequence_str, P_random) over all isoforms.
+    Returns:
+        dict {residue_index: delta} (0-based); empty if no isoforms.
+    """
+    if not isomer_list:
+        return {}
+
+    _FLOOR = 1e-300  # keep -10*log10(P) finite if P_random underflowed to 0
+    parsed = []
+    sites = set()
+    for seq_str, p_random in isomer_list:
+        pep = -10.0 * math.log10(max(float(p_random), _FLOOR))
+        occ = _isomer_phospho_positions(seq_str)
+        parsed.append((occ, pep))
+        sites |= occ
+
+    deltas = {}
+    for s in sites:
+        best_with = max((pep for occ, pep in parsed if s in occ), default=None)
+        best_without = max((pep for occ, pep in parsed if s not in occ), default=None)
+        if best_with is None:
+            continue
+        # No competing isoform (single candidate) -> full score, like the per-PSM
+        # convention; otherwise the rank1-vs-best-alternative gap.
+        deltas[s] = best_with if best_without is None else (best_with - best_without)
+    return deltas
 
 
 # --- Pre-filtering (filterSpectrum) ---
@@ -424,7 +443,7 @@ def _generate_isomer_profiles(
     profiles = []
 
     # Get the original sequence string and parse it to preserve non-phosphorylation modifications
-    original_seq_str = str(original_sequence)
+    original_seq_str = original_sequence.toString()
     unmodified_seq_str = original_sequence.toUnmodifiedString()
 
     # Find all non-phosphorylation modifications in the original sequence
@@ -519,69 +538,6 @@ def _expected_fragment_mzs(
     return mzs
 
 
-def _site_determining_ions(
-    profiles: list, precursor_charge: int, add_neutral_losses: bool
-) -> tuple:
-    """Return (sdi_map, profile_to_mzs, union_mzs).
-
-    - sdi_map: mz -> set(profile_index) for ions not common to all profiles
-    - profile_to_mzs: list[set] of m/z per profile
-    - union_mzs: set of all m/z across profiles
-    """
-    site_determining_ions = {}
-    common_ions = {}
-    profile_to_mzs = []
-
-    for profile_idx, (seq, _sites) in enumerate(profiles):
-        mzs = _expected_fragment_mzs(seq, precursor_charge, add_neutral_losses)
-        # Use raw theoretical m/z (no rounding) to align with expected ions
-        profile_mzs = set(float(m) for m in mzs)
-        profile_to_mzs.append(profile_mzs)
-
-        for mz in profile_mzs:
-            if not common_ions:  # First profile
-                common_ions[mz] = {profile_idx}
-            elif mz not in common_ions:
-                # This m/z is not common to all previous profiles
-                if mz in site_determining_ions:
-                    site_determining_ions[mz].add(profile_idx)
-                else:
-                    site_determining_ions[mz] = {profile_idx}
-            else:
-                # This m/z is still common
-                common_ions[mz].add(profile_idx)
-
-        # Check if any previously common ions are no longer common
-        ions_to_remove = []
-        for mz in common_ions:
-            if mz not in profile_mzs:
-                # This ion is no longer common, move to site-determining
-                site_determining_ions[mz] = common_ions[mz]
-                ions_to_remove.append(mz)
-            else:
-                # Still common, add current profile
-                common_ions[mz].add(profile_idx)
-
-        # Remove ions that are no longer common
-        for mz in ions_to_remove:
-            del common_ions[mz]
-
-    # All remaining common ions are truly common to all profiles
-    all_mzs = set()
-    for mz_set in profile_to_mzs:
-        all_mzs.update(mz_set)
-
-    return site_determining_ions, profile_to_mzs, all_mzs
-
-
-def _window_intensity_thresholds(
-    filtered_spec: MSSpectrum, start: int, end: int
-) -> list:
-    peaks = filtered_spec.get_peaks()
-    intens = sorted(set(float(peaks[1][i]) for i in range(start, end)), reverse=True)
-    return intens[:MAX_DEPTH]
-
-
 def _get_window_indexes(mz_arr: list, start_mz: float, end_mz: float) -> tuple:
     start = 0
     while start < len(mz_arr) and mz_arr[start] < start_mz:
@@ -590,226 +546,6 @@ def _get_window_indexes(mz_arr: list, start_mz: float, end_mz: float) -> tuple:
     while end < len(mz_arr) and mz_arr[end] < end_mz:
         end += 1
     return start, end
-
-
-def _reduce_by_delta_selection(
-    filtered_spec: MSSpectrum,
-    profiles: list,
-    fragment_tolerance: float,
-    fragment_method_ppm: bool,
-) -> MSSpectrum:
-    """Reduce spectrum using delta-based depth selection with site-determining ions across profiles."""
-    peaks = filtered_spec.get_peaks()
-    if not peaks or len(peaks[0]) == 0:
-        return filtered_spec
-    mz_arr = list(peaks[0])
-    it_arr = list(peaks[1])
-    min_mz = float(mz_arr[0])
-    max_mz = float(mz_arr[-1])
-
-    # precursor charge estimation
-    if filtered_spec.getPrecursors():
-        precursor_charge = filtered_spec.getPrecursors()[0].getCharge() or 2
-    else:
-        precursor_charge = 2
-
-    sdi_map, profile_to_mzs, union_mzs = _site_determining_ions(
-        profiles, precursor_charge, ADD_NEUTRAL_LOSSES
-    )
-    reduced_idx = []
-    cur_min = min_mz
-    half_win = WINDOW_SIZE / 2.0
-
-    while cur_min < max_mz:
-        temp_max = cur_min + WINDOW_SIZE
-        # tolerance in Da at window center if ppm
-        if fragment_method_ppm:
-            ref_mz = cur_min + half_win
-            d = ref_mz * fragment_tolerance / 1_000_000.0
-        else:
-            d = fragment_tolerance
-
-        w_start, w_end = _get_window_indexes(mz_arr, cur_min, temp_max)
-        if w_end - w_start > 0:
-            thresholds = _window_intensity_thresholds(filtered_spec, w_start, w_end)
-            if thresholds:
-                # Delta selection logic
-                deltas = []
-                n_deltas = 0
-
-                for depth_idx in range(1, len(thresholds) + 1):
-                    thr = thresholds[depth_idx - 1]
-                    n_peaks = _count_peaks_above_threshold(it_arr, w_start, w_end, thr)
-                    p_win = getp_style(n_peaks, WINDOW_SIZE, d)
-
-                    # Check if there are site-determining ions in this window
-                    profile_to_sdi_mz = {}
-                    for mz_rounded, present_profiles in sdi_map.items():
-                        mz_val = float(mz_rounded)
-                        # Boundaries: (ionMz > minMz) && (ionMz <= tempMax)
-                        if (mz_val > cur_min) and (mz_val <= temp_max):
-                            for prof_idx in present_profiles:
-                                if prof_idx not in profile_to_sdi_mz:
-                                    profile_to_sdi_mz[prof_idx] = set()
-                                profile_to_sdi_mz[prof_idx].add(mz_val)
-
-                    if profile_to_sdi_mz:
-                        # Branch: site-determining ions present
-                        big_ps = []
-                        scored_sets = []
-                        profile_with_no_sdi_scored = False
-
-                        for prof_idx, (_seq, _sites) in enumerate(profiles):
-                            profile_sdi = profile_to_sdi_mz.get(prof_idx, set())
-                            profile_theo_mzs = (
-                                profile_to_mzs[prof_idx]
-                                if prof_idx < len(profile_to_mzs)
-                                else set()
-                            )
-
-                            if not profile_sdi:
-                                if not profile_with_no_sdi_scored:
-                                    profile_with_no_sdi_scored = True
-                                    # Count matches for profiles without SDIs using all expected ions for the profile
-                                    k = 0
-                                    for mz_theo in profile_theo_mzs:
-                                        if (mz_theo > cur_min) and (
-                                            mz_theo <= temp_max
-                                        ):
-                                            min_b = mz_theo - d
-                                            max_b = mz_theo + d
-                                            for i_idx in range(w_start, w_end):
-                                                if it_arr[i_idx] >= thr:
-                                                    mz_exp = mz_arr[i_idx]
-                                                    if (mz_exp >= min_b) and (
-                                                        mz_exp < max_b
-                                                    ):
-                                                        k += 1
-                                                        break
-                                    big_p = binomial_tail_probability(k, n_peaks, p_win)
-                                    big_ps.append(big_p)
-                            else:
-                                # Check if this SDI set was already scored
-                                already_scored = False
-                                for scored_set in scored_sets:
-                                    if profile_sdi == scored_set:
-                                        already_scored = True
-                                        break
-
-                                if not already_scored:
-                                    scored_sets.append(profile_sdi)
-                                    # Count matches for this profile using ALL matched fragments (not only SDIs)
-                                    k = 0
-                                    for mz_theo in profile_theo_mzs:
-                                        if (mz_theo > cur_min) and (
-                                            mz_theo <= temp_max
-                                        ):
-                                            min_b = mz_theo - d
-                                            max_b = mz_theo + d
-                                            for i_idx in range(w_start, w_end):
-                                                if it_arr[i_idx] >= thr:
-                                                    mz_exp = mz_arr[i_idx]
-                                                    if (mz_exp >= min_b) and (
-                                                        mz_exp < max_b
-                                                    ):
-                                                        k += 1
-                                                        break
-                                    big_p = binomial_tail_probability(k, n_peaks, p_win)
-                                    big_ps.append(big_p)
-
-                        if len(big_ps) > 1:
-                            big_ps.sort()
-                            current_deltas = []
-                            for j in range(len(big_ps) - 1):
-                                pj = big_ps[j]
-                                pj1 = big_ps[j + 1]
-                                if pj1 > 0:
-                                    delta = pj / pj1
-                                    current_deltas.append(delta)
-
-                            if len(current_deltas) > n_deltas:
-                                n_deltas = len(current_deltas)
-                            deltas.append(current_deltas)
-                        else:
-                            deltas.append([])
-                    else:
-                        # Branch: no site-determining ions present in this window
-                        # Select depth that minimizes bigP across depths
-                        pass
-
-                # If no SDIs for the entire window, perform best depth selection by minimal bigP
-                if all(len(d) == 0 for d in deltas):
-                    best_i = 0
-                    best_bigp = 1.0
-                    for depth_idx in range(1, len(thresholds) + 1):
-                        thr = thresholds[depth_idx - 1]
-                        n_peaks = _count_peaks_above_threshold(
-                            it_arr, w_start, w_end, thr
-                        )
-                        p_win = getp_style(n_peaks, WINDOW_SIZE, d)
-                        # Approximate k by matching union of theoretical ions across profiles within tolerance
-                        k = 0
-                        for mz_theo in union_mzs:
-                            if (mz_theo > cur_min) and (mz_theo <= temp_max):
-                                min_b = mz_theo - d
-                                max_b = mz_theo + d
-                                for i_idx in range(w_start, w_end):
-                                    if it_arr[i_idx] >= thr:
-                                        mz_exp = mz_arr[i_idx]
-                                        if (mz_exp >= min_b) and (mz_exp < max_b):
-                                            k += 1
-                                            break
-                        big_p = binomial_tail_probability(
-                            k, n_peaks if n_peaks > 0 else 1, p_win
-                        )
-                        if big_p < best_bigp:
-                            best_bigp = big_p
-                            best_i = depth_idx - 1
-
-                    # Enforce depth bounds
-                    if best_i < MIN_DEPTH - 1 and (MIN_DEPTH - 1) < len(thresholds):
-                        best_i = MIN_DEPTH - 1
-                    if best_i > MAX_DEPTH - 1:
-                        best_i = MAX_DEPTH - 1
-
-                    best_thr = thresholds[best_i]
-                    window_best = [
-                        i for i in range(w_start, w_end) if it_arr[i] >= best_thr
-                    ]
-                    if window_best:
-                        reduced_idx.extend(window_best)
-                else:
-                    # Find best depth using delta selection
-                    best_i = 0
-                    largest_delta = 0.0
-                    for j in range(n_deltas):
-                        if largest_delta == 0.0:
-                            for i in range(len(deltas)):
-                                temp_deltas = deltas[i]
-                                if (
-                                    j < len(temp_deltas)
-                                    and temp_deltas[j] > largest_delta
-                                ):
-                                    largest_delta = temp_deltas[j]
-                                    best_i = i
-                    # Enforce depth bounds
-                    if best_i < MIN_DEPTH - 1 and (MIN_DEPTH - 1) < len(thresholds):
-                        best_i = MIN_DEPTH - 1
-                    if best_i > MAX_DEPTH - 1:
-                        best_i = MAX_DEPTH - 1
-                    best_thr = thresholds[best_i]
-                    window_best = [
-                        i for i in range(w_start, w_end) if it_arr[i] >= best_thr
-                    ]
-                    if window_best:
-                        reduced_idx.extend(window_best)
-
-        cur_min = temp_max
-
-    if not reduced_idx:
-        return filtered_spec
-    reduced_idx.sort()
-    return _copy_spectrum_subset(filtered_spec, reduced_idx)
 
 
 # --- Helper: Calculate Occurrence Probability "p" ---
@@ -981,6 +717,171 @@ def calculate_phosphors_score(
         return -LOG10_ZERO_REPLACEMENT
 
 
+# --- phosphoRS dynamic per-window peak-depth optimization (Taus et al. 2011, ---
+# --- pseudocode sections 9-12): per 100 m/z window, choose the peak depth   ---
+# --- that maximizes the separation between the best and second-best isoform.---
+# Faithful, tested reimplementation replacing the buggy _reduce_by_delta_selection
+# (whose depth-selection ratio was inverted and used the experimental peak count
+# as the binomial n). See bigbio/onsite#40.
+
+ENABLE_PEAK_DEPTH_OPTIMIZATION = True  # if False, score against the filtered spectrum directly
+
+
+def _isoform_theo_mz(spec_gen, seq_profile, precursor_charge):
+    """Sorted theoretical fragment-ion m/z for one isoform, using a pre-configured
+    TheoreticalSpectrumGenerator (same ion types / losses as the scoring step)."""
+    spec = MSSpectrum()
+    try:
+        spec_gen.getSpectrum(spec, seq_profile, 1, max(1, int(precursor_charge)))
+    except Exception:
+        return []
+    if spec.size() == 0:
+        return []
+    return sorted(float(m) for m in spec.get_peaks()[0])
+
+
+def _window_has_site_determining_ions(isoform_theo_in_window, tol_da):
+    """Pseudocode section 10: True if the isoforms differ in their (tolerance-binned)
+    theoretical ion m/z within this window, i.e. the window can distinguish them."""
+    if len(isoform_theo_in_window) < 2 or tol_da <= 0:
+        return False
+
+    def binned(theo):
+        return frozenset(int(round(mz / tol_da)) for mz in theo)
+
+    sets = [binned(t) for t in isoform_theo_in_window]
+    return any(s != sets[0] for s in sets[1:])
+
+
+def _isoform_peptide_scores(selected_mz_sorted, isoform_theo_in_window, tol_da, window_width):
+    """phosphoRS peptide score (-10*log10 P_random) for each isoform against the
+    selected peaks of one window. n = theoretical ions in window, k = matched,
+    p = getp_style(N, window, tol) with N = number of selected peaks (section 9)."""
+    n_sel = len(selected_mz_sorted)
+    p = getp_style(n_sel, window_width, tol_da)
+    scores = []
+    for theo in isoform_theo_in_window:
+        if not theo:
+            scores.append(0.0)
+            continue
+        # consume-once matcher (Da tolerance within the window)
+        n, k = _count_matched_ions(theo, selected_mz_sorted, tol_da, False)
+        big_p = binomial_tail_probability(k, n if n > 0 else 1, p)
+        scores.append(-10.0 * math.log10(max(big_p, 1e-300)))
+    return scores
+
+
+def _choose_window_depth(window_peaks, isoform_theo_in_window, has_sdi, tol_da,
+                         window_width=WINDOW_SIZE, max_depth=MAX_DEPTH):
+    """Pseudocode sections 9 & 11: pick the peak depth (1..max_depth) for one window.
+
+    For each depth, score every isoform against the top-`depth` most intense peaks
+    and rank them. When the window holds site-determining ions, choose the depth
+    that maximizes rank1-rank2 (then rank1-rank3, rank1-rank4, then the best score)
+    -- i.e. the depth that best SEPARATES isoforms. Otherwise maximize the best
+    absolute score. Ties prefer the smaller depth (fewer noisy peaks).
+
+    Args:
+        window_peaks: list of (mz, intensity) in the window (any order).
+        isoform_theo_in_window: per-isoform list of theoretical m/z within the window.
+    Returns:
+        chosen depth (int); 0 if the window has no peaks.
+    """
+    if not window_peaks:
+        return 0
+    by_intensity = sorted(window_peaks, key=lambda pk: pk[1], reverse=True)
+    max_d = min(max_depth, len(by_intensity))
+
+    best_depth = 0
+    best_crit = None
+    for depth in range(1, max_d + 1):
+        selected = sorted(mz for mz, _it in by_intensity[:depth])
+        scores = sorted(
+            _isoform_peptide_scores(selected, isoform_theo_in_window, tol_da, window_width),
+            reverse=True,
+        )
+        r1 = scores[0] if len(scores) > 0 else 0.0
+        r2 = scores[1] if len(scores) > 1 else 0.0
+        r3 = scores[2] if len(scores) > 2 else 0.0
+        r4 = scores[3] if len(scores) > 3 else 0.0
+        if has_sdi:
+            crit = (r1 - r2, r1 - r3, r1 - r4, r1)   # maximize isoform separation
+        else:
+            crit = (r1, r1 - r2, r1 - r3, r1 - r4)   # maximize best absolute score
+        # strict ">" so equal criteria keep the earlier (smaller) depth
+        if best_crit is None or crit > best_crit:
+            best_crit = crit
+            best_depth = depth
+    return best_depth
+
+
+def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_tolerance,
+                                       fragment_method_ppm, add_neutral_losses):
+    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window,
+    the top-`depth` peaks where `depth` is chosen to best separate the isoforms.
+    Returns the reduced MSSpectrum (or the input unchanged if it has no peaks)."""
+    peaks = filtered_spec.get_peaks()
+    if not peaks or len(peaks[0]) == 0:
+        return filtered_spec
+
+    # work on m/z-sorted arrays (the matcher and windowing require ascending m/z)
+    order = sorted(range(len(peaks[0])), key=lambda i: peaks[0][i])
+    mz_arr = [float(peaks[0][i]) for i in order]
+    it_arr = [float(peaks[1][i]) for i in order]
+    min_mz, max_mz = mz_arr[0], mz_arr[-1]
+
+    precursor_charge = 2
+    if filtered_spec.getPrecursors():
+        precursor_charge = filtered_spec.getPrecursors()[0].getCharge() or 2
+
+    # one generator, matching the scoring step's ion model (b/y + optional losses)
+    spec_gen = TheoreticalSpectrumGenerator()
+    pr = spec_gen.getParameters()
+    pr.setValue("add_metainfo", "false")
+    pr.setValue("add_precursor_peaks", "false")
+    pr.setValue("add_losses", "true" if add_neutral_losses else "false")
+    for ion_type in ["a", "b", "c", "x", "y", "z"]:
+        pr.setValue(f"add_{ion_type}_ions", "true" if ion_type in ("b", "y") else "false")
+    spec_gen.setParameters(pr)
+
+    isoform_theo = [
+        _isoform_theo_mz(spec_gen, seq_profile, precursor_charge)
+        for seq_profile, _sites in profiles
+    ]
+
+    keep = []
+    cur = min_mz
+    while cur < max_mz:
+        hi = cur + WINDOW_SIZE
+        # Final window: extend the (exclusive) upper bound past max_mz so a peak
+        # sitting exactly on the boundary at max_mz is still included. `cur` still
+        # advances by WINDOW_SIZE via `hi`, so the loop terminates.
+        sel_hi = hi if hi < max_mz else max_mz + 1.0
+        w_start, w_end = _get_window_indexes(mz_arr, cur, sel_hi)
+        if w_end - w_start > 0:
+            if fragment_method_ppm:
+                tol_da = (cur + WINDOW_SIZE / 2.0) * fragment_tolerance / 1_000_000.0
+            else:
+                tol_da = fragment_tolerance
+            win_peaks = [(mz_arr[i], it_arr[i]) for i in range(w_start, w_end)]
+            theo_in_win = [[mz for mz in theo if cur <= mz < sel_hi] for theo in isoform_theo]
+            has_sdi = _window_has_site_determining_ions(theo_in_win, tol_da)
+            depth = _choose_window_depth(win_peaks, theo_in_win, has_sdi, tol_da)
+            if depth > 0:
+                top = sorted(
+                    range(w_start, w_end), key=lambda i: it_arr[i], reverse=True
+                )[:depth]
+                keep.extend(top)
+        cur = hi
+
+    if not keep:
+        return filtered_spec
+    keep = sorted(set(keep))
+    # map back to original (unsorted) indices for _copy_spectrum_subset
+    original_idx = sorted(order[i] for i in keep)
+    return _copy_spectrum_subset(filtered_spec, original_idx)
+
+
 # --- Main PhosphoRS-like Localization Function ---
 def calculate_phospho_localization_compomics_style(
     peptide_hit: PeptideHit,
@@ -1133,7 +1034,7 @@ def calculate_phospho_localization_compomics_style(
                 aa = unmodified_sequence_str[idx]
                 if aa in MODIFICATION_TYPES:
                     isomer_seq.setModification(idx, MODIFICATION_TYPES[aa])
-            isomer_list = [(str(isomer_seq), 0.0)]
+            isomer_list = [(isomer_seq.toString(), 0.0)]
             return trivial_probs, isomer_list
 
         # --- Pre-calculate for Scoring ---
@@ -1188,8 +1089,14 @@ def calculate_phospho_localization_compomics_style(
             print("Warning: No isomer profiles generated.")
             return None, None
 
-        # 3) Use filtered spectrum directly (delta-based reduction disabled)
-        phospho_rs_spec = filtered_spec
+        # 3) Dynamic per-window peak-depth optimization (phosphoRS, sections 9-12).
+        if ENABLE_PEAK_DEPTH_OPTIMIZATION:
+            phospho_rs_spec = _reduce_by_peak_depth_optimization(
+                filtered_spec, profiles, fragment_tolerance,
+                fragment_method_ppm, add_neutral_losses,
+            )
+        else:
+            phospho_rs_spec = filtered_spec
 
         # --- Generate Theoretical Spectra and Score Against Reduced Spectrum ---
         spec_gen = TheoreticalSpectrumGenerator()
@@ -1218,10 +1125,16 @@ def calculate_phospho_localization_compomics_style(
         if not red_peaks or len(red_peaks[0]) == 0:
             print("Warning: Reduced spectrum contains no peaks.")
             return None, None
-        red_mz_arr = list(red_peaks[0])
+        red_mz_arr = sorted(red_peaks[0])  # ascending: required by _count_matched_ions
 
-        # p uses number of peaks and window width of reduced spectrum, tolerance in Da
-        w = float(red_mz_arr[-1] - red_mz_arr[0]) if len(red_mz_arr) > 1 else float(0.0)
+        # Random single-ion match probability p = N*d/w (phosphoRS, section 13):
+        #   N = number of extracted peaks, d = fragment tolerance,
+        #   w = FULL m/z range of the MS/MS spectrum (NOT the extracted-peak span).
+        full_mz = spectrum.get_peaks()[0]
+        if full_mz is not None and len(full_mz) > 1:
+            w = float(np.max(full_mz) - np.min(full_mz))
+        else:
+            w = float(red_mz_arr[-1] - red_mz_arr[0]) if len(red_mz_arr) > 1 else 0.0
         n_exp_peaks = int(len(red_mz_arr))
         p_calc = getp_style(n_exp_peaks, w, tolerance_da_for_p)
 
@@ -1254,29 +1167,13 @@ def calculate_phospho_localization_compomics_style(
             except Exception:
                 pass
             theo_mz = [theo_mz_all[i] for i in theo_keep_idx]
-            n_expected = len(theo_mz)
 
-            # Count matches k using reduced spectrum and tolerance
-            k_matches = 0
-            red_len = len(red_mz_arr)
-            red_idx = 0
-            for mz_theo in theo_mz:
-                tol_da = (
-                    (mz_theo * fragment_tolerance / 1_000_000.0)
-                    if fragment_method_ppm
-                    else fragment_tolerance
-                )
-                min_b = mz_theo - tol_da
-                max_b = mz_theo + tol_da
-                while red_idx < red_len and red_mz_arr[red_idx] < min_b:
-                    red_idx += 1
-                cur_idx = red_idx
-                matched = False
-                while cur_idx < red_len and red_mz_arr[cur_idx] < max_b:
-                    matched = True
-                    break
-                if matched:
-                    k_matches += 1
+            # Count unique theoretical ions and matches, merging indistinguishable
+            # theoretical ions and consuming each experimental peak at most once
+            # (red_mz_arr is ascending; see w/n_exp_peaks above).
+            n_expected, k_matches = _count_matched_ions(
+                theo_mz, red_mz_arr, fragment_tolerance, fragment_method_ppm
+            )
 
             big_p = binomial_tail_probability(
                 k_matches, n_expected if n_expected > 0 else 1, p_calc
@@ -1318,7 +1215,7 @@ def calculate_phospho_localization_compomics_style(
 
         # Format output: return bigP for each profile for transparency
         isomer_list_out = [
-            (str(item["isomer_seq"]), item["big_p"]) for item in isomer_scores
+            (item["isomer_seq"].toString(), item["big_p"]) for item in isomer_scores
         ]
 
         return site_probabilities, isomer_list_out

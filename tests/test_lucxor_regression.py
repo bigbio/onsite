@@ -577,3 +577,99 @@ main()
             mean1, mean2 = np.mean(s1[mask]), np.mean(s2[mask])
             rel_diff = abs(mean1 - mean2) / max(mean1, mean2)
             assert rel_diff < 0.01, f"Mean scores differ by {rel_diff*100:.2f}%"
+
+
+class TestPhosphoDecoyAlanine:
+    """Decoy-amino-acid (PhosphoDecoy on Alanine) must compete fairly.
+
+    Regression for bigbio/onsite#40: in the production scoring path a
+    PhosphoDecoy-A site is encoded as lowercase 'a', which was recognized by
+    neither the phospho branch (S/T/Y) nor the native-decoy branch
+    (DECOY_AA_MAP). It was therefore scored as the unmodified backbone (no
+    +79.966) and could not be serialized to (PhosphoDecoy) in the output.
+    """
+
+    def _bare_psm(self):
+        from onsite.lucxor.psm import PSM
+
+        return PSM.__new__(PSM)  # the parsers/formatter only use the `perm` arg
+
+    def test_decoy_a_is_a_real_phospho_site(self):
+        psm = self._bare_psm()
+        # PhosphoDecoy A at index 6
+        phospho_pos, decoy_pos, is_decoy = psm._get_mod_positions_from_perm(
+            "ALLSSSaVLYK"
+        )
+        assert phospho_pos == [6], "decoy-A must be a phospho-mass-bearing position"
+        assert decoy_pos == []
+        assert is_decoy is False, "decoy-A is a target permutation, not a native decoy"
+
+    def test_decoy_a_carries_phospho_mass(self):
+        from onsite.lucxor.constants import PHOSPHO_MOD_MASS
+
+        psm = self._bare_psm()
+        assert psm._get_mod_map("ALLSSSaVLYK") == {6: PHOSPHO_MOD_MASS}
+
+    def test_decoy_a_serializes_and_parses(self):
+        from pyopenms import AASequence
+
+        psm = self._bare_psm()
+        std = psm.convert_sequence_to_standard_format("ALLSSSaVLYK")
+        assert std == "ALLSSSA(PhosphoDecoy)VLYK"
+        # Previously this threw and the output silently kept the input sequence.
+        assert AASequence.fromString(std).toString() == "ALLSSSA(PhosphoDecoy)VLYK"
+
+    def test_sty_and_mixed_paths_unchanged(self):
+        psm = self._bare_psm()
+        # Pure S-phospho path is unaffected
+        assert psm._get_mod_positions_from_perm("ALLsSSAVLYK") == ([3], [], False)
+        assert (
+            psm.convert_sequence_to_standard_format("ALLsSSAVLYK")
+            == "ALLS(Phospho)SSAVLYK"
+        )
+        # S-phospho + A-decoy together
+        phospho_pos, _, is_decoy = psm._get_mod_positions_from_perm("aLLsSSAVLYK")
+        assert phospho_pos == [0, 3] and is_decoy is False
+
+
+class TestLucXorSiteScores:
+    """Per-site localization scores derived from permutation scores.
+
+    For bigbio/onsite#40: LuciPHOr2 is natively per-PSM. get_site_scores()
+    derives a per-site delta (best-with minus best-without) from the already
+    computed real-permutation scores so a site-level decoy-AA FLR can rank
+    individual sites. Higher = more confident.
+    """
+
+    def _psm_with_perms(self, perm_scores):
+        from onsite.lucxor.psm import PSM
+
+        psm = PSM.__new__(PSM)
+        psm.pos_permutation_score_map = dict(perm_scores)
+        return psm
+
+    def test_ambiguous_sites_ranked_by_delta(self):
+        # 3 candidate sites S@3 / T@4 / Y@5, one phospho; S clearly preferred.
+        psm = self._psm_with_perms(
+            {"PEPsTYK": 10.0, "PEPStYK": 4.0, "PEPSTyK": 1.0}
+        )
+        ss = psm.get_site_scores()
+        assert ss[3] == 6.0  # 10 - max(4, 1)
+        assert ss[4] == -6.0  # 4 - 10
+        assert ss[5] == -9.0  # 1 - 10
+        assert max(ss, key=ss.get) == 3  # winning site is most confident
+
+    def test_decoy_a_site_is_rankable(self):
+        # Decoy A@0 competes with S@3; both sites get a score.
+        psm = self._psm_with_perms({"aEPSK": 2.0, "AEPsK": 9.0})
+        ss = psm.get_site_scores()
+        assert set(ss) == {0, 3}
+        assert ss[0] == -7.0 and ss[3] == 7.0
+
+    def test_unambiguous_site_gets_top_score(self):
+        # Single candidate / single phospho: no alternative -> top score.
+        psm = self._psm_with_perms({"PEPsK": 8.0})
+        assert psm.get_site_scores() == {3: 8.0}
+
+    def test_no_permutations_returns_empty(self):
+        assert self._psm_with_perms({}).get_site_scores() == {}

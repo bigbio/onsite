@@ -237,6 +237,64 @@ def all(
         sys.exit(1)
 
 
+def _join_psms_by_ref(ascore_pep_ids, phosphors_pep_ids, lucxor_pep_ids):
+    """
+    Match PeptideIdentifications across the three tools by spectrum_reference.
+
+    Merging by list position is unsafe: the tools drop/reorder PSMs
+    independently (LucXor keepNBestHits / spectrum-miss / min-PSM abort; AScore
+    error-drops), so a single drop shifts every later index and would fuse
+    scores from different peptides.
+
+    Returns (triples, stats), where triples is a list of
+    (ascore_pid, phosphors_pid, lucxor_pid) for spectra present in ALL three
+    tools — in LucXor order, with the unmodified backbone verified identical —
+    and stats reports the per-tool exclusions.
+    """
+    def by_ref(pep_ids):
+        d = {}
+        for pid in pep_ids:
+            if pid.metaValueExists("spectrum_reference"):
+                d[pid.getMetaValue("spectrum_reference")] = pid
+        return d
+
+    a_map, p_map, l_map = (
+        by_ref(ascore_pep_ids),
+        by_ref(phosphors_pep_ids),
+        by_ref(lucxor_pep_ids),
+    )
+    common = set(a_map) & set(p_map) & set(l_map)
+
+    def unmod(pid):
+        hits = pid.getHits()
+        return hits[0].getSequence().toUnmodifiedString() if hits else None
+
+    triples = []
+    seen = set()
+    seq_mismatch = 0
+    for lpid in lucxor_pep_ids:  # preserve LucXor order
+        if not lpid.metaValueExists("spectrum_reference"):
+            continue
+        ref = lpid.getMetaValue("spectrum_reference")
+        if ref not in common or ref in seen:
+            continue
+        seen.add(ref)
+        apid, ppid = a_map[ref], p_map[ref]
+        if not (unmod(apid) == unmod(ppid) == unmod(lpid)):
+            seq_mismatch += 1
+            continue
+        triples.append((apid, ppid, lpid))
+
+    stats = {
+        "ascore_dropped": len(a_map) - len(common),
+        "phosphors_dropped": len(p_map) - len(common),
+        "lucxor_dropped": len(l_map) - len(common),
+        "seq_mismatch": seq_mismatch,
+        "merged": len(triples),
+    }
+    return triples, stats
+
+
 def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_file):
     """
     Merge results from all three algorithms into a single idXML file.
@@ -256,20 +314,22 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
     IdXMLFile().load(phosphors_file, phosphors_prot_ids, phosphors_pep_ids)
     IdXMLFile().load(lucxor_file, lucxor_prot_ids, lucxor_pep_ids)
     
-    if len(ascore_pep_ids) != len(phosphors_pep_ids) or len(ascore_pep_ids) != len(lucxor_pep_ids):
-        click.echo(f"Warning: Different number of peptide IDs in results:")
-        click.echo(f"  AScore: {len(ascore_pep_ids)}")
-        click.echo(f"  PhosphoRS: {len(phosphors_pep_ids)}")
-        click.echo(f"  LucXor: {len(lucxor_pep_ids)}")
-    
-    # Create merged results
-    merged_pep_ids = []
-    
-    for i in range(min(len(ascore_pep_ids), len(phosphors_pep_ids), len(lucxor_pep_ids))):
-        ascore_pid = ascore_pep_ids[i]
-        phosphors_pid = phosphors_pep_ids[i]
-        lucxor_pid = lucxor_pep_ids[i]
-        
+    # Match PSMs across tools by spectrum_reference (NOT list position).
+    triples, stats = _join_psms_by_ref(ascore_pep_ids, phosphors_pep_ids, lucxor_pep_ids)
+    for tool in ("ascore", "phosphors", "lucxor"):
+        if stats[f"{tool}_dropped"]:
+            click.echo(
+                f"  Note: {stats[f'{tool}_dropped']} {tool} PSM(s) not present in all tools; excluded from merge"
+            )
+    if stats["seq_mismatch"]:
+        click.echo(
+            f"  Warning: {stats['seq_mismatch']} PSM(s) skipped due to backbone-sequence mismatch across tools"
+        )
+
+    # Create merged results (typed container required by IdXMLFile().store)
+    merged_pep_ids = PeptideIdentificationList()
+
+    for ascore_pid, phosphors_pid, lucxor_pid in triples:
         # Create new PeptideIdentification based on LucXor result (as it has FLR)
         merged_pid = PeptideIdentification(lucxor_pid)
         merged_pid.setScoreType("onsite_combined_score")
@@ -344,7 +404,7 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
             merged_hits.append(merged_hit)
         
         merged_pid.setHits(merged_hits)
-        merged_pep_ids.append(merged_pid)
+        merged_pep_ids.push_back(merged_pid)
     
     # Save merged results
     IdXMLFile().store(output_file, lucxor_prot_ids, merged_pep_ids)

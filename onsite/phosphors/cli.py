@@ -11,7 +11,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import click
 from pyopenms import *
 
-from .phosphors import calculate_phospho_localization_compomics_style
+from .phosphors import (
+    calculate_phospho_localization_compomics_style,
+    site_deltas_from_isomers,
+)
 
 
 @click.command()
@@ -237,10 +240,9 @@ def phosphors(
                     new_hits = []
                     for hit_src, hit_res in zip(pid_src.getHits(), res["hits"]):
                         if hit_res.get("status") != "success":
-                            # Preserve original hit with -1 score when failed
-                            failed_hit = PeptideHit(hit_src)
-                            failed_hit.setScore(-1.0)
-                            new_hits.append(failed_hit)
+                            # Preserve original hit with -1 score when failed,
+                            # clearing managed PhosphoRS metadata.
+                            new_hits.append(make_unscored_hit(hit_src))
                             continue
 
                         new_hit = PeptideHit(hit_src)
@@ -254,6 +256,7 @@ def phosphors(
                             "phospho_decoy_count",
                             "PhosphoRS_pep_score",
                             "PhosphoRS_site_probs",
+                            "PhosphoRS_site_delta",
                             "SpecEValue_score",
                         ]:
                             if new_hit.metaValueExists(k):
@@ -362,6 +365,8 @@ def save_identifications(out_file, protein_ids, peptide_ids):
                     hit.setMetaValue("PhosphoRS_pep_score", float(hit.getScore()))
                 if not hit.metaValueExists("PhosphoRS_site_probs"):
                     hit.setMetaValue("PhosphoRS_site_probs", "{}")
+                if not hit.metaValueExists("PhosphoRS_site_delta"):
+                    hit.setMetaValue("PhosphoRS_site_delta", "{}")
                 if not hit.metaValueExists("SpecEValue_score") and hit.metaValueExists(
                     "MS:1002052"
                 ):
@@ -466,6 +471,58 @@ def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
     return best_match
 
 
+# Managed PhosphoRS metadata keys, written on scored hits and stripped from
+# hits PhosphoRS does not score (so stale values can't leak downstream).
+_MANAGED_PHOSPHORS_METAS = (
+    "search_engine_sequence",
+    "regular_phospho_count",
+    "phospho_decoy_count",
+    "PhosphoRS_pep_score",
+    "PhosphoRS_site_probs",
+    "PhosphoRS_site_delta",
+    "SpecEValue_score",
+    "ProForma",
+)
+
+
+def make_unscored_hit(hit_src):
+    """Build the output hit for a peptide PhosphoRS does not score (no phospho
+    site, or scoring returned no result): the original hit with score -1 and
+    all managed PhosphoRS metadata removed.
+
+    Both the serial (threads=1) and threaded (threads>1) paths route their
+    skip branches through this so the two produce byte-identical output.
+    """
+    h = PeptideHit(hit_src)
+    h.setScore(-1.0)
+    for k in _MANAGED_PHOSPHORS_METAS:
+        if h.metaValueExists(k):
+            try:
+                h.removeMetaValue(k)
+            except Exception:
+                pass
+    return h
+
+
+def _has_localizable_phospho(seq_str):
+    """True if the (normalized) sequence carries an explicit (Phospho)/
+    (PhosphoDecoy) on a localizable residue (S/T/Y/A).
+
+    Both the serial (threads=1) and threaded (threads>1) paths gate on this
+    BEFORE calling the scorer, so they skip exactly the same hits. Without a
+    shared gate the threaded worker would fall through to the scorer's
+    mass-based modification inference (phosphors.py: abs_tol=0.1 Da around the
+    phospho mass) and could (mis)score a non-phospho modification that is
+    near-isobaric with phospho (e.g. Sulfation, +79.9568, 0.0095 Da away) which
+    the serial path skips - diverging threads=1 vs threads>1 output. See the
+    PR #41 review (bigbio/onsite#40).
+    """
+    for aa in ("S", "T", "Y", "A"):
+        if f"{aa}(Phospho)" in seq_str or f"{aa}(PhosphoDecoy)" in seq_str:
+            return True
+    return False
+
+
 # ----------------------- Threading worker utilities -----------------------
 # Note: Using ThreadPoolExecutor instead of ProcessPoolExecutor allows threads
 # to share the spectrum data (exp object) directly without reloading the file.
@@ -508,6 +565,13 @@ def _worker_process_pid_threaded(task):
             if hit_info.get("proforma") is not None:
                 hit.setMetaValue("ProForma", hit_info["proforma"])
 
+            # Same localizable-phospho gate as the serial path, so the two paths
+            # skip identical hits (the rebuild routes "no_result" through
+            # make_unscored_hit, mirroring the serial make_unscored_hit branch).
+            if not _has_localizable_phospho(seq.toString()):
+                results.append({"status": "no_result"})
+                continue
+
             site_probs, isomer_list = calculate_phospho_localization_compomics_style(
                 hit,
                 spectrum,
@@ -537,6 +601,9 @@ def _worker_process_pid_threaded(task):
             meta_fields.append(("phospho_decoy_count", decoy_count))
             meta_fields.append(("PhosphoRS_pep_score", final_score))
             meta_fields.append(("PhosphoRS_site_probs", str(simple_site_probs)))
+            meta_fields.append(
+                ("PhosphoRS_site_delta", str(site_deltas_from_isomers(isomer_list)))
+            )
 
             if hit.metaValueExists("MS:1002052"):
                 meta_fields.append(
@@ -608,17 +675,10 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             original_seq_str = new_hit.getSequence().toString()
             new_hit.setMetaValue("search_engine_sequence", original_seq_str)
             
-            # Check for phosphorylation sites
-            has_phospho = False
-            for aa in ["S", "T", "Y", "A"]:
-                if f"{aa}(Phospho)" in original_seq_str or f"{aa}(PhosphoDecoy)" in original_seq_str:
-                    has_phospho = True
-                    break
-                    
-            if not has_phospho:
-                new_hit.setScore(-1.0)
-                new_hit.setMetaValue("PhosphoRS_pep_score", float(-1.0))
-                scored_peptides.append(new_hit)
+            # Skip hits with no localizable phospho site (identical gate in the
+            # threaded worker so both paths skip the same hits).
+            if not _has_localizable_phospho(original_seq_str):
+                scored_peptides.append(make_unscored_hit(hit))
                 continue
             
             # Execute PhosphoRS calculation
@@ -631,15 +691,18 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             )
 
             if site_probs is None or isomer_list is None:
-                new_hit.setScore(-1.0)
-                new_hit.setMetaValue("PhosphoRS_pep_score", float(-1.0))
-                scored_peptides.append(new_hit)
+                scored_peptides.append(make_unscored_hit(hit))
                 continue
 
             # Get the best scoring isomer
             best_isomer = min(isomer_list, key=lambda x: x[1])
             final_score = best_isomer[1]
             new_sequence = best_isomer[0]
+            # Re-localize: write the best-scoring isomer back as the hit
+            # sequence (mirrors the threaded path at the worker apply-back).
+            # Without this, threads=1 kept the original search-engine
+            # localization while threads>1 rewrote it, diverging the FLR.
+            new_hit.setSequence(AASequence.fromString(new_sequence))
             new_hit.setScore(final_score)
             
             # Count phosphorylation sites
@@ -655,7 +718,10 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
             new_hit.setMetaValue("phospho_decoy_count", decoy_count)
             new_hit.setMetaValue("PhosphoRS_pep_score", float(final_score))
             new_hit.setMetaValue("PhosphoRS_site_probs", str(simple_site_probs))
-            
+            new_hit.setMetaValue(
+                "PhosphoRS_site_delta", str(site_deltas_from_isomers(isomer_list))
+            )
+
             # Save MSGF score
             if new_hit.metaValueExists("MS:1002052"):
                 new_hit.setMetaValue("SpecEValue_score", float(new_hit.getMetaValue("MS:1002052")))

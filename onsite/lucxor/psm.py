@@ -996,6 +996,11 @@ class PSM:
             if aa.islower() and aa.upper() in ["S", "T", "Y"]:
                 # Lowercase letters indicate phosphorylation modification sites
                 mod_map[i] = PHOSPHO_MOD_MASS
+            elif aa == "a":
+                # Lowercase 'a' = PhosphoDecoy on Alanine. The backbone uses the
+                # unmodified 'A' mass, so add the phospho mass here like S/T/Y
+                # (see bigbio/onsite#40).
+                mod_map[i] = PHOSPHO_MOD_MASS
             elif aa.islower() and aa.upper() in ["M", "W", "F", "Y"]:
                 # Lowercase letters indicate oxidation modification sites
                 mod_map[i] = OXIDATION_MASS
@@ -1113,6 +1118,13 @@ class PSM:
             else:
                 aa = perm[i]
                 if aa.islower() and aa.upper() in "STY":
+                    phospho_positions.append(pos)
+                elif aa == "a":
+                    # Lowercase 'a' = PhosphoDecoy on Alanine: a real (target)
+                    # permutation site that carries the phospho mass and competes
+                    # like S/T/Y. It is NOT a native shuffled-residue decoy, so
+                    # is_decoy must stay False and it must score with full +79.966
+                    # (see bigbio/onsite#40).
                     phospho_positions.append(pos)
                 elif aa in DECOY_AA_MAP:
                     decoy_positions.append(pos)
@@ -1606,6 +1618,11 @@ class PSM:
             )  # Use psm_score as pep_score
             self.peptide_hit.setMetaValue("Luciphor_global_flr", self.global_flr)
             self.peptide_hit.setMetaValue("Luciphor_local_flr", self.local_flr)
+            # Per-site localization confidence for a site-level decoy-AA FLR
+            # (see bigbio/onsite#40). {residue_index: score}, higher = better.
+            self.peptide_hit.setMetaValue(
+                "Luciphor_site_scores", str(self.get_site_scores())
+            )
 
             # Update peptide_id score type and attributes
             self.peptide_id.setScoreType("Luciphor_delta_score")
@@ -1651,6 +1668,11 @@ class PSM:
                 if sequence[i].islower() and sequence[i].upper() in ["S", "T", "Y"]:
                     # Convert lowercase to uppercase and add (Phospho)
                     result += sequence[i].upper() + "(Phospho)"
+                elif sequence[i] == "a":
+                    # Lowercase 'a' = PhosphoDecoy on Alanine; emit the standard
+                    # annotation so an A-win is serializable and countable
+                    # downstream (see bigbio/onsite#40).
+                    result += "A(PhosphoDecoy)"
                 elif sequence[i].islower() and sequence[i].upper() in [
                     "M",
                     "W",
@@ -1722,6 +1744,72 @@ class PSM:
                 f"Error getting best sequence for PSM {self.scan_num}: {str(e)}"
             )
             return self.peptide.peptide
+
+    def get_site_scores(self) -> Dict[int, float]:
+        """
+        Compute a per-site localization confidence for every candidate site.
+
+        LuciPHOr2 natively reports only a per-PSM delta score. For a site-level
+        comparison (e.g. a decoy-amino-acid FLR computed per site, as in
+        bigbio/onsite#40), we derive a per-site score from the already-computed
+        real-permutation scores in ``pos_permutation_score_map``:
+
+            site_score(s) = max(score of permutations with s phosphorylated)
+                          - max(score of permutations without s phosphorylated)
+
+        This mirrors the AScore per-site delta: a large positive value means the
+        residue is strongly preferred as the phospho location over the
+        alternatives. Higher = more confident. PhosphoDecoy (lowercase ``a``)
+        sites participate exactly like S/T/Y, so a decoy A-site receives a
+        rankable score too.
+
+        Positions are 0-based indices into the unmodified peptide sequence
+        (matching the convention used for PhosphoRS site probabilities).
+
+        For a site phosphorylated in *every* permutation (an unambiguous peptide,
+        where the number of candidate sites equals the number of phospho groups)
+        there is no alternative to compare against; following LucXor's own
+        delta-score convention for unambiguous PSMs, the site is assigned the top
+        permutation score.
+
+        Returns:
+            Dict[int, float]: {residue_position: site_score}. Empty if there are
+            no scored real permutations.
+        """
+        if not self.pos_permutation_score_map:
+            return {}
+
+        # Parse each real permutation once into (occupied_positions, score).
+        parsed = []
+        candidate_sites = set()
+        for perm, score in self.pos_permutation_score_map.items():
+            phospho_positions, _decoy_positions, _is_decoy = (
+                self._get_mod_positions_from_perm(perm)
+            )
+            occupied = set(phospho_positions)
+            parsed.append((occupied, float(score)))
+            candidate_sites.update(occupied)
+
+        site_scores: Dict[int, float] = {}
+        for s in candidate_sites:
+            best_with = None
+            best_without = None
+            for occupied, score in parsed:
+                if s in occupied:
+                    if best_with is None or score > best_with:
+                        best_with = score
+                elif best_without is None or score > best_without:
+                    best_without = score
+
+            if best_with is None:
+                continue  # unreachable: s comes from the occupied union
+            if best_without is None:
+                # Occupied in every permutation (unambiguous) -> no alternative.
+                site_scores[s] = float(best_with)
+            else:
+                site_scores[s] = float(best_with - best_without)
+
+        return site_scores
 
     def calculate_delta_score(self, include_decoys: bool = True) -> None:
         """

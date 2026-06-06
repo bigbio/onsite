@@ -117,6 +117,7 @@ class AScore:
 
             proforma = self.generateProFormaString_(phospho.getSequence(), site_scores)
             phospho.setMetaValue("ProForma", proforma)
+            phospho.setMetaValue("AScore_site_scores", str(site_scores))
             phospho.setMetaValue("AScore_pep_score", self.unambiguous_score_)
 
             for i, site in enumerate(sites):
@@ -241,6 +242,9 @@ class AScore:
 
         proforma = self.generateProFormaString_(phospho.getSequence(), site2score)
         phospho.setMetaValue("ProForma", proforma)
+        # Position-keyed per-site AScores for a site-level decoy-AA FLR
+        # (mirrors PhosphoRS_site_probs / Luciphor_site_scores; see #40).
+        phospho.setMetaValue("AScore_site_scores", str(site2score))
         phospho.setScore(best_Ascore)
 
         return phospho
@@ -488,7 +492,12 @@ class AScore:
             decoy_sites = self.getPhosphoDecoySites_(unmodified)
             phospho_sites.extend(decoy_sites)
 
-        return phospho_sites
+        # Decoy (A) sites are appended after the S/T/Y sites, so the list is no
+        # longer position-ordered. computePermutations_ -> combinations() would
+        # then emit descending index combos (e.g. [4, 1]), and
+        # createTheoreticalSpectra_ assumes ascending order and would silently
+        # drop the out-of-order site. Sort to keep positions ascending.
+        return sorted(phospho_sites)
 
     def getPhosphoSites_(self, unmodified):
         """Find phosphorylation sites (S, T, Y) in sequence."""
@@ -638,8 +647,13 @@ class AScore:
             seq = AASequence(seq_without_phospho)
             permu = 0
 
+            # This loop walks positions ascending and advances through the
+            # permutation in order, so the modification indices must be sorted;
+            # otherwise an out-of-order index is skipped and silently dropped.
+            perm = sorted(permutations[i])
+
             for as_pos in range(seq.size()):
-                if permu < len(permutations[i]) and as_pos == permutations[i][permu]:
+                if permu < len(perm) and as_pos == perm[permu]:
                     residue = seq_string[as_pos]
 
                     if residue in ["S", "T", "Y"]:
@@ -655,7 +669,7 @@ class AScore:
 
                     permu += 1
 
-                if permu == len(permutations[i]):
+                if permu == len(perm):
                     break
 
             self.spectrum_generator_.getSpectrum(th_spectra[i], seq, 1, 1)
