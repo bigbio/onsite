@@ -16,6 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from onsite.idparquet import load_dataframes
 from onsite.onsitec import cli
 
+pytestmark = pytest.mark.data
+
+
 
 @pytest.fixture
 def data_dir():

@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flake8 pytest pytest-cov click
+          pip install flake8 pytest pytest-cov click pandas pyarrow
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           # Install the package in development mode
           pip install -e .
