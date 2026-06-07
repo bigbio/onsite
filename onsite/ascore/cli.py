@@ -404,7 +404,7 @@ def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit
 
             psm_rows.append({
                 "sequence": base_seq_out or hit.getSequence().toUnmodifiedString(),
-                "peptidoform": str(row.get("peptidoform", row.get("sequence", ""))),
+                "peptidoform": peptidoform_out,
                 "precursor_charge": charge,
                 "calculated_mz": mz,
                 "observed_mz": mz,

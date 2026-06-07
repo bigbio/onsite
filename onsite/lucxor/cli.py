@@ -1008,6 +1008,7 @@ class PyLuciPHOr2:
             best_sequence = psm.get_best_sequence(include_decoys=False)
             seq_str = best_sequence or psm.peptide.peptide
             base_seq = psm.peptide.peptide  # fallback unmodified
+            peptidoform = pyopenms_to_unimod_notation(seq_str)
 
             # Use pyOpenMS to get unmodified string if possible
             try:
@@ -1017,14 +1018,6 @@ class PyLuciPHOr2:
                     base_seq = seq_obj.toUnmodifiedString()
             except Exception:
                 pass
-
-            # Preserve original peptidoform from input
-            _orig_pf = ""
-            _tmpl = getattr(self, "_psms_df_template", None)
-            if _tmpl is not None:
-                _best_pf = _tmpl[_tmpl["hit_index"] == 0]
-                if pep_idx < len(_best_pf):
-                    _orig_pf = str(_best_pf.iloc[pep_idx].get("peptidoform", ""))
 
             # Build psm_metavalues: preserve original + add Luciphor scores
             _lucxor_df = getattr(self, "_psms_df_template", None)
@@ -1063,7 +1056,7 @@ class PyLuciPHOr2:
 
             result_rows.append({
                 "sequence": base_seq,
-                "peptidoform": _orig_pf or peptidoform,
+                "peptidoform": peptidoform,
                 "precursor_charge": int(getattr(psm, "charge", 0)),
                 "calculated_mz": mz,
                 "observed_mz": mz,
