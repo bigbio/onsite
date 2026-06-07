@@ -1,0 +1,14 @@
+---
+engines:
+  pylint:
+    enabled: true
+    exclude_paths:
+      - "tests/"
+  duplication:
+    enabled: true
+    exclude_paths:
+      - "tests/"
+exclude_paths:
+  - "tests/"
+  - "docs/"
+  - ".github/"

@@ -22,7 +22,7 @@
 
 ## 📊 Benchmark
 
-We benchmarked onsite algorithms on the PXD000138 dataset using unified mzML/idXML inputs and consistent filtering (FDR < 0.01, tool-specific localization thresholds). The following results are obtained after applying algorithm-specific quality filters to ensure high-confidence site localization:
+We benchmarked onsite algorithms on the PXD000138 dataset using unified mzML/idparquet inputs and consistent filtering (FDR < 0.01, tool-specific localization thresholds). The following results are obtained after applying algorithm-specific quality filters to ensure high-confidence site localization:
 
 | Tool | Total PSMs | Total phospho sites | Well-resolved sites | Uncertain sites |
 |---|---|---|---|---|
@@ -133,13 +133,13 @@ onsite provides a unified command-line interface for all algorithms:
 
 ```bash
 # AScore algorithm
-onsite ascore -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite ascore -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # PhosphoRS algorithm  
-onsite phosphors -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite phosphors -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # LucXor algorithm
-onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparquet
 ```
 
 #### Individual Pipeline Tools
@@ -148,10 +148,10 @@ onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
 
 ```bash
 # Basic usage
-python -m onsite.ascore.cli -in spectra.mzML -id identifications.idXML -out results.idXML
+python -m onsite.ascore.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-python -m onsite.ascore.cli -in spectra.mzML -id identifications.idXML -out results.idXML \
+python -m onsite.ascore.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-mass-tolerance 0.05 \
     --fragment-mass-unit Da \
     --threads 4 \
@@ -162,10 +162,10 @@ python -m onsite.ascore.cli -in spectra.mzML -id identifications.idXML -out resu
 
 ```bash
 # Basic usage
-python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idXML -out results.idXML
+python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idXML -out results.idXML \
+python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-mass-tolerance 0.05 \
     --fragment-mass-unit Da \
     --threads 1 \
@@ -176,10 +176,10 @@ python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idXML -out r
 
 ```bash
 # Basic usage
-python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out results.idXML
+python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out results.idXML \
+python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-method HCD \
     --fragment-mass-tolerance 0.5 \
     --fragment-error-units Da \
@@ -194,8 +194,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | Option | Default | Description |
 |---|---|---|
 | `-in` | - | Input mzML file with spectra |
-| `-id` | - | Input idXML file with identifications |
-| `-out` | - | Output idXML file with scores |
+| `-id` | - | Input idparquet file with identifications |
+| `-out` | - | Output idparquet file with scores |
 | `--fragment-mass-tolerance` | 0.05 | Fragment mass tolerance |
 | `--fragment-mass-unit` | Da | Tolerance unit (Da or ppm) |
 | `--threads` | 1 | Number of threads for parallel processing |
@@ -208,8 +208,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | Option | Default | Description |
 |---|---|---|
 | `-in` | - | Input mzML file with spectra |
-| `-id` | - | Input idXML file with identifications |
-| `-out` | - | Output idXML file with scores |
+| `-id` | - | Input idparquet file with identifications |
+| `-out` | - | Output idparquet file with scores |
 | `--fragment-mass-tolerance` | 0.05 | Fragment mass tolerance |
 | `--fragment-mass-unit` | Da | Tolerance unit (Da or ppm) |
 | `--threads` | 1 | Number of threads for parallel processing |
@@ -222,8 +222,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | Option | Default | Description |
 |---|---|---|
 | `-in` | - | Input mzML file with spectra |
-| `-id` | - | Input idXML file with identifications |
-| `-out` | - | Output idXML file with scores |
+| `-id` | - | Input idparquet file with identifications |
+| `-out` | - | Output idparquet file with scores |
 | `--fragment-method` | CID | Fragmentation method (CID or HCD) |
 | `--fragment-mass-tolerance` | 0.5 | Fragment mass tolerance |
 | `--fragment-error-units` | Da | Tolerance units (Da or ppm) |
@@ -281,9 +281,9 @@ You can find example result files in the `data` directory. Here are the direct l
 
 | Algorithm | Description | Result File |
 |---|---|---|
-| AScore | AScore phosphorylation site localization results | [AScore Example](../data/1_ascore_result.idXML) |
-| PhosphoRS | PhosphoRS phosphorylation site localization results | [PhosphoRS Example](../data/1_phosphors_result.idXML) |
-| LucXor | LucXor (LuciPHOr2) PTM localization results with FLR | [LucXor Example](../data/1_lucxor_result.idXML) |
+| AScore | AScore phosphorylation site localization results | [AScore Example](../data/1_ascore_result.idparquet) |
+| PhosphoRS | PhosphoRS phosphorylation site localization results | [PhosphoRS Example](../data/1_phosphors_result.idparquet) |
+| LucXor | LucXor (LuciPHOr2) PTM localization results with FLR | [LucXor Example](../data/1_lucxor_result.idparquet) |
 
 ## 📖 Documentation
 

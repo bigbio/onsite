@@ -111,10 +111,10 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
 
 ```bash
 # Basic usage
-onsite phosphors -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite phosphors -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-onsite phosphors -in spectra.mzML -id identifications.idXML -out results.idXML \
+onsite phosphors -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-mass-tolerance 0.05 \
     --fragment-mass-unit Da \
     --threads 1 \

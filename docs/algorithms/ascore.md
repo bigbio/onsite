@@ -71,10 +71,10 @@ The algorithm provides:
 
 ```bash
 # Basic usage
-onsite ascore -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite ascore -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-onsite ascore -in spectra.mzML -id identifications.idXML -out results.idXML \
+onsite ascore -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-mass-tolerance 0.05 \
     --fragment-mass-unit Da \
     --threads 4 \

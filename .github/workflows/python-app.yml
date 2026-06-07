@@ -5,9 +5,9 @@ name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -16,275 +16,236 @@ permissions:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v6
-      with:
-        python-version: "3.11"
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest pytest-cov click
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        # Install the package in development mode
-        pip install -e .
-    
-    - name: Install 7-Zip
-      run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
-    - name: Extract test data files
-      run: |
-        # Extract compressed mzML file from zip archives
-        cd data
-        if [ -f 1.zip ]; then
-          echo "Extracting 1.mzML from split zip archives..."
-          ls -lh 1.*
-          7z x 1.zip
-          ls -lh 1.mzML
-          echo "Extraction complete"
-        else
-          echo "Warning: 1.zip not found in data directory"
-          ls -la
-        fi
-        cd ..
-    
-    - name: Verify test data files
-      run: |
-        # Verify that required test data files exist
-        if [ ! -f data/1_consensus_fdr_filter_pep.idXML ]; then
-          echo "Error: idXML file not found"
-          exit 1
-        fi
-        if [ ! -f data/1.mzML ]; then
-          echo "Error: mzML file not found"
-          exit 1
-        fi
-        echo "Test data files verified:"
-        ls -lh data/1_consensus_fdr_filter_pep.idXML
-        ls -lh data/1.mzML
-    
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 onsite/ --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=__pycache__,.git,build,dist
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 onsite/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude=__pycache__,.git,build,dist
-    
-    - name: Test package imports
-      run: |
-        # Test that the package and all modules can be imported
-        python -c "import onsite; print('onsite package imported successfully')"
-        python -c "from onsite import AScore; print('AScore imported successfully')"
-        python -c "from onsite import calculate_phospho_localization_compomics_style; print('PhosphoRS imported successfully')"
-        python -c "from onsite.lucxor import cli; print('LucXor CLI imported successfully')"
-    
-    - name: Test CLI commands availability
-      run: |
-        # Test that CLI commands are available
-        onsite --help
-        ascore --help || python -m onsite.ascore.cli --help
-        phosphors --help || python -m onsite.phosphors.cli --help
-        lucxor --help || python -m onsite.lucxor.cli --help
-    
-    - name: Run unit tests with coverage
-      run: |
-        # Run all unit tests with pytest and generate coverage report
-        pytest tests/ -v --tb=short --color=yes --cov=onsite --cov-report=xml --cov-report=term
-    
-    - name: Test AScore with real data
-      run: |
-        # Test AScore algorithm with real data
-        python -m onsite.ascore.cli \
-          -in data/1.mzML \
-          -id data/1_consensus_fdr_filter_pep.idXML \
-          -out test_ascore_output.idXML \
-          --fragment-mass-tolerance 0.05 \
-          --fragment-mass-unit Da \
-          --threads 1 \
-          --add-decoys
-        
-        # Verify output file was created
-        if [ -f test_ascore_output.idXML ]; then
-          echo "AScore output file created successfully"
-          ls -lh test_ascore_output.idXML
-        else
-          echo "Warning: AScore output file not created (may be expected if no phosphorylated peptides)"
-        fi
-    
-    - name: Test PhosphoRS with real data
-      run: |
-        # Test PhosphoRS algorithm with real data
-        python -m onsite.phosphors.cli \
-          -in data/1.mzML \
-          -id data/1_consensus_fdr_filter_pep.idXML \
-          -out test_phosphors_output.idXML \
-          --fragment-mass-tolerance 0.05 \
-          --fragment-mass-unit Da \
-          --threads 1 \
-          --add-decoys
-        
-        # Verify output file was created
-        if [ -f test_phosphors_output.idXML ]; then
-          echo "PhosphoRS output file created successfully"
-          ls -lh test_phosphors_output.idXML
-        else
-          echo "Warning: PhosphoRS output file not created (may be expected if no phosphorylated peptides)"
-        fi
-    
-    - name: Test LucXor with real data
-      run: |
-        # Test LucXor algorithm with real data
-        python -m onsite.lucxor.cli \
-          -in data/1.mzML \
-          -id data/1_consensus_fdr_filter_pep.idXML \
-          -out test_lucxor_output.idXML \
-          --fragment-method HCD \
-          --fragment-mass-tolerance 0.5 \
-          --fragment-error-units Da \
-          --threads 1 \
-          --min-num-psms-model 50
-        
-        # Verify output file was created
-        if [ -f test_lucxor_output.idXML ]; then
-          echo "LucXor output file created successfully"
-          ls -lh test_lucxor_output.idXML
-        else
-          echo "Warning: LucXor output file not created (may be expected if no phosphorylated peptides)"
-        fi
-    
-    - name: Test unified CLI with real data
-      run: |
-        # Test unified onsite CLI command
-        onsite ascore \
-          -in data/1.mzML \
-          -id data/1_consensus_fdr_filter_pep.idXML \
-          -out test_unified_ascore.idXML \
-          --fragment-mass-tolerance 0.05 \
-          --fragment-mass-unit Da \
-          --threads 1 \
-          --add-decoys
-        
-        onsite phosphors \
-          -in data/1.mzML \
-          -id data/1_consensus_fdr_filter_pep.idXML \
-          -out test_unified_phosphors.idXML \
-          --fragment-mass-tolerance 0.05 \
-          --fragment-mass-unit Da \
-          --threads 1 \
-          --add-decoys
-        
-        onsite lucxor \
-          -in data/1.mzML \
-          -id data/1_consensus_fdr_filter_pep.idXML \
-          -out test_unified_lucxor.idXML \
-          --fragment-method HCD \
-          --fragment-mass-tolerance 0.5 \
-          --threads 1 \
-          --min-num-psms-model 50
-    
-    - name: Verify reference result files exist
-      run: |
-        # Verify that reference result files exist for comparison
-        echo "Checking reference result files..."
-        ls -lh data/1_lucxor_result.idXML || echo "Warning: LucXor reference file not found"
-        ls -lh data/1_ascore_result.idXML || echo "Warning: AScore reference file not found"
-        ls -lh data/1_phosphors_result.idXML || echo "Warning: PhosphoRS reference file not found"
-    
-    - name: Run algorithm comparison tests
-      id: algorithm_comparison
-      run: |
-        set -o pipefail
-        # Run algorithm comparison tests to compare new results with reference results
-        # Tests compare at different thresholds:
-        # - LucXor: local_flr < 0.01, 0.05, 0.1 (with q-value < 0.01)
-        # - AScore: AScore >= 3, 15, 20 (with q-value < 0.01)
-        # - PhosphoRS: site probability > 75%, 90%, 99% (with q-value < 0.01)
-        pytest tests/test_algorithm_comparison.py -v -s --tb=short --color=no 2>&1 | tee algorithm_comparison_results.txt
-    
-    - name: Post algorithm comparison results to PR
-      if: github.event_name == 'pull_request' && always()
-      continue-on-error: true
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          const fs = require('fs');
-          const resultsFile = 'algorithm_comparison_results.txt';
-          
-          if (!fs.existsSync(resultsFile)) {
-            console.log('Results file not found, skipping comment');
-            return;
-          }
-          
-          let results = fs.readFileSync(resultsFile, 'utf8');
-          
-          // Truncate if too long (GitHub comments have a limit)
-          const maxLength = 65000;
-          if (results.length > maxLength) {
-            results = results.substring(0, maxLength) + '\n\n... (truncated)';
-          }
-          
-          const body = [
-            '## Algorithm Comparison Test Results',
-            '',
-            '<details>',
-            '<summary>Click to expand test results</summary>',
-            '',
-            '```',
-            results,
-            '```',
-            '',
-            '</details>'
-          ].join('\n');
-          
-          // Find and update existing comment or create new one
-          const { data: comments } = await github.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-          });
-          
-          const botComment = comments.find(comment => 
-            comment.user.login === 'github-actions[bot]' && 
-            comment.body.includes('## Algorithm Comparison Test Results')
-          );
-          
-          if (botComment) {
-            await github.rest.issues.updateComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: botComment.id,
-              body: body
-            });
-          } else {
-            await github.rest.issues.createComment({
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest pytest-cov click
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Install the package in development mode
+          pip install -e .
+
+      - name: Lint with flake8
+        run: |
+          # stop the build if there are Python syntax errors or undefined names
+          flake8 onsite/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=__pycache__,.git,build,dist,__init__.py
+          # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+          flake8 onsite/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude=__pycache__,.git,build,dist,__init__.py
+
+      - name: Test package imports
+        run: |
+          # Test that the package and all modules can be imported
+          python -c "import onsite; print('onsite package imported successfully')"
+          python -c "from onsite import AScore; print('AScore imported successfully')"
+          python -c "from onsite import calculate_phospho_localization_compomics_style; print('PhosphoRS imported successfully')"
+          python -c "from onsite.lucxor import cli; print('LucXor CLI imported successfully')"
+
+      - name: Test CLI commands availability
+        run: |
+          # Test that CLI commands are available
+          onsite --help
+          ascore --help || python -m onsite.ascore.cli --help
+          phosphors --help || python -m onsite.phosphors.cli --help
+          lucxor --help || python -m onsite.lucxor.cli --help
+
+      - name: Run unit tests with coverage
+        run: |
+          # Run all unit tests with pytest and generate coverage report
+          pytest tests/ -v --tb=short --color=yes --cov=onsite --cov-report=xml --cov-report=term
+
+      - name: Test AScore with real data
+        run: |
+          # Test AScore algorithm with real data
+          python -m onsite.ascore.cli \
+            -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -out test_ascore_output.idparquet \
+            --fragment-mass-tolerance 0.05 \
+            --fragment-mass-unit Da \
+            --threads 1
+
+          # Verify output directory was created
+          if [ -d test_ascore_output.idparquet ]; then
+            echo "AScore output created successfully"
+            ls -lh test_ascore_output.idparquet/
+          else
+            echo "Warning: AScore output not created"
+          fi
+
+      - name: Test PhosphoRS with real data
+        run: |
+          # Test PhosphoRS algorithm with real data
+          python -m onsite.phosphors.cli \
+            -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -out test_phosphors_output.idparquet \
+            --fragment-mass-tolerance 0.05 \
+            --fragment-mass-unit Da \
+            --threads 1 \
+            --add-decoys
+
+          # Verify output file was created
+          if [ -d test_phosphors_output.idparquet ]; then
+            echo "PhosphoRS output created successfully"
+            ls -lh test_phosphors_output.idparquet/
+          else
+            echo "Warning: PhosphoRS output not created"
+          fi
+
+      - name: Test LucXor with real data
+        run: |
+          # Test LucXor algorithm with real data
+          python -m onsite.lucxor.cli \
+            -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -out test_lucxor_output.idparquet \
+            --fragment-method HCD \
+            --fragment-mass-tolerance 0.5 \
+            --fragment-error-units Da \
+            --threads 1 \
+            --min-num-psms-model 50
+
+          # Verify output file was created
+          if [ -d test_lucxor_output.idparquet ]; then
+            echo "LucXor output created successfully"
+            ls -lh test_lucxor_output.idparquet/
+          else
+            echo "Warning: LucXor output not created"
+          fi
+
+      - name: Test unified CLI with real data
+        run: |
+          # Test unified onsite CLI command
+          onsite ascore \
+            -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -out test_unified_ascore.idparquet \
+            --fragment-mass-tolerance 0.05 \
+            --fragment-mass-unit Da \
+            --threads 1 \
+            --add-decoys
+
+          onsite phosphors \
+            -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -out test_unified_phosphors.idparquet \
+            --fragment-mass-tolerance 0.05 \
+            --fragment-mass-unit Da \
+            --threads 1 \
+            --add-decoys
+
+          onsite lucxor \
+            -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -out test_unified_lucxor.idparquet \
+            --fragment-method HCD \
+            --fragment-mass-tolerance 0.5 \
+            --threads 1 \
+            --min-num-psms-model 50
+
+      - name: Verify reference result files exist
+        run: |
+          # Verify that reference result files exist for comparison
+          echo "Checking reference result files..."
+          ls -lh data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet || echo "Input idparquet directory found"
+
+      - name: Run algorithm comparison tests
+        id: algorithm_comparison
+        run: |
+          set -o pipefail
+          # Run algorithm comparison tests to compare new results with reference results
+          # Tests compare at different thresholds:
+          # - LucXor: local_flr < 0.01, 0.05, 0.1 (with q-value < 0.01)
+          # - AScore: AScore >= 3, 15, 20 (with q-value < 0.01)
+          # - PhosphoRS: site probability > 75%, 90%, 99% (with q-value < 0.01)
+          pytest tests/test_algorithm_comparison.py -v -s --tb=short --color=no 2>&1 | tee algorithm_comparison_results.txt
+
+      - name: Post algorithm comparison results to PR
+        if: github.event_name == 'pull_request' && always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const resultsFile = 'algorithm_comparison_results.txt';
+
+            if (!fs.existsSync(resultsFile)) {
+              console.log('Results file not found, skipping comment');
+              return;
+            }
+
+            let results = fs.readFileSync(resultsFile, 'utf8');
+
+            // Truncate if too long (GitHub comments have a limit)
+            const maxLength = 65000;
+            if (results.length > maxLength) {
+              results = results.substring(0, maxLength) + '\n\n... (truncated)';
+            }
+
+            const body = [
+              '## Algorithm Comparison Test Results',
+              '',
+              '<details>',
+              '<summary>Click to expand test results</summary>',
+              '',
+              '```',
+              results,
+              '```',
+              '',
+              '</details>'
+            ].join('\n');
+
+            // Find and update existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: body
             });
-          }
-    
-    - name: Upload test outputs as artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-outputs
-        path: |
-          test_*.idXML
-          algorithm_comparison_results.txt
-        retention-days: 7
-    
-    - name: Upload coverage to artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: coverage-report
-        path: coverage.xml
-        retention-days: 7
 
+            const botComment = comments.find(comment => 
+              comment.user.login === 'github-actions[bot]' && 
+              comment.body.includes('## Algorithm Comparison Test Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Upload test outputs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-outputs
+          path: |
+            test_*.idparquet/
+            algorithm_comparison_results.txt
+          retention-days: 7
+
+      - name: Upload coverage to artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
