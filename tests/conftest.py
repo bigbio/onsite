@@ -26,7 +26,7 @@ def mzml_file(data_dir):
 @pytest.fixture(scope="session")
 def idparquet_dir(data_dir):
     """Get the idparquet directory path (rep1)."""
-    return data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet"
+    return data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet"
 
 
 @pytest.fixture(scope="session")
@@ -70,7 +70,7 @@ def pytest_collection_modifyitems(config, items):
     """Modify test collection to skip tests if data files are missing."""
     data_dir = Path(__file__).parent.parent / "data"
     mzml_file = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML"
-    idparquet_dir = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet"
+    idparquet_dir = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet"
 
     if not data_dir.exists() or not mzml_file.exists() or not idparquet_dir.exists():
         for item in items:

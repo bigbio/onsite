@@ -97,7 +97,7 @@ def main():
     
     # Check if data files exist
     data_dir = Path(__file__).parent.parent / "data"
-    idparquet_dir = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet"
+    idparquet_dir = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet"
     mzml_file = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML"
 
     if not data_dir.exists():

@@ -456,7 +456,7 @@ class TestEndToEndRegression:
     def data_files(self):
         """Check if test data files exist."""
         data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-        idparquet = os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet")
+        idparquet = os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet")
         mzml = os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML")
 
         if not os.path.isdir(idparquet) or not os.path.isfile(os.path.join(idparquet, "psms.parquet")) or not os.path.exists(mzml):

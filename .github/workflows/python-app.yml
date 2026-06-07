@@ -66,7 +66,7 @@ jobs:
           # Test AScore algorithm with real data
           python -m onsite.ascore.cli \
             -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
-            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet \
             -out test_ascore_output.idparquet \
             --fragment-mass-tolerance 0.05 \
             --fragment-mass-unit Da \
@@ -85,7 +85,7 @@ jobs:
           # Test PhosphoRS algorithm with real data
           python -m onsite.phosphors.cli \
             -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
-            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet \
             -out test_phosphors_output.idparquet \
             --fragment-mass-tolerance 0.05 \
             --fragment-mass-unit Da \
@@ -105,7 +105,7 @@ jobs:
           # Test LucXor algorithm with real data
           python -m onsite.lucxor.cli \
             -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
-            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet \
             -out test_lucxor_output.idparquet \
             --fragment-method HCD \
             --fragment-mass-tolerance 0.5 \
@@ -126,7 +126,7 @@ jobs:
           # Test unified onsite CLI command
           onsite ascore \
             -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
-            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet \
             -out test_unified_ascore.idparquet \
             --fragment-mass-tolerance 0.05 \
             --fragment-mass-unit Da \
@@ -135,7 +135,7 @@ jobs:
 
           onsite phosphors \
             -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
-            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet \
             -out test_unified_phosphors.idparquet \
             --fragment-mass-tolerance 0.05 \
             --fragment-mass-unit Da \
@@ -144,7 +144,7 @@ jobs:
 
           onsite lucxor \
             -in data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML \
-            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet \
+            -id data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet \
             -out test_unified_lucxor.idparquet \
             --fragment-method HCD \
             --fragment-mass-tolerance 0.5 \
@@ -155,7 +155,7 @@ jobs:
         run: |
           # Verify that reference result files exist for comparison
           echo "Checking reference result files..."
-          ls -lh data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet || echo "Input idparquet directory found"
+          ls -lh data/SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet || echo "Input idparquet directory found"
 
       - name: Run algorithm comparison tests
         id: algorithm_comparison

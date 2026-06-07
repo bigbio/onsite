@@ -32,7 +32,7 @@ def mzml_file(data_dir):
 
 @pytest.fixture(scope="session")
 def idparquet_dir(data_dir):
-    return os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet")
+    return os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet")
 
 
 class TestAlgorithmComparison:
