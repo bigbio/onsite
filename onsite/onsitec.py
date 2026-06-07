@@ -10,14 +10,16 @@ import sys
 import os
 import tempfile
 import time
-from pyopenms import IdXMLFile, PeptideIdentification, PeptideHit, PeptideIdentificationList
+from typing import Dict
+
+import numpy as np
 from onsite.lucxor.cli import lucxor
 from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
 
 
 @click.group()
-@click.version_option(version="0.0.1")
+@click.version_option(version="0.0.3")
 def cli():
     """
     OnSite: Mass spectrometry post-translational modification localization tool
@@ -29,15 +31,14 @@ def cli():
       all         Run all three algorithms and merge results
 
     Examples:
-      onsite ascore -in spectra.mzML -id identifications.idXML -out results.idXML
-      onsite phosphors -in spectra.mzML -id identifications.idXML -out results.idXML
-      onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
-      onsite all -in spectra.mzML -id identifications.idXML -out results.idXML --add-decoys
+      onsite ascore -in spectra.mzML -id identifications.idparquet -out results.idparquet
+      onsite phosphors -in spectra.mzML -id identifications.idparquet -out results.idparquet
+      onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparquet
+      onsite all -in spectra.mzML -id identifications.idparquet -out results.idparquet --add-decoys
     """
     pass
 
 
-# Add the individual CLI commands to the main CLI group
 cli.add_command(ascore)
 cli.add_command(phosphors)
 cli.add_command(lucxor)
@@ -57,7 +58,7 @@ cli.add_command(lucxor)
     "--id-file",
     "id_file",
     required=True,
-    help="Input idXML file path",
+    help="Input idparquet directory path",
     type=click.Path(exists=True),
 )
 @click.option(
@@ -65,7 +66,7 @@ cli.add_command(lucxor)
     "--out-file",
     "out_file",
     required=True,
-    help="Output idXML file path",
+    help="Output idparquet directory path",
     type=click.Path(),
 )
 @click.option(
@@ -111,14 +112,6 @@ def all(
 ):
     """
     Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results.
-    
-    This command runs all three phosphorylation site localization algorithms
-    sequentially and merges their scores and site assignments into a single
-    output file. Each algorithm's specific scores and metadata are preserved.
-    
-    When --add-decoys is specified:
-    - AScore and PhosphoRS: Include A (PhosphoDecoy) as potential site
-    - LucXor: Use target modifications "Phospho(S), Phospho(T), Phospho(Y), PhosphoDecoy(A)"
     """
     try:
         start_time = time.time()
@@ -126,17 +119,12 @@ def all(
         click.echo(f"  Input spectrum: {in_file}")
         click.echo(f"  Input ID: {id_file}")
         click.echo(f"  Output: {out_file}")
-        click.echo(f"  Fragment tolerance: {fragment_mass_tolerance} {fragment_mass_unit}")
-        click.echo(f"  Threads: {threads}")
-        click.echo(f"  Add decoys: {add_decoys}")
-        click.echo(f"  Debug: {debug}")
-        
-        # Create temporary directory for intermediate results
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
-            phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
-            lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
-            
+            ascore_out = os.path.join(tmpdir, "ascore_result.idparquet")
+            phosphors_out = os.path.join(tmpdir, "phosphors_result.idparquet")
+            lucxor_out = os.path.join(tmpdir, "lucxor_result.idparquet")
+
             # Run AScore
             click.echo(f"\n{'='*60}")
             click.echo(f"[{time.strftime('%H:%M:%S')}] Running AScore...")
@@ -145,16 +133,12 @@ def all(
             ctx = click.Context(ascore_func)
             ctx.invoke(
                 ascore_func,
-                in_file=in_file,
-                id_file=id_file,
-                out_file=ascore_out,
+                in_file=in_file, id_file=id_file, out_file=ascore_out,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_mass_unit=fragment_mass_unit,
-                threads=threads,
-                debug=debug,
-                add_decoys=add_decoys,
+                threads=threads, debug=debug, add_decoys=add_decoys,
             )
-            
+
             # Run PhosphoRS
             click.echo(f"\n{'='*60}")
             click.echo(f"[{time.strftime('%H:%M:%S')}] Running PhosphoRS...")
@@ -163,35 +147,27 @@ def all(
             ctx = click.Context(phosphors_func)
             ctx.invoke(
                 phosphors_func,
-                in_file=in_file,
-                id_file=id_file,
-                out_file=phosphors_out,
+                in_file=in_file, id_file=id_file, out_file=phosphors_out,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_mass_unit=fragment_mass_unit,
-                threads=threads,
-                debug=debug,
-                add_decoys=add_decoys,
+                threads=threads, debug=debug, add_decoys=add_decoys,
             )
-            
-            # Run LucXor with appropriate target modifications
+
+            # Run LucXor
             click.echo(f"\n{'='*60}")
             click.echo(f"[{time.strftime('%H:%M:%S')}] Running LucXor...")
             click.echo(f"{'='*60}")
             from onsite.lucxor.cli import lucxor as lucxor_func
-            
-            # Configure target modifications based on add_decoys flag
+
             if add_decoys:
                 target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
-                click.echo("  Using target modifications with decoys: Phospho(S), Phospho(T), Phospho(Y), PhosphoDecoy(A)")
             else:
                 target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
-            
+
             ctx = click.Context(lucxor_func)
             ctx.invoke(
                 lucxor_func,
-                input_spectrum=in_file,
-                input_id=id_file,
-                output=lucxor_out,
+                input_spectrum=in_file, input_id=id_file, output=lucxor_out,
                 fragment_method="CID",
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_error_units=fragment_mass_unit,
@@ -200,90 +176,73 @@ def all(
                 neutral_losses=("sty -H3PO4 -97.97690",),
                 decoy_mass=79.966331,
                 decoy_neutral_losses=("X -H3PO4 -97.97690",),
-                max_charge_state=5,
-                max_peptide_length=40,
-                max_num_perm=16384,
-                modeling_score_threshold=0.95,
-                scoring_threshold=0.0,
-                min_num_psms_model=50,
-                threads=threads,
-                rt_tolerance=0.01,
-                debug=debug,
-                log_file=None,
-                disable_split_by_charge=False,
+                max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
+                modeling_score_threshold=0.95, scoring_threshold=0.0,
+                min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
+                debug=debug, log_file=None, disable_split_by_charge=False,
             )
-            
+
             # Merge results
             click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Merging results from all algorithms...")
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Merging results...")
             click.echo(f"{'='*60}")
             merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
-            
+
         elapsed = time.time() - start_time
-        abs_out_file = os.path.abspath(out_file)
         click.echo(f"\n{'='*60}")
-        click.echo(f"All algorithms completed successfully!")
-        click.echo(f"  Total time: {elapsed:.2f} seconds")
-        click.echo(f"  Output saved to: {abs_out_file}")
+        click.echo(f"All algorithms completed successfully! Time: {elapsed:.2f}s")
+        click.echo(f"  Output: {os.path.abspath(out_file)}")
         click.echo(f"{'='*60}")
-        
+
     except KeyboardInterrupt:
-        click.echo("\nOperation cancelled by user")
+        click.echo("\nCancelled")
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         sys.exit(1)
 
 
-def _join_psms_by_ref(ascore_pep_ids, phosphors_pep_ids, lucxor_pep_ids):
+def _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df):
     """
-    Match PeptideIdentifications across the three tools by spectrum_reference.
+    Match PSM rows across three tool DataFrames by spectrum_reference.
 
-    Merging by list position is unsafe: the tools drop/reorder PSMs
-    independently (LucXor keepNBestHits / spectrum-miss / min-PSM abort; AScore
-    error-drops), so a single drop shifts every later index and would fuse
-    scores from different peptides.
-
-    Returns (triples, stats), where triples is a list of
-    (ascore_pid, phosphors_pid, lucxor_pid) for spectra present in ALL three
-    tools — in LucXor order, with the unmodified backbone verified identical —
-    and stats reports the per-tool exclusions.
+    Returns (merged_rows, stats).
     """
-    def by_ref(pep_ids):
-        d = {}
-        for pid in pep_ids:
-            if pid.metaValueExists("spectrum_reference"):
-                d[pid.getMetaValue("spectrum_reference")] = pid
-        return d
+    def by_ref(df):
+        idx = df[df["hit_index"] == 0]["spectrum_reference"]
+        return {str(ref): i for i, ref in idx.items() if ref and str(ref).strip()}
 
-    a_map, p_map, l_map = (
-        by_ref(ascore_pep_ids),
-        by_ref(phosphors_pep_ids),
-        by_ref(lucxor_pep_ids),
-    )
+    a_map = by_ref(ascore_df)
+    p_map = by_ref(phosphors_df)
+    l_map = by_ref(lucxor_df)
+
     common = set(a_map) & set(p_map) & set(l_map)
 
-    def unmod(pid):
-        hits = pid.getHits()
-        return hits[0].getSequence().toUnmodifiedString() if hits else None
+    def get_seq(df, idx):
+        row = df.iloc[idx]
+        raw = str(row.get("sequence", ""))
+        from onsite.idparquet import unimod_to_pyopenms_notation
+        return unimod_to_pyopenms_notation(raw)
 
     triples = []
     seen = set()
     seq_mismatch = 0
-    for lpid in lucxor_pep_ids:  # preserve LucXor order
-        if not lpid.metaValueExists("spectrum_reference"):
-            continue
-        ref = lpid.getMetaValue("spectrum_reference")
-        if ref not in common or ref in seen:
+    # Preserve LucXor order
+    lucxor_sorted = lucxor_df[lucxor_df["hit_index"] == 0].copy()
+    for _, row in lucxor_sorted.iterrows():
+        ref = str(row.get("spectrum_reference", ""))
+        if not ref or ref not in common or ref in seen:
             continue
         seen.add(ref)
-        apid, ppid = a_map[ref], p_map[ref]
-        if not (unmod(apid) == unmod(ppid) == unmod(lpid)):
+        ai, pi = a_map[ref], p_map[ref]
+        s_a = get_seq(ascore_df, ai)
+        s_p = get_seq(phosphors_df, pi)
+        s_l = get_seq(lucxor_df, l_map[ref])
+        if not (s_a and s_p and s_l and s_a == s_p == s_l):
             seq_mismatch += 1
             continue
-        triples.append((apid, ppid, lpid))
+        triples.append((ai, pi, l_map[ref], ref))
 
     stats = {
         "ascore_dropped": len(a_map) - len(common),
@@ -292,280 +251,219 @@ def _join_psms_by_ref(ascore_pep_ids, phosphors_pep_ids, lucxor_pep_ids):
         "seq_mismatch": seq_mismatch,
         "merged": len(triples),
     }
-    return triples, stats
+    return triples, stats, a_map, p_map, l_map
+
+
+def _get_metas_dict(df, row_idx: int) -> Dict[str, str]:
+    """Get psm_metavalues as a dict for a given row index."""
+    row = df.iloc[row_idx]
+    mv = row.get("psm_metavalues")
+    if mv is None:
+        return {}
+    items = list(mv) if isinstance(mv, np.ndarray) else []
+    return {str(m["name"]): str(m["value"]) for m in items if isinstance(m, dict)}
 
 
 def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_file):
     """
-    Merge results from all three algorithms into a single idXML file.
-    
-    This function combines the scores and metadata from AScore, PhosphoRS, and LucXor
-    into a single output file. Each peptide hit will contain:
-    - All algorithm-specific scores and metadata
-    - The best sequence assignment from each algorithm
-    - A combined score (using LucXor's delta score as primary)
+    Merge results from all three algorithms into a single idparquet directory.
     """
-    # Load all three result files
-    ascore_prot_ids, ascore_pep_ids = [], PeptideIdentificationList()
-    phosphors_prot_ids, phosphors_pep_ids = [], PeptideIdentificationList()
-    lucxor_prot_ids, lucxor_pep_ids = [], PeptideIdentificationList()
+    import pandas as pd
+    from onsite.idparquet import load_dataframes, save_dataframes
 
-    IdXMLFile().load(ascore_file, ascore_prot_ids, ascore_pep_ids)
-    IdXMLFile().load(phosphors_file, phosphors_prot_ids, phosphors_pep_ids)
-    IdXMLFile().load(lucxor_file, lucxor_prot_ids, lucxor_pep_ids)
-    
-    # Match PSMs across tools by spectrum_reference (NOT list position).
-    triples, stats = _join_psms_by_ref(ascore_pep_ids, phosphors_pep_ids, lucxor_pep_ids)
+    ascore_df, _, _, _ = load_dataframes(ascore_file)
+    phosphors_df, _, _, _ = load_dataframes(phosphors_file)
+    lucxor_df, proteins_df, _, _ = load_dataframes(lucxor_file)
+
+    triples, stats, a_map, p_map, l_map = _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df)
     for tool in ("ascore", "phosphors", "lucxor"):
         if stats[f"{tool}_dropped"]:
-            click.echo(
-                f"  Note: {stats[f'{tool}_dropped']} {tool} PSM(s) not present in all tools; excluded from merge"
-            )
+            click.echo(f"  Note: {stats[f'{tool}_dropped']} {tool} PSM(s) not in all tools")
     if stats["seq_mismatch"]:
-        click.echo(
-            f"  Warning: {stats['seq_mismatch']} PSM(s) skipped due to backbone-sequence mismatch across tools"
-        )
+        click.echo(f"  Warning: {stats['seq_mismatch']} PSM(s) skipped (seq mismatch)")
 
-    # Create merged results (typed container required by IdXMLFile().store)
-    merged_pep_ids = PeptideIdentificationList()
+    merged_rows = []
+    merged_pep_idx = 0
 
-    for ascore_pid, phosphors_pid, lucxor_pid in triples:
-        # Create new PeptideIdentification based on LucXor result (as it has FLR)
-        merged_pid = PeptideIdentification(lucxor_pid)
-        merged_pid.setScoreType("onsite_combined_score")
-        merged_pid.setHigherScoreBetter(True)
-        
-        # Merge hits
-        merged_hits = []
-        for j in range(min(len(ascore_pid.getHits()), len(phosphors_pid.getHits()), len(lucxor_pid.getHits()))):
-            ascore_hit = ascore_pid.getHits()[j]
-            phosphors_hit = phosphors_pid.getHits()[j]
-            lucxor_hit = lucxor_pid.getHits()[j]
-            
-            # Create a new merged hit based on LucXor hit (for basic properties)
-            merged_hit = PeptideHit(lucxor_hit)
-            
-            # Clear all existing algorithm-specific metadata to rebuild in correct order
-            # First, collect non-algorithm metadata to preserve
-            preserved_meta = {}
-            meta_keys_to_preserve = ["target_decoy", "consensus_support", "Posterior Error Probability_score", "q-value"]
-            for key in meta_keys_to_preserve:
-                if merged_hit.metaValueExists(key):
-                    preserved_meta[key] = merged_hit.getMetaValue(key)
-            
-            # Remove all metadata
-            keys_to_remove = []
-            merged_hit.getKeys(keys_to_remove)
-            for key in keys_to_remove:
-                try:
-                    merged_hit.removeMetaValue(key)
-                except:
-                    pass
-            
-            # Restore preserved metadata first (in original order)
-            for key in meta_keys_to_preserve:
-                if key in preserved_meta:
-                    merged_hit.setMetaValue(key, preserved_meta[key])
-            
-            # Add AScore metadata (in order)
-            merged_hit.setMetaValue("AScore_sequence", ascore_hit.getSequence().toString())
-            merged_hit.setMetaValue("AScore_best_score", float(ascore_hit.getScore()))
-            if ascore_hit.metaValueExists("AScore_pep_score"):
-                merged_hit.setMetaValue("AScore_pep_score", float(ascore_hit.getMetaValue("AScore_pep_score")))
-            
-            # Copy all AScore site scores
-            rank = 1
-            while ascore_hit.metaValueExists(f"AScore_{rank}"):
-                merged_hit.setMetaValue(f"AScore_{rank}", float(ascore_hit.getMetaValue(f"AScore_{rank}")))
-                rank += 1
-            
-            # Add PhosphoRS metadata (in order)
-            merged_hit.setMetaValue("PhosphoRS_sequence", phosphors_hit.getSequence().toString())
-            merged_hit.setMetaValue("PhosphoRS_score", float(phosphors_hit.getScore()))
-            if phosphors_hit.metaValueExists("PhosphoRS_pep_score"):
-                merged_hit.setMetaValue("PhosphoRS_pep_score", float(phosphors_hit.getMetaValue("PhosphoRS_pep_score")))
-            if phosphors_hit.metaValueExists("PhosphoRS_site_probs"):
-                merged_hit.setMetaValue("PhosphoRS_site_probs", phosphors_hit.getMetaValue("PhosphoRS_site_probs"))
-            
-            # Add Luciphor metadata (in order)
-            merged_hit.setMetaValue("Luciphor_sequence", lucxor_hit.getSequence().toString())
-            merged_hit.setMetaValue("Luciphor_delta_score", float(lucxor_hit.getScore()))
-            if lucxor_hit.metaValueExists("Luciphor_pep_score"):
-                merged_hit.setMetaValue("Luciphor_pep_score", float(lucxor_hit.getMetaValue("Luciphor_pep_score")))
-            if lucxor_hit.metaValueExists("Luciphor_global_flr"):
-                merged_hit.setMetaValue("Luciphor_global_flr", float(lucxor_hit.getMetaValue("Luciphor_global_flr")))
-            if lucxor_hit.metaValueExists("Luciphor_local_flr"):
-                merged_hit.setMetaValue("Luciphor_local_flr", float(lucxor_hit.getMetaValue("Luciphor_local_flr")))
-            
-            # Set combined score (use LucXor delta score as primary)
-            combined_score = float(lucxor_hit.getScore())
-            merged_hit.setScore(combined_score)
-            
-            merged_hits.append(merged_hit)
-        
-        merged_pid.setHits(merged_hits)
-        merged_pep_ids.push_back(merged_pid)
-    
-    # Save merged results
-    IdXMLFile().store(output_file, lucxor_prot_ids, merged_pep_ids)
-    click.echo(f"Successfully merged {len(merged_pep_ids)} peptide identifications")
-    click.echo(f"  Each peptide contains scores from all three algorithms:")
-    click.echo(f"    - AScore: site-specific scores")
-    click.echo(f"    - PhosphoRS: site probabilities")
-    click.echo(f"    - LucXor: delta scores and FLR values")
+    for ai, pi, li, ref in triples:
+        a_metas = _get_metas_dict(ascore_df, ai)
+        p_metas = _get_metas_dict(phosphors_df, pi)
+        l_metas = _get_metas_dict(lucxor_df, li)
+
+        # Get the actual row data from LucXor for base properties
+        l_row = lucxor_df.loc[li]
+
+        for hit_idx in range(3):
+            a_hit_row = ascore_df[(ascore_df["peptide_identification_index"] == ai) & (ascore_df["hit_index"] == hit_idx)]
+            p_hit_row = phosphors_df[(phosphors_df["peptide_identification_index"] == pi) & (phosphors_df["hit_index"] == hit_idx)]
+            l_hit_row = lucxor_df[(lucxor_df["peptide_identification_index"] == li) & (lucxor_df["hit_index"] == hit_idx)]
+
+            if l_hit_row.empty:
+                break
+
+            l_hit = l_hit_row.iloc[0]
+            seq = str(l_hit.get("sequence", ""))
+            peptidoform = str(l_hit.get("peptidoform", ""))
+            charge = int(l_hit.get("precursor_charge", 0)) if pd.notna(l_hit.get("precursor_charge")) else 0
+            mz = float(l_hit.get("observed_mz", l_hit.get("calculated_mz", 0.0)))
+            rt = float(l_hit.get("rt", 0.0))
+            score = float(l_hit.get("score", 0.0))
+            scan = int(l_hit.get("scan", 0)) if pd.notna(l_hit.get("scan")) else 0
+            spec_ref = str(l_hit.get("spectrum_reference", ""))
+            ref_file = str(l_hit.get("reference_file_name", ""))
+
+            # Build merged metas
+            merged_metas = []
+
+            # Preserve selected metas from LucXor
+            for k in ["target_decoy", "q-value", "Posterior Error Probability_score"]:
+                v = l_metas.get(k)
+                if v:
+                    merged_metas.append({"name": k, "value": v, "value_type": "string"})
+
+            # AScore metas
+            if not a_hit_row.empty:
+                a_hit = a_hit_row.iloc[0]
+                a_peptidoform = str(a_hit.get("peptidoform", ""))
+                merged_metas.append({"name": "AScore_sequence", "value": a_peptidoform, "value_type": "string"})
+                merged_metas.append({"name": "AScore_best_score", "value": str(a_hit.get("score", -1)), "value_type": "double"})
+                for k, v in a_metas.items():
+                    if k.startswith("AScore_") or k == "AScore_pep_score":
+                        merged_metas.append({"name": k, "value": v, "value_type": "double" if k.endswith("score") else "string"})
+
+            # PhosphoRS metas
+            if not p_hit_row.empty:
+                p_hit = p_hit_row.iloc[0]
+                p_peptidoform = str(p_hit.get("peptidoform", ""))
+                merged_metas.append({"name": "PhosphoRS_sequence", "value": p_peptidoform, "value_type": "string"})
+                merged_metas.append({"name": "PhosphoRS_score", "value": str(p_hit.get("score", -1)), "value_type": "double"})
+                for k in ["PhosphoRS_pep_score", "PhosphoRS_site_probs"]:
+                    v = p_metas.get(k)
+                    if v:
+                        merged_metas.append({"name": k, "value": v, "value_type": "double" if "score" in k else "string"})
+
+            # Luciphor metas
+            merged_metas.append({"name": "Luciphor_sequence", "value": peptidoform, "value_type": "string"})
+            merged_metas.append({"name": "Luciphor_delta_score", "value": str(score), "value_type": "double"})
+            for k in ["Luciphor_pep_score", "Luciphor_global_flr", "Luciphor_local_flr", "Luciphor_site_scores", "search_engine_sequence"]:
+                v = l_metas.get(k)
+                if v:
+                    merged_metas.append({"name": k, "value": v, "value_type": "double" if "score" in k or "flr" in k.lower() else "string"})
+
+            merged_rows.append({
+                "sequence": seq,
+                "peptidoform": peptidoform,
+                "precursor_charge": charge,
+                "calculated_mz": mz, "observed_mz": mz,
+                "is_decoy": str(l_hit.get("is_decoy", "False")).lower() == "true",
+                "score": float(score),
+                "score_type": "onsite_combined_score",
+                "higher_score_better": True,
+                "rt": rt, "scan": scan,
+                "spectrum_reference": spec_ref,
+                "reference_file_name": ref_file,
+                "hit_index": hit_idx,
+                "peptide_identification_index": merged_pep_idx,
+                "psm_metavalues": np.array(merged_metas, dtype=object),
+                "modifications": np.array([], dtype=object),
+                "protein_accessions": np.array([], dtype=object),
+                "additional_scores": np.array([], dtype=object),
+                "run_identifier": str(l_hit.get("run_identifier", "")),
+            })
+        merged_pep_idx += 1
+
+    out_df = pd.DataFrame(merged_rows)
+    save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df)
+    click.echo(f"Successfully merged {stats['merged']} peptide identifications")
+    click.echo(f"  Each peptide contains scores from all three algorithms")
 
 
 def run_all_algorithms_from_single_cli(
-    in_file,
-    id_file,
-    out_file,
-    fragment_mass_tolerance,
-    fragment_mass_unit,
-    threads,
-    debug,
-    add_decoys,
+    in_file, id_file, out_file,
+    fragment_mass_tolerance, fragment_mass_unit,
+    threads, debug, add_decoys,
 ):
-    """
-    Run all three algorithms when --compute-all-scores is specified.
-    This function is called from individual algorithm CLIs.
-    """
+    """Run all three algorithms when --compute-all-scores is specified."""
     try:
         start_time = time.time()
-        click.echo(f"[{time.strftime('%H:%M:%S')}] --compute-all-scores enabled: Running all three algorithms")
-        click.echo(f"  Input spectrum: {in_file}")
-        click.echo(f"  Input ID: {id_file}")
-        click.echo(f"  Output: {out_file}")
-        click.echo(f"  Fragment tolerance: {fragment_mass_tolerance} {fragment_mass_unit}")
-        click.echo(f"  Threads: {threads}")
-        click.echo(f"  Add decoys: {add_decoys}")
-        
-        # Create temporary directory for intermediate results
+        click.echo(f"[{time.strftime('%H:%M:%S')}] --compute-all-scores: Running all algorithms")
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
-            phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
-            lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
-            
+            ascore_out = os.path.join(tmpdir, "ascore_result.idparquet")
+            phosphors_out = os.path.join(tmpdir, "phosphors_result.idparquet")
+
             # Run AScore
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Running AScore...")
-            click.echo(f"{'='*60}")
             from onsite.ascore.cli import ascore as ascore_func
             ctx = click.Context(ascore_func)
-            ctx.invoke(
-                ascore_func,
-                in_file=in_file,
-                id_file=id_file,
-                out_file=ascore_out,
+            ctx.invoke(ascore_func,
+                in_file=in_file, id_file=id_file, out_file=ascore_out,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_mass_unit=fragment_mass_unit,
-                threads=threads,
-                debug=debug,
-                add_decoys=add_decoys,
-                compute_all_scores=False,  # Prevent recursion
+                threads=threads, debug=debug, add_decoys=add_decoys,
+                compute_all_scores=False,
             )
-            
+
             # Run PhosphoRS
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Running PhosphoRS...")
-            click.echo(f"{'='*60}")
             from onsite.phosphors.cli import phosphors as phosphors_func
             ctx = click.Context(phosphors_func)
-            ctx.invoke(
-                phosphors_func,
-                in_file=in_file,
-                id_file=id_file,
-                out_file=phosphors_out,
+            ctx.invoke(phosphors_func,
+                in_file=in_file, id_file=id_file, out_file=phosphors_out,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_mass_unit=fragment_mass_unit,
-                threads=threads,
-                debug=debug,
-                add_decoys=add_decoys,
-                compute_all_scores=False,  # Prevent recursion
+                threads=threads, debug=debug, add_decoys=add_decoys,
+                compute_all_scores=False,
             )
-            
-            # Run LucXor with appropriate target modifications
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Running LucXor...")
-            click.echo(f"{'='*60}")
-            
-            # Configure target modifications based on add_decoys flag
+
+            # Run LucXor
             if add_decoys:
                 target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
-                click.echo("  Using target modifications with decoys: Phospho(S), Phospho(T), Phospho(Y), PhosphoDecoy(A)")
             else:
                 target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
-            
-            # Import and call LucXor directly to avoid sys.exit() issues
+
             from onsite.lucxor.cli import PyLuciPHOr2, setup_logging as lucxor_setup_logging
-            
-            # Setup logging for LucXor
+            lucxor_out = os.path.join(tmpdir, "lucxor_result.idparquet")
             lucxor_setup_logging(debug, None, lucxor_out)
-            
-            # Create tool instance and run
             tool = PyLuciPHOr2()
             exit_code = tool.run(
-                input_spectrum=in_file,
-                input_id=id_file,
-                output=lucxor_out,
+                input_spectrum=in_file, input_id=id_file, output=lucxor_out,
                 fragment_method="CID",
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_error_units=fragment_mass_unit,
-                min_mz=150.0,
-                target_modifications=target_mods,
+                min_mz=150.0, target_modifications=target_mods,
                 neutral_losses=("sty -H3PO4 -97.97690",),
                 decoy_mass=79.966331,
                 decoy_neutral_losses=("X -H3PO4 -97.97690",),
-                max_charge_state=5,
-                max_peptide_length=40,
-                max_num_perm=16384,
-                modeling_score_threshold=0.95,
-                scoring_threshold=0.0,
-                min_num_psms_model=50,
-                threads=threads,
-                rt_tolerance=0.01,
-                debug=debug,
-                disable_split_by_charge=False,
+                max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
+                modeling_score_threshold=0.95, scoring_threshold=0.0,
+                min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
+                debug=debug, disable_split_by_charge=False,
             )
-            
             if exit_code != 0:
                 raise RuntimeError(f"LucXor failed with exit code {exit_code}")
-            
-            # Merge results
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Merging results from all algorithms...")
-            click.echo(f"{'='*60}")
+
             merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
-            
+
         elapsed = time.time() - start_time
-        abs_out_file = os.path.abspath(out_file)
-        click.echo(f"\n{'='*60}")
-        click.echo(f"All algorithms completed successfully!")
-        click.echo(f"  Total time: {elapsed:.2f} seconds")
-        click.echo(f"  Output saved to: {abs_out_file}")
-        click.echo(f"{'='*60}")
-        
-        return 0  # Success
-        
+        click.echo(f"All algorithms completed in {elapsed:.2f}s")
+        return 0
+
     except KeyboardInterrupt:
-        click.echo("\nOperation cancelled by user")
+        click.echo("\nCancelled")
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         sys.exit(1)
 
 
-# Add the 'all' command to the CLI group
 cli.add_command(all)
 
 
 def main():
-    """Main entry point for OnSite CLI."""
     try:
         cli()
     except KeyboardInterrupt:
-        click.echo("\nOperation cancelled by user")
+        click.echo("\nCancelled")
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {str(e)}")

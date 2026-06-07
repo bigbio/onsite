@@ -8,27 +8,23 @@ import os
 import sys
 import logging
 import time
-import json
 import random
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
 
+import pandas as pd
+
 from pyopenms import (
-    IdXMLFile,
     MzMLFile,
     MSExperiment,
-    PeptideIdentification,
-    PeptideIdentificationList,
-    ProteinIdentification,
-    IDFilter,
 )
 
+from onsite.idparquet import pyopenms_to_unimod_notation, save_dataframes
 from .psm import PSM
 from .peptide import Peptide
 from .models import CIDModel, HCDModel
-from .constants import NTERM_MOD, CTERM_MOD, AA_MASSES, DEFAULT_CONFIG
-from .spectrum import Spectrum
+from .constants import DEFAULT_CONFIG
 from .flr import FLRCalculator
 from .parallel import parallel_psm_processing, get_optimal_thread_count
 
@@ -50,7 +46,7 @@ logger = logging.getLogger(__name__)
     "input_id",
     required=True,
     type=click.Path(exists=True),
-    help="Input identification file (idXML)"
+    help="Input identification file (idparquet directory)"
 )
 @click.option(
     "-out",
@@ -58,7 +54,7 @@ logger = logging.getLogger(__name__)
     "output",
     required=True,
     type=click.Path(),
-    help="Output file (idXML)"
+    help="Output file (idparquet directory)"
 )
 @click.option(
     "--fragment-method",
@@ -88,7 +84,7 @@ logger = logging.getLogger(__name__)
     "--target-modifications",
     multiple=True,
     default=["Phospho (S)", "Phospho (T)", "Phospho (Y)"],
-    help="List of target modifications (default: Phospho (S), Phospho (T), Phospho (Y))"
+    help="Target modifications (comma/space separated, e.g. 'Phospho(S),Phospho(T),Phospho(Y)' or 'PhosphoDecoy(A)'; default: Phospho (S), Phospho (T), Phospho (Y))"
 )
 @click.option(
     "--neutral-losses",
@@ -350,98 +346,77 @@ class PyLuciPHOr2:
         self.psms = []
         self.config = {}
         
-    def select_score_type(self, pep_ids: PeptideIdentificationList, user_score_type: Optional[str] = None) -> Tuple[str, bool]:
+    def select_score_type(self, pep_ids, user_score_type: Optional[str] = None):
         """
         Select the best available score type based on priority.
-        
+
         Priority order (context-aware):
         1. Posterior Error Probability (Percolator PEP) - always highest priority
         2. Search engine specific:
            - MSGF+: RawScore (MS:1002049) > SpecEValue (MS:1002052)
            - Comet: xcorr (COMET:xcorr) > expect
-        
-        Rationale:
-        - PEP: Machine learning calibrated, most reliable
-        - RawScore/xcorr: Direct match quality, better for model training
-        - E-values: Statistical significance, but database-size dependent
-        
+
         Args:
-            pep_ids: List of peptide identifications
+            pep_ids: List of PeptideIdentification
             user_score_type: User-specified score type (optional)
-        
+
         Returns:
             Tuple of (score_type, higher_score_better)
         """
         if not pep_ids or len(pep_ids) == 0:
             self.logger.warning("No peptide identifications to determine score type")
             return None, True
-        
-        # If user specified a score type, try to use it
+
         if user_score_type:
-            # Determine if it's higher or lower better based on known score types
             higher_better = True
             lower_better_scores = [
                 "posterior error probability", "pep", "q-value", "qvalue",
                 "expect", "evalue", "e-value", "specevalue", "ms:1002052", "ms:1002053",
-                "ms:1002257",  # Comet expect MS ID
-                "ms:1001491", "ms:1001493"
+                "ms:1002257",
+                "ms:1001491", "ms:1001493",
             ]
-            
-            if any(keyword in user_score_type.lower() for keyword in lower_better_scores):
+            if any(kw in user_score_type.lower() for kw in lower_better_scores):
                 higher_better = False
-            
             self.logger.info(f"Using user-specified score type: {user_score_type} (higher_better={higher_better})")
             return user_score_type, higher_better
-            
+
         # Get current score type from first peptide identification
         current_score_type = pep_ids[0].getScoreType() if hasattr(pep_ids[0], "getScoreType") else ""
         current_score_type_lower = current_score_type.lower()
-        
-        # Define priority list: (score_type_pattern, higher_is_better, priority_level)
-        # Priority levels (lower number = higher priority):
-        #   1: Percolator PEP (machine learning calibrated, most reliable)
-        #   2: Raw scores (RawScore, xcorr - direct match quality, best for model training)
-        #   3: E-values (SpecEValue, expect - statistical significance, both search engines)
-        # Note: When priority is the same, order in the list matters - earlier entries are preferred
+
         preferred_scores = [
-            ("posterior error probability", False, 1),  # Percolator PEP - always highest
-            ("ms:1002049", True, 2),   # MSGF+ RawScore - best for MSGF+
-            ("comet:xcorr", True, 2),  # Comet xcorr - best for Comet (same priority as RawScore)
-            ("specevalue", False, 3),  # MSGF+ SpecEValue (matches score_type="SpecEValue") - checked first
-            ("ms:1002052", False, 3),  # MSGF+ SpecEValue MS ID (matches UserParam "MS:1002052") - checked second
-            ("expect", False, 3),      # Comet E-value (matches score_type="expect") - checked third
-            ("ms:1002257", False, 3),  # Comet expect MS ID (matches UserParam "MS:1002257") - checked fourth
+            ("posterior error probability", False, 1),
+            ("ms:1002049", True, 2),
+            ("comet:xcorr", True, 2),
+            ("specevalue", False, 3),
+            ("ms:1002052", False, 3),
+            ("expect", False, 3),
+            ("ms:1002257", False, 3),
         ]
-        
-        # Check current score type priority
-        current_priority = 999  # Default low priority
+
+        current_priority = 999
         current_higher_better = True
         for score_pattern, higher_better, priority in preferred_scores:
             if score_pattern in current_score_type_lower:
                 current_priority = priority
                 current_higher_better = higher_better
                 break
-        
-        # Check UserParam scores and find the highest priority one
+
         best_userparam_score = None
         best_userparam_priority = 999
         best_userparam_higher_better = True
-        
+
         if len(pep_ids[0].getHits()) > 0:
             hit = pep_ids[0].getHits()[0]
-            
+
             for score_pattern, higher_better, priority in preferred_scores:
-                # Check if this score exists as a UserParam (case-insensitive)
-                # Try exact match first, then case-insensitive
                 score_exists = False
                 actual_score_name = None
-                
-                # Try exact pattern match
+
                 if hit.metaValueExists(score_pattern):
                     score_exists = True
                     actual_score_name = score_pattern
                 else:
-                    # Try common variations
                     variations = [
                         score_pattern,
                         score_pattern.upper(),
@@ -451,36 +426,32 @@ class PyLuciPHOr2:
                         "MS:1002052" if score_pattern == "ms:1002052" else None,
                         "MS:1002257" if score_pattern == "ms:1002257" else None,
                     ]
-                    
-                    for variation in variations:
-                        if variation and hit.metaValueExists(variation):
+                    for v in variations:
+                        if v and hit.metaValueExists(v):
                             score_exists = True
-                            actual_score_name = variation
+                            actual_score_name = v
                             break
-                
+
                 if score_exists and priority < best_userparam_priority:
                     best_userparam_score = actual_score_name
                     best_userparam_priority = priority
                     best_userparam_higher_better = higher_better
-        
-        # Compare current score type with best UserParam score
-        # When priorities are equal, prefer UserParam score (as it appears earlier in preferred_scores list)
+
         if best_userparam_score and best_userparam_priority <= current_priority:
             return best_userparam_score, best_userparam_higher_better
         elif current_priority < 999:
             return current_score_type, current_higher_better
-        
-        # Fallback: use current score type and try to determine direction
+
         higher_score_better = True
         if hasattr(pep_ids[0], "isHigherScoreBetter"):
             higher_score_better = pep_ids[0].isHigherScoreBetter()
         elif hasattr(pep_ids[0], "getHigherScoreBetter"):
             higher_score_better = pep_ids[0].getHigherScoreBetter()
-        
+
         self.logger.warning(f"Using fallback score type: {current_score_type} (higher_better={higher_score_better})")
         return current_score_type, higher_score_better
-    
-    def get_psm_score(self, pep_id: PeptideIdentification, hit, score_type: str, higher_score_better: bool) -> float:
+
+    def get_psm_score(self, pep_id, hit, score_type: str, higher_score_better: bool) -> float:
         """
         Extract score from peptide hit based on score type.
         
@@ -524,30 +495,107 @@ class PyLuciPHOr2:
 
     def load_input_files(
         self, input_id: str, input_spectrum: str, score_type: Optional[str] = None
-    ) -> Tuple[PeptideIdentificationList, List[ProteinIdentification], MSExperiment]:
-        """Load input files"""
-        # Load identifications
-        pep_ids = PeptideIdentificationList()
-        prot_ids = []
-        IdXMLFile().load(input_id, prot_ids, pep_ids)
+    ):
+        """Load input files from idParquet directory. Returns (pep_ids, prot_ids, exp)."""
+        from pyopenms import AASequence, PeptideHit, PeptideIdentification
+        from onsite.idparquet import load_dataframes, unimod_to_pyopenms_notation
 
-        if not pep_ids:
+        psms_df, proteins_df, _, _ = load_dataframes(input_id)
+        self._psms_df_template = psms_df  # preserved for output schema
+        if psms_df.empty:
             self.logger.warning("No peptide identifications found in input file")
-            return PeptideIdentificationList(), [], None
+            return [], [], None
 
-        # Keep only best hits
-        IDFilter().keepNBestHits(pep_ids, 1)
-        
+        # Keep only best hits (hit_index == 0), then build pyOpenMS objects for internal use
+        best_psms = psms_df[psms_df["hit_index"] == 0].copy()
+        pep_ids = []
+        self.logger.info(f"Loaded {len(best_psms)} PSMs from idParquet")
+
+        # Build PeptideIdentification objects from DataFrame rows
+        for _, row in best_psms.iterrows():
+            pid = PeptideIdentification()
+            peptidoform = str(row.get("peptidoform", row.get("sequence", "")))
+            pyo_seq = unimod_to_pyopenms_notation(peptidoform)
+            try:
+                seq = AASequence.fromString(pyo_seq)
+            except Exception:
+                seq = AASequence.fromString(str(row.get("sequence", "")))
+            hit = PeptideHit()
+            hit.setSequence(seq)
+            if pd.notna(row.get("precursor_charge")):
+                hit.setCharge(int(row["precursor_charge"]))
+            if pd.notna(row.get("posterior_error_probability")):
+                hit.setScore(float(row["posterior_error_probability"]))
+                hit.setMetaValue("Posterior Error Probability", float(row["posterior_error_probability"]))
+            elif pd.notna(row.get("score")):
+                hit.setScore(float(row["score"]))
+            # Populate psm_metavalues as UserParams for score-type detection
+            mv = row.get("psm_metavalues")
+            if isinstance(mv, np.ndarray):
+                for m in mv:
+                    if isinstance(m, dict):
+                        try:
+                            val = m["value"]
+                            vtype = str(m.get("value_type", "string"))
+                            if vtype in ("double", "float"):
+                                try: val = float(val)
+                                except: pass
+                            elif vtype in ("int", "integer"):
+                                try: val = int(val)
+                                except: pass
+                            hit.setMetaValue(str(m["name"]), val)
+                        except Exception:
+                            pass
+            # Populate additional_scores
+            add_scores = row.get("additional_scores")
+            if isinstance(add_scores, np.ndarray):
+                for ascore in add_scores:
+                    if isinstance(ascore, dict):
+                        sname = ascore.get("score_name", "")
+                        sval = ascore.get("score_value", "")
+                        if sname and sval is not None:
+                            try:
+                                hit.setMetaValue(str(sname), float(sval))
+                            except (ValueError, TypeError):
+                                try:
+                                    hit.setMetaValue(str(sname), str(sval))
+                                except Exception:
+                                    pass
+            pid.setHits([hit])
+            if pd.notna(row.get("rt")):
+                pid.setRT(float(row["rt"]))
+            if pd.notna(row.get("observed_mz")):
+                pid.setMZ(float(row["observed_mz"]))
+            elif pd.notna(row.get("calculated_mz")):
+                pid.setMZ(float(row["calculated_mz"]))
+            if pd.notna(row.get("spectrum_reference")):
+                pid.setMetaValue("spectrum_reference", str(row["spectrum_reference"]))
+            if pd.notna(row.get("scan")):
+                pid.setMetaValue("scan_number", int(row["scan"]))
+            pid.setScoreType(str(row.get("score_type", "")))
+            pep_ids.append(pid)
+
         # Select best score type based on priority
         score_type_param, higher_score_better = self.select_score_type(pep_ids, user_score_type=score_type)
-        
+
         # Override higher_score_better for probability scores after conversion
-        # Since we convert PEP/Q-value to 1-score, they become "higher is better"
         if score_type_param and any(k in score_type_param.lower() for k in [
             "posterior error probability", "pep", "q-value", "qvalue",
             "ms:1001493", "ms:1001491"
         ]):
             higher_score_better = True
+
+        self.score_type = score_type_param
+        self.higher_score_better = higher_score_better
+
+        # Load spectra
+        exp = MSExperiment()
+        MzMLFile().load(input_spectrum, exp)
+        if exp.empty():
+            self.logger.warning("No spectra found in input file")
+            return [], [], None
+
+        return pep_ids, proteins_df, exp
         
         # Store score info for later use
         self.score_type = score_type_param
@@ -561,7 +609,7 @@ class PyLuciPHOr2:
             self.logger.warning("No spectra found in input file")
             return [], [], None
             
-        return pep_ids, prot_ids, exp
+        return pep_ids, proteins_df, exp
         
     def initialize_model(self, config: Dict) -> None:
         """Initialize scoring model"""
@@ -694,6 +742,11 @@ class PyLuciPHOr2:
         for i, pep_id in enumerate(pep_ids, 1):
             hit = pep_id.getHits()[0]
             sequence = hit.getSequence().toString()
+            # Strip pyOpenMS N-terminal dot notation like ".(Acetyl)"
+            if sequence.startswith("."):
+                end_paren = sequence.find(")")
+                if end_paren >= 0:
+                    sequence = sequence[end_paren + 1:]
             charge = hit.getCharge()
             rt = pep_id.getRT()
             
@@ -935,71 +988,119 @@ class PyLuciPHOr2:
         
         self.logger.info("Second round calculation completed")
 
-        # 6. Write results to output file (using second round calculation results)
-        new_pep_ids = PeptideIdentificationList()
+        # 6. Build output DataFrame (using second round calculation results)
+
+        result_rows = []
         phospho_count = 0
-        for psm in all_psms:
-            idx = all_psms.index(psm)
-            if idx < len(pep_ids):
-                orig_pep_id = pep_ids[idx]
-                hit = orig_pep_id.getHits()[0]
-                
-                # Use second round calculated delta score and FLR values
-                hit.setScore(psm.delta_score)  # Second round calculated delta score
-                
-                # Set search_engine_sequence to the original sequence from the peptide
-                if hasattr(psm, "search_engine_sequence"):
-                    hit.setMetaValue("search_engine_sequence", psm.search_engine_sequence)
+        for pep_idx, psm in enumerate(all_psms):
+            # Get original pep_id info
+            orig_pep_id = pep_ids[pep_idx] if pep_idx < len(pep_ids) else None
+            mz = orig_pep_id.getMZ() if orig_pep_id else 0.0
+            rt = orig_pep_id.getRT() if orig_pep_id else 0.0
+            spec_ref = (str(orig_pep_id.getMetaValue("spectrum_reference"))
+                       if orig_pep_id and orig_pep_id.metaValueExists("spectrum_reference") else "")
+            scan_num = (int(orig_pep_id.getMetaValue("scan_number"))
+                       if orig_pep_id and orig_pep_id.metaValueExists("scan_number") else 0)
+            ref_file = (str(orig_pep_id.getMetaValue("reference_file_name"))
+                       if orig_pep_id and orig_pep_id.metaValueExists("reference_file_name") else "")
+
+            # Best sequence
+            best_sequence = psm.get_best_sequence(include_decoys=False)
+            seq_str = best_sequence or psm.peptide.peptide
+            base_seq = psm.peptide.peptide  # fallback unmodified
+
+            # Use pyOpenMS to get unmodified string if possible
+            try:
+                from pyopenms import AASequence
+                seq_obj = AASequence.fromString(seq_str) if seq_str else None
+                if seq_obj:
+                    base_seq = seq_obj.toUnmodifiedString()
+            except Exception:
+                pass
+
+            # Preserve original peptidoform from input
+            _orig_pf = ""
+            _tmpl = getattr(self, "_psms_df_template", None)
+            if _tmpl is not None:
+                _best_pf = _tmpl[_tmpl["hit_index"] == 0]
+                if pep_idx < len(_best_pf):
+                    _orig_pf = str(_best_pf.iloc[pep_idx].get("peptidoform", ""))
+
+            # Build psm_metavalues: preserve original + add Luciphor scores
+            _lucxor_df = getattr(self, "_psms_df_template", None)
+            if _lucxor_df is not None:
+                _best = _lucxor_df[_lucxor_df["hit_index"] == 0]
+                if pep_idx < len(_best):
+                    _orig_mv = _best.iloc[pep_idx].get("psm_metavalues")
+                    _orig_list = list(_orig_mv) if isinstance(_orig_mv, np.ndarray) else []
                 else:
-                    # Fallback to the peptide sequence if search_engine_sequence is not available
-                    hit.setMetaValue("search_engine_sequence", psm.peptide.peptide)
-                
-                hit.setMetaValue("Luciphor_pep_score", psm.psm_score)
-                hit.setMetaValue("Luciphor_global_flr", psm.global_flr)  # Second round assigned FLR value
-                hit.setMetaValue("Luciphor_local_flr", psm.local_flr)    # Second round assigned FLR value
+                    _orig_list = []
+            else:
+                _orig_list = []
+            _lucxor_managed = {"search_engine_sequence", "Luciphor_pep_score", "Luciphor_global_flr",
+                               "Luciphor_local_flr", "Luciphor_site_scores"}
+            _filtered_orig = [m for m in _orig_list if isinstance(m, dict) and m.get("name") not in _lucxor_managed]
+            metas = _filtered_orig[:]
+            for key in ["search_engine_sequence", "Luciphor_pep_score", "Luciphor_global_flr",
+                        "Luciphor_local_flr", "Luciphor_site_scores"]:
+                val = None
+                if key == "search_engine_sequence":
+                    val = getattr(psm, "search_engine_sequence", psm.peptide.peptide)
+                elif key == "Luciphor_pep_score":
+                    val = float(getattr(psm, "psm_score", 0))
+                elif key == "Luciphor_global_flr":
+                    val = float(getattr(psm, "global_flr", 0))
+                elif key == "Luciphor_local_flr":
+                    val = float(getattr(psm, "local_flr", 0))
+                elif key == "Luciphor_site_scores":
+                    val = str(psm.get_site_scores())
+                if val is not None:
+                    vtype = "double" if isinstance(val, float) else "string"
+                    metas.append({"name": key, "value": str(val), "value_type": vtype})
 
-                # Per-site localization confidence (see bigbio/onsite#40): derived
-                # from the real-permutation scores so a site-level decoy-AA FLR can
-                # rank individual sites. {residue_index: score}, higher = better.
-                hit.setMetaValue("Luciphor_site_scores", str(psm.get_site_scores()))
+            score = float(getattr(psm, "delta_score", 0))
+            is_decoy = getattr(psm, "is_decoy", False)
 
-                # Update the sequence to the best scoring sequence from permutations
-                best_sequence = psm.get_best_sequence(include_decoys=False)  # Use second round (real permutations only)
-                if best_sequence != psm.peptide.peptide:
-                    # Create new AASequence with the best sequence
-                    from pyopenms import AASequence
-                    try:
-                        best_aa_sequence = AASequence.fromString(best_sequence)
-                        hit.setSequence(best_aa_sequence)
-                        logger.debug(f"Updated sequence for PSM {psm.scan_num}: {psm.peptide.peptide} -> {best_sequence}")
-                    except Exception as e:
-                        logger.debug(f"Failed to create AASequence for {best_sequence}: {str(e)}, keeping original sequence")
-                        # Keep original sequence if conversion fails
-                        pass
-                
-                new_pep_id = PeptideIdentification(orig_pep_id)
-                new_pep_id.setScoreType("Luciphor_delta_score")
-                new_pep_id.setHigherScoreBetter(True)
-                new_pep_id.setHits([hit])
-                new_pep_ids.push_back(new_pep_id)
+            result_rows.append({
+                "sequence": base_seq,
+                "peptidoform": _orig_pf or peptidoform,
+                "precursor_charge": int(getattr(psm, "charge", 0)),
+                "calculated_mz": mz,
+                "observed_mz": mz,
+                "is_decoy": bool(is_decoy),
+                "score": score,
+                "score_type": "Luciphor_delta_score",
+                "higher_score_better": True,
+                "rt": rt,
+                "scan": scan_num,
+                "spectrum_reference": spec_ref,
+                "reference_file_name": ref_file,
+                "hit_index": 0,
+                "peptide_identification_index": pep_idx,
+                "psm_metavalues": np.array(metas, dtype=object),
+                "modifications": np.array([], dtype=object),
+                "protein_accessions": np.array([], dtype=object),
+                "additional_scores": np.array([], dtype=object),
+                "run_identifier": "",
+            })
 
-                # Count phosphorylated peptides
-                try:
-                    seq_str = hit.getSequence().toString()
-                    if "(Phospho)" in seq_str:
-                        phospho_count += 1
-                except Exception:
-                    pass
+            try:
+                if "(Phospho)" in seq_str:
+                    phospho_count += 1
+            except Exception:
+                pass
 
-        # 7. Save results
-        IdXMLFile().store(output, prot_ids, new_pep_ids)
+        # 7. Save results (idParquet format)
+        out_df = pd.DataFrame(result_rows) if result_rows else pd.DataFrame()
+        save_dataframes(output, out_df, prot_ids, template_df=self._psms_df_template, source_idparquet=input_id)
         self.logger.info(f"Results saved to: {output}")
 
         # 8. Processing completed - print run summary similar to Ascore
         elapsed = time.time() - start_time
         total = len(pep_ids)
-        processed = len(new_pep_ids)
+        processed = len(result_rows)
         errors = max(0, total - processed)
+        new_pep_ids = result_rows  # alias for backward compat in reporting
 
         print("\nProcessing Complete:")
         print(f"  Total identifications: {total}")

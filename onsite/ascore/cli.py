@@ -2,14 +2,24 @@
 # -*- coding: utf-8 -*-
 
 import sys
+import ast
 import time
 import logging
 import traceback
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List
 
 import click
+import numpy as np
+import pandas as pd
 from pyopenms import *
+from onsite.idparquet import (
+    load_dataframes,
+    save_dataframes,
+    pyopenms_to_unimod_notation,
+    unimod_to_pyopenms_notation,
+)
 
 from .ascore import AScore
 
@@ -28,7 +38,7 @@ from .ascore import AScore
     "--id-file",
     "id_file",
     required=True,
-    help="Input idXML file path",
+    help="Input idparquet directory path",
     type=click.Path(exists=True),
 )
 @click.option(
@@ -36,7 +46,7 @@ from .ascore import AScore
     "--out-file",
     "out_file",
     required=True,
-    help="Output idXML file path",
+    help="Output idparquet directory path",
     type=click.Path(),
 )
 @click.option(
@@ -90,11 +100,7 @@ def ascore(
 ):
     """
     Phosphorylation site localization scoring tool using AScore algorithm.
-
-    This tool processes MS/MS spectra and peptide identifications to localize
-    phosphorylation sites using the AScore algorithm.
     """
-    # If compute_all_scores is enabled, delegate to the unified handler
     if compute_all_scores:
         from onsite.onsitec import run_all_algorithms_from_single_cli
         return run_all_algorithms_from_single_cli(
@@ -107,16 +113,11 @@ def ascore(
             debug=debug,
             add_decoys=add_decoys,
         )
-    
-    try:
-        # Initialize processing pipeline
-        exp = load_spectra(in_file)
-        protein_ids, peptide_ids = load_identifications(id_file)
-        # Pre-initialize spectrum cache once in the main thread
-        if peptide_ids:
-            _ = find_spectrum_by_mz(exp, peptide_ids[0].getMZ(), peptide_ids[0].getRT())
 
-        # Initialize debug log (only when --debug)
+    try:
+        exp = load_spectra(in_file)
+        psms_df, proteins_df, _, _ = load_dataframes(id_file)
+
         log_file = f"{out_file}.debug.log"
         logger = log_debug(log_file, debug)
         if debug:
@@ -125,100 +126,61 @@ def ascore(
             logger.info(f"Input file: {in_file}")
             logger.info(f"Identification file: {id_file}")
             logger.info(f"Output file: {out_file}")
-            logger.info(
-                f"Fragment mass tolerance: {fragment_mass_tolerance} {fragment_mass_unit}"
-            )
+            logger.info(f"Fragment mass tolerance: {fragment_mass_tolerance} {fragment_mass_unit}")
             logger.info(f"Threads: {threads}")
             logger.info(f"Add decoys: {add_decoys}")
             logger.info(f"Total spectra: {exp.size()}")
-            logger.info(f"Total identifications: {len(peptide_ids)}")
+            logger.info(f"Total identifications: {psms_df['peptide_identification_index'].nunique()}")
 
-        # Processing statistics
-        stats = {
-            "total": len(peptide_ids),
-            "processed": 0,
-            "phospho": 0,
-            "errors": 0
-        }
-
-        # Main processing loop
+        grouped = list(psms_df.sort_values("peptide_identification_index").groupby("peptide_identification_index"))
+        stats = {"total": len(grouped), "processed": 0, "phospho": 0, "errors": 0}
         start_time = time.time()
-        processed_peptide_ids = PeptideIdentificationList()
+        result_rows: List[Dict] = []
 
-        # Process each PeptideIdentification (optionally in parallel)
         if max(1, int(threads)) == 1:
-            if debug:
-                logger.info("Starting sequential processing")
-            
-            click.echo(
-                f"[{time.strftime('%H:%M:%S')}] Processing {len(peptide_ids)} peptide identifications sequentially..."
-            )
-            
-            for i, pid in enumerate(peptide_ids):
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Processing {len(grouped)} peptide identifications sequentially...")
+            for i, (_, group_df) in enumerate(grouped):
                 try:
-                    if debug and i % 100 == 0:
-                        logger.info(f"Processing identification {i+1}/{len(peptide_ids)}")
-                    
-                    # Process using the original function signature
-                    result = process_peptide_identification(
-                        pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger
+                    res = process_psm_group(
+                        group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug
                     )
-                    
-                    if result["status"] == "success":
-                        processed_peptide_ids.push_back(result["new_pid"])
+                    if res["status"] == "success":
+                        result_rows.extend(res["rows"])
                         stats["processed"] += 1
-                        phospho_count = len([h for h in result["new_pid"].getHits() 
-                                          if "(Phospho)" in h.getSequence().toString()])
-                        stats["phospho"] += phospho_count
-                        
-                        if debug:
-                            logger.info(f"Successfully processed identification {i+1} with {phospho_count} phosphorylated hits")
+                        stats["phospho"] += res["phospho_count"]
                     else:
                         stats["errors"] += 1
-                        error_msg = f"Error processing identification: {result['reason']}"
-                        if debug:
-                            logger.error(error_msg)
                 except Exception as e:
                     stats["errors"] += 1
-                    error_msg = f"Error processing identification: {str(e)}"
                     if debug:
-                        logger.error(error_msg)
+                        logger.error(f"Error: {e}")
                     traceback.print_exc()
         else:
             workers = max(1, int(threads))
-            click.echo(
-                f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} threads"
-            )
-            
-            if debug:
-                logger.info(f"Starting parallel processing with {workers} workers")
-
-            # Build tasks - with threads we can pass objects directly (shared memory)
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} threads")
             params = {
                 "fragment_mass_tolerance": fragment_mass_tolerance,
                 "fragment_mass_unit": fragment_mass_unit,
                 "add_decoys": add_decoys,
             }
             tasks = []
-            for idx, pid in enumerate(peptide_ids):
+            for idx, (_, group_df) in enumerate(grouped):
                 hit_payloads = []
-                for hit in pid.getHits():
-                    seq_str = hit.getSequence().toString()
-                    proforma = hit.getMetaValue("ProForma") if hit.metaValueExists("ProForma") else None
-                    hit_payloads.append({"sequence": seq_str, "proforma": proforma})
+                for _, row in group_df.iterrows():
+                    orig_mv = row.get("psm_metavalues")
+                    hit_payloads.append({
+                        "sequence": unimod_to_pyopenms_notation(str(row.get("peptidoform", row.get("sequence", "")))),
+                        "charge": int(row.get("precursor_charge", 0)) if pd.notna(row.get("precursor_charge")) else 0,
+                        "orig_metas": list(orig_mv) if isinstance(orig_mv, np.ndarray) else [],
+                    })
                 tasks.append({
                     "idx": idx,
-                    "exp": exp,  # Pass spectrum object directly - shared between threads
+                    "exp": exp,
                     "params": params,
-                    "pid": {
-                        "mz": pid.getMZ(),
-                        "rt": pid.getRT(),
-                        "hits": hit_payloads,
-                    }
+                    "mz": float(group_df.iloc[0].get("observed_mz", group_df.iloc[0].get("calculated_mz", 0.0))),
+                    "rt": float(group_df.iloc[0].get("rt", 0.0)),
+                    "hits": hit_payloads,
                 })
-
-            if debug:
-                logger.info(f"Created {len(tasks)} parallel tasks")
 
             indexed_results = {}
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -230,67 +192,15 @@ def ascore(
                     except Exception as e:
                         indexed_results[idx] = {"status": "error", "reason": str(e)}
 
-            if debug:
-                logger.info("Parallel processing completed, rebuilding results")
-
-            # Rebuild PeptideIdentification objects in order
-            for idx in range(len(peptide_ids)):
+            for idx in range(len(grouped)):
                 res = indexed_results.get(idx, {"status": "error", "reason": "unknown"})
-                pid_src = peptide_ids[idx]
                 if res["status"] == "success":
-                    new_pid = PeptideIdentification(pid_src)
-                    new_pid.setScoreType("PhosphoScore")
-                    new_pid.setHigherScoreBetter(True)
-                    new_pid.setSignificanceThreshold(0.0)
-
-                    new_hits = []
-                    for hit_src, hit_res in zip(pid_src.getHits(), res["hits"]):
-                        new_hit = PeptideHit(hit_src)
-                        new_hit.setSequence(AASequence.fromString(hit_res["new_sequence"]))
-                        # Clear managed metas then set in order
-                        for k in [
-                            "search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
-                            "AScore_pep_score"
-                        ]:
-                            if new_hit.metaValueExists(k):
-                                try:
-                                    new_hit.removeMetaValue(k)
-                                except Exception:
-                                    pass
-                        i = 1
-                        while new_hit.metaValueExists(f"AScore_{i}"):
-                            try:
-                                new_hit.removeMetaValue(f"AScore_{i}")
-                            except Exception:
-                                pass
-                            i += 1
-
-                        if new_hit.metaValueExists("ProForma"):
-                            try:
-                                new_hit.removeMetaValue("ProForma")
-                            except Exception:
-                                pass
-
-                        for k, v in hit_res["meta_fields"]:
-                            new_hit.setMetaValue(k, v)
-                        new_hit.setScore(hit_res["best_ascore"])
-                        new_hits.append(new_hit)
-
-                    new_pid.setHits(new_hits)
-                    processed_peptide_ids.push_back(new_pid)
+                    result_rows.extend(res["rows"])
                     stats["processed"] += 1
-                    phospho_count = len([h for h in new_pid.getHits() if "(Phospho)" in h.getSequence().toString()])
-                    stats["phospho"] += phospho_count
-                    
-                    if debug:
-                        logger.info(f"Rebuilt identification {idx+1} with {phospho_count} phosphorylated hits")
+                    stats["phospho"] += res["phospho_count"]
                 else:
                     stats["errors"] += 1
-                    error_msg = f"Error processing identification: {res.get('reason', 'unknown')}"
-                    if debug:
-                        logger.error(error_msg)
-        
-        # Generate final report
+
         elapsed = time.time() - start_time
         click.echo(f"\nProcessing Complete:")
         click.echo(f"  Total identifications: {stats['total']}")
@@ -299,18 +209,13 @@ def ascore(
         click.echo(f"  Processing errors: {stats['errors']}")
         click.echo(f"  Time elapsed: {elapsed:.2f} seconds")
         click.echo(f"  Processing speed: {stats['processed']/elapsed:.2f} IDs/second")
-        if debug:
-            click.echo(f"  Debug log saved to: {log_file}")
-        
-        if debug:
-            logger.info("Processing completed successfully")
-            logger.info(f"Final statistics: {stats}")
-            logger.info(f"Total time: {elapsed:.2f} seconds")
-            logger.info(f"Processing speed: {stats['processed']/elapsed:.2f} IDs/second")
 
-        # Save results
-        click.echo(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_file}")
-        save_identifications(out_file, protein_ids, processed_peptide_ids)
+        if result_rows:
+            out_df = pd.DataFrame(result_rows)
+            click.echo(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_file}")
+            save_dataframes(out_file, out_df, proteins_df, template_df=psms_df, source_idparquet=id_file)
+        else:
+            click.echo("Warning: No results to save")
 
     except KeyboardInterrupt:
         click.echo("\nOperation cancelled by user")
@@ -325,7 +230,6 @@ def ascore(
 
 
 def load_spectra(mzml_file):
-    """Load MS/MS spectra"""
     print(f"[{time.strftime('%H:%M:%S')}] Loading spectra from {mzml_file}")
     exp = MSExperiment()
     FileHandler().loadExperiment(mzml_file, exp)
@@ -333,58 +237,11 @@ def load_spectra(mzml_file):
     return exp
 
 
-def load_identifications(idxml_file):
-    """Load identification results"""
-    print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
-    protein_ids = []
-    peptide_ids = PeptideIdentificationList()
-    IdXMLFile().load(idxml_file, protein_ids, peptide_ids)
-    print(f"Loaded {len(peptide_ids)} peptide identifications")
-    return protein_ids, peptide_ids
-
-
-def save_identifications(out_file, protein_ids, peptide_ids):
-    """Save results"""
-    try:
-        # Ensure all critical metadata fields exist
-        for pid in peptide_ids:
-            # Set identification-level attributes
-            pid.setScoreType("PhosphoScore")
-            pid.setHigherScoreBetter(True)
-            pid.setSignificanceThreshold(0.0)
-            
-            for hit in pid.getHits():
-                seq_str = hit.getSequence().toString()
-                
-                # Ensure all required metadata fields exist
-                if not hit.metaValueExists("search_engine_sequence"):
-                    hit.setMetaValue("search_engine_sequence", seq_str)
-                if not hit.metaValueExists("regular_phospho_count"):
-                    hit.setMetaValue("regular_phospho_count", seq_str.count("(Phospho)"))
-                if not hit.metaValueExists("phospho_decoy_count"):
-                    hit.setMetaValue("phospho_decoy_count", seq_str.count("(PhosphoDecoy)"))
-                
-                # Then set AScore fields
-                if not hit.metaValueExists("AScore_pep_score"):
-                    hit.setMetaValue("AScore_pep_score", hit.getScore())
-
-        # Write with XML format validation
-        IdXMLFile().store(out_file, protein_ids, peptide_ids)
-        print(f"Successfully saved {len(peptide_ids)} identifications to {out_file}")
-    except Exception as e:
-        print(f"Critical error saving results: {str(e)}")
-        traceback.print_exc()
-        sys.exit(1)
-
-
 def log_debug(log_file, enabled):
-    """Initialize debug logging only when enabled"""
     logger = logging.getLogger("debug_logger")
-    # Clear existing handlers to avoid duplicates on repeated runs
     if logger.handlers:
         for h in list(logger.handlers):
             logger.removeHandler(h)
-
     if enabled:
         logger.setLevel(logging.INFO)
         handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
@@ -392,305 +249,244 @@ def log_debug(log_file, enabled):
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        # Ensure propagation is enabled
         logger.propagate = False
     else:
-        # Disable logging output when not in debug mode
         logger.setLevel(logging.CRITICAL)
-        # Add a null handler to prevent "No handler found" warnings
         logger.addHandler(logging.NullHandler())
     return logger
 
 
 def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
-    """Optimized spectrum matching with caching"""
-    # Binary search for optimized spectrum matching
     if not hasattr(find_spectrum_by_mz, "spectrum_cache"):
         find_spectrum_by_mz.spectrum_cache = {}
         find_spectrum_by_mz.spectrum_list = []
-        
-        # Preprocess all MS2 spectra
         for spec in exp:
             if spec.getMSLevel() == 2 and spec.getPrecursors():
                 mz = spec.getPrecursors()[0].getMZ()
                 find_spectrum_by_mz.spectrum_list.append((mz, spec))
-        
-        # Sort by m/z
         find_spectrum_by_mz.spectrum_list.sort(key=lambda x: x[0])
-    
-    # Binary search for the closest m/z
+
     left, right = 0, len(find_spectrum_by_mz.spectrum_list) - 1
     best_match = None
     min_diff = float("inf")
-    
     while left <= right:
         mid = (left + right) // 2
         mz, spec = find_spectrum_by_mz.spectrum_list[mid]
         diff = abs(mz - target_mz)
-        
         if diff < min_diff:
             min_diff = diff
             best_match = spec
-        
         if mz < target_mz:
             left = mid + 1
         else:
             right = mid - 1
-    
     return best_match
 
 
-# ----------------------- Threading worker utilities -----------------------
-# Note: Using ThreadPoolExecutor instead of ProcessPoolExecutor allows threads
-# to share the spectrum data (exp object) directly without reloading the file.
-# This provides significant performance improvement for parallel processing.
+def _metas_from_scored_hit(scored_hit, original_seq_str: str) -> tuple:
+    """Extract meta_fields and best_ascore from a scored PeptideHit.
+
+    Returns (meta_fields, best_ascore, new_seq_str, phospho_count).
+    """
+    new_seq_str = scored_hit.getSequence().toString()
+    phospho_count = new_seq_str.count("(Phospho)")
+
+    site_scores = []
+    rank = 1
+    while scored_hit.metaValueExists(f"AScore_{rank}"):
+        site_scores.append(float(scored_hit.getMetaValue(f"AScore_{rank}")))
+        rank += 1
+    while len(site_scores) < phospho_count:
+        site_scores.append(1000.0)
+
+    ascore_pep_score = (
+        float(scored_hit.getMetaValue("AScore_pep_score"))
+        if scored_hit.metaValueExists("AScore_pep_score")
+        else -1.0
+    )
+    best_ascore = min(site_scores) if site_scores else -1.0
+
+    meta_fields = [
+        ("search_engine_sequence", original_seq_str),
+        ("regular_phospho_count", phospho_count),
+        ("phospho_decoy_count", new_seq_str.count("(PhosphoDecoy)")),
+        ("AScore_pep_score", ascore_pep_score),
+    ]
+    for i, score in enumerate(site_scores, 1):
+        meta_fields.append((f"AScore_{i}", score))
+    if scored_hit.metaValueExists("ProForma"):
+        meta_fields.append(("ProForma", scored_hit.getMetaValue("ProForma")))
+    if scored_hit.metaValueExists("AScore_site_scores"):
+        raw = scored_hit.getMetaValue("AScore_site_scores")
+        try:
+            d = ast.literal_eval(raw)
+            d_1based = str({int(k) + 1: v for k, v in d.items()})
+        except Exception:
+            d_1based = raw
+        meta_fields.append(("AScore_site_scores", d_1based))
+
+    return meta_fields, best_ascore, new_seq_str, phospho_count
+
+
+def _process_hit_serial(hit, seq_str, fragment_mass_tolerance, fragment_mass_unit, add_decoys, spectrum, logger):
+    """Process a single hit in serial mode. Returns meta_fields, best_ascore, new_seq_str, phospho_count."""
+    new_hit = PeptideHit(hit)
+    original_seq_str = new_hit.getSequence().toString()
+    new_hit.setMetaValue("search_engine_sequence", original_seq_str)
+
+    if "(Phospho)" not in original_seq_str and "(PhosphoDecoy)" not in original_seq_str:
+        new_hit.setScore(-1.0)
+        new_hit.setMetaValue("AScore_pep_score", -1.0)
+        meta_fields = [
+            ("search_engine_sequence", original_seq_str),
+            ("regular_phospho_count", 0),
+            ("phospho_decoy_count", 0),
+            ("AScore_pep_score", -1.0),
+        ]
+        return meta_fields, -1.0, original_seq_str, 0
+
+    ascore = AScore()
+    ascore.fragment_mass_tolerance_ = fragment_mass_tolerance
+    ascore.fragment_tolerance_ppm_ = (fragment_mass_unit == "ppm")
+    ascore.setAddDecoys(add_decoys)
+
+    scored_hit = ascore.compute(new_hit, spectrum)
+    meta_fields, best_ascore, new_seq_str, phospho_count = _metas_from_scored_hit(scored_hit, original_seq_str)
+    return meta_fields, best_ascore, new_seq_str, phospho_count
+
+
+def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug=False):
+    """Process a group of PSM rows (one identification, possibly multiple hits)."""
+    try:
+        row0 = group_df.iloc[0]
+        mz = float(row0.get("observed_mz", row0.get("calculated_mz", 0.0)))
+        rt = float(row0.get("rt", 0.0))
+
+        spectrum = find_spectrum_by_mz(exp, mz, rt)
+        if not spectrum:
+            return {"status": "error", "reason": "spectrum_not_found"}
+
+        spectrum_reference = str(row0.get("spectrum_reference", "")) if pd.notna(row0.get("spectrum_reference")) else ""
+        scan_num = int(row0.get("scan", 0)) if pd.notna(row0.get("scan")) else 0
+        ref_file = str(row0.get("reference_file_name", "")) if pd.notna(row0.get("reference_file_name")) else ""
+        score_type = "PhosphoScore"
+        higher_better = True
+        pep_idx = int(row0["peptide_identification_index"])
+
+        psm_rows = []
+        phospho_count = 0
+
+        for hit_idx, (_, row) in enumerate(group_df.iterrows()):
+            seq_str = unimod_to_pyopenms_notation(str(row.get("peptidoform", row.get("sequence", ""))))
+            charge = int(row.get("precursor_charge", 0)) if pd.notna(row.get("precursor_charge")) else 0
+
+            # Build a PeptideHit for the algorithm (internal)
+            seq = AASequence.fromString(seq_str)
+            hit = PeptideHit()
+            hit.setSequence(seq)
+            if pd.notna(row.get("score")):
+                hit.setScore(float(row["score"]))
+            if charge:
+                hit.setCharge(charge)
+
+            meta_fields, best_ascore, new_seq_str, ph_count = _process_hit_serial(
+                hit, seq_str, fragment_mass_tolerance, fragment_mass_unit, add_decoys, spectrum, logger
+            )
+            phospho_count += 1 if ph_count > 0 else 0
+            peptidoform_out = pyopenms_to_unimod_notation(new_seq_str)
+            base_seq_out = seq.toUnmodifiedString() if new_seq_str == seq_str else ""
+
+            metas_list = [{"name": k, "value": str(v), "value_type": "double" if isinstance(v, float) else "string"} for k, v in meta_fields]
+
+            _ascore_prefixes = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
+                              "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
+            combined_metas = _preserve_plus_new(row, metas_list, _ascore_prefixes)
+
+            psm_rows.append({
+                "sequence": base_seq_out or hit.getSequence().toUnmodifiedString(),
+                "peptidoform": str(row.get("peptidoform", row.get("sequence", ""))),
+                "precursor_charge": charge,
+                "calculated_mz": mz,
+                "observed_mz": mz,
+                "is_decoy": False,
+                "score": float(best_ascore),
+                "score_type": score_type,
+                "higher_score_better": higher_better,
+                "rt": rt,
+                "scan": scan_num,
+                "spectrum_reference": spectrum_reference,
+                "reference_file_name": ref_file,
+                "hit_index": hit_idx,
+                "peptide_identification_index": pep_idx,
+                "psm_metavalues": np.array(combined_metas, dtype=object),
+                "modifications": np.array([], dtype=object),
+                "protein_accessions": np.array([], dtype=object),
+                "additional_scores": np.array([], dtype=object),
+                "run_identifier": str(row0.get("run_identifier", "")) if pd.notna(row0.get("run_identifier", "")) else "",
+            })
+
+        return {"status": "success", "rows": psm_rows, "phospho_count": phospho_count}
+
+    except Exception as e:
+        if debug and logger:
+            logger.error(f"Error: {e}")
+        return {"status": "error", "reason": str(e)}
 
 
 def _worker_process_pid_threaded(task):
-    """Thread-safe worker that uses shared spectrum data.
-
-    Unlike process-based workers, threads share memory so we can pass
-    the exp object directly without serialization or file reloading.
-    """
+    """Thread worker. task has: exp, params, mz, rt, hits=[{sequence, charge}]."""
     try:
-        exp = task["exp"]  # Shared spectrum object - no file reload needed
-        pid_info = task["pid"]
+        exp = task["exp"]
         params = task["params"]
-
-        # Find spectrum (uses shared cache from main thread)
-        spectrum = find_spectrum_by_mz(exp, pid_info["mz"], pid_info.get("rt"))
+        spectrum = find_spectrum_by_mz(exp, task["mz"], task.get("rt"))
         if spectrum is None:
             return {"status": "error", "reason": "spectrum_not_found"}
 
-        # Configure AScore instance per task
-        ascore = AScore()
-        ascore.fragment_mass_tolerance_ = params["fragment_mass_tolerance"]
-        ascore.fragment_tolerance_ppm_ = params["fragment_mass_unit"] == "ppm"
-        ascore.setAddDecoys(params.get("add_decoys", False))
-
-        results = []
-        for hit_info in pid_info["hits"]:
-            # Rebuild hit from sequence
+        rows = []
+        for hit_info in task["hits"]:
             seq = AASequence.fromString(hit_info["sequence"])
             hit = PeptideHit()
             hit.setSequence(seq)
-            if "proforma" in hit_info and hit_info["proforma"] is not None:
-                hit.setMetaValue("ProForma", hit_info["proforma"])
+            if hit_info.get("charge"):
+                hit.setCharge(hit_info["charge"])
+
+            ascore = AScore()
+            ascore.fragment_mass_tolerance_ = params["fragment_mass_tolerance"]
+            ascore.fragment_tolerance_ppm_ = params["fragment_mass_unit"] == "ppm"
+            ascore.setAddDecoys(params.get("add_decoys", False))
 
             scored_hit = ascore.compute(hit, spectrum)
+            meta_fields, best_ascore, new_seq_str, _ = _metas_from_scored_hit(scored_hit, hit_info["sequence"])
 
-            # Extract metas in deterministic order
-            new_seq_str = scored_hit.getSequence().toString()
-
-            # Collect site scores
-            site_scores = []
-            rank = 1
-            while scored_hit.metaValueExists(f"AScore_{rank}"):
-                site_scores.append(float(scored_hit.getMetaValue(f"AScore_{rank}")))
-                rank += 1
-
-            ascore_pep_score = float(scored_hit.getMetaValue("AScore_pep_score")) if scored_hit.metaValueExists("AScore_pep_score") else -1.0
-            best_ascore = min(site_scores) if site_scores else -1.0
-
-            meta_fields = []
-            meta_fields.append(("search_engine_sequence", hit_info["sequence"]))
-            meta_fields.append(("regular_phospho_count", new_seq_str.count("(Phospho)")))
-            meta_fields.append(("phospho_decoy_count", new_seq_str.count("(PhosphoDecoy)")))
-            meta_fields.append(("AScore_pep_score", ascore_pep_score))
-            for i, score in enumerate(site_scores, 1):
-                meta_fields.append((f"AScore_{i}", score))
-            if scored_hit.metaValueExists("ProForma"):
-                meta_fields.append(("ProForma", scored_hit.getMetaValue("ProForma")))
-            if scored_hit.metaValueExists("AScore_site_scores"):
-                meta_fields.append(("AScore_site_scores", scored_hit.getMetaValue("AScore_site_scores")))
-
-            results.append({
+            metas_list = [{"name": k, "value": str(v), "value_type": "double" if isinstance(v, float) else "string"} for k, v in meta_fields]
+            _ascore_prefixes = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
+                              "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
+            orig = hit_info.get("orig_metas", [])
+            filtered_orig = [m for m in orig if isinstance(m, dict) and m.get("name") not in _ascore_prefixes
+                            and not m.get("name", "").startswith("AScore_")]
+            combined = filtered_orig + metas_list
+            rows.append({
                 "new_sequence": new_seq_str,
                 "best_ascore": best_ascore,
-                "meta_fields": meta_fields
+                "meta_fields": meta_fields,
+                "metas_list": combined,
             })
 
-        return {"status": "success", "hits": results}
+        return {"status": "success", "hits": rows}
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
 
-def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger):
-    """Process a single peptide identification with error handling"""
-    try:
-        # Create new PeptideIdentification
-        new_pid = PeptideIdentification(pid)
-        new_pid.setScoreType("PhosphoScore")
-        new_pid.setHigherScoreBetter(True)
-        new_pid.setSignificanceThreshold(0.0)
-        
-        if logger and logger.isEnabledFor(logging.INFO):
-            logger.info(f"Processing identification - MZ: {pid.getMZ():.4f}, RT: {pid.getRT():.2f}")
-        
-        # Find spectrum
-        spectrum = find_spectrum_by_mz(exp, pid.getMZ(), pid.getRT())
-        if not spectrum:
-            error_msg = f"Error processing identification: spectrum_not_found for MZ {pid.getMZ()}"
-            if logger and logger.isEnabledFor(logging.ERROR):
-                logger.error(error_msg)
-            return {"status": "error", "reason": "spectrum_not_found"}
-        
-        if logger and logger.isEnabledFor(logging.INFO):
-            logger.info(f"Found spectrum: {spectrum.getNativeID()}")
-        
-        # Configure AScore instance
-        ascore = AScore()
-        ascore.fragment_mass_tolerance_ = fragment_mass_tolerance
-        ascore.fragment_tolerance_ppm_ = (fragment_mass_unit == "ppm")
-        ascore.setAddDecoys(add_decoys)
-        
-        # Process peptide hits
-        scored_peptides = []
-        for hit in pid.getHits():
-            # Create new PeptideHit
-            new_hit = PeptideHit(hit)
-            
-            # Store original sequence
-            original_seq_str = new_hit.getSequence().toString()
-            new_hit.setMetaValue("search_engine_sequence", original_seq_str)
-            
-            # Quick check for phosphorylation sites
-            if "(Phospho)" not in original_seq_str and "(PhosphoDecoy)" not in original_seq_str:
-                new_hit.setScore(-1.0)
-                new_hit.setMetaValue("AScore_pep_score", -1.0)
-                if logger and logger.isEnabledFor(logging.INFO):
-                    logger.info(f"Skipping non-phosphorylated peptide: {original_seq_str}")
-                scored_peptides.append(new_hit)
-                continue
-            
-            if logger and logger.isEnabledFor(logging.INFO):
-                logger.info(f"Processing phosphorylated peptide: {original_seq_str}")
-            
-            if logger and logger.isEnabledFor(logging.INFO):
-                logger.info(f"Computing AScore for: {original_seq_str} (tolerance: {fragment_mass_tolerance} {fragment_mass_unit})")
-            
-            # Execute AScore calculation
-            scored_hit = ascore.compute(new_hit, spectrum)
-            
-            # Get the new sequence after AScore reassignment
-            new_seq_str = scored_hit.getSequence().toString()
-            
-            # Set the new sequence as the main sequence
-            new_hit.setSequence(scored_hit.getSequence())
-            
-            # Count phosphorylation sites
-            phospho_count = new_seq_str.count("(Phospho)")
-            
-            # Extract site-specific scores
-            site_scores = []
-            rank = 1
-            
-            # Get existing AScore values
-            while scored_hit.metaValueExists(f"AScore_{rank}"):
-                score = float(scored_hit.getMetaValue(f"AScore_{rank}"))
-                site_scores.append(score)
-                rank += 1
-                
-            # If we have fewer scores than phospho sites, add default scores
-            while len(site_scores) < phospho_count:
-                site_scores.append(1000.0)  # Default high confidence score
-            
-            # Get the AScore_pep_score (highest weighted peptide score)
-            ascore_pep_score = float(scored_hit.getMetaValue("AScore_pep_score")) if scored_hit.metaValueExists("AScore_pep_score") else -1.0
-            
-            # Determine overall score (best AScore value, which is the minimum)
-            best_ascore = min(site_scores) if site_scores else -1.0
-            
-            if logger and logger.isEnabledFor(logging.INFO):
-                logger.info(f"AScore computation complete:")
-                logger.info(f"  Original: {original_seq_str}")
-                logger.info(f"  New: {new_seq_str}")
-                logger.info(f"  Phospho sites: {phospho_count}")
-                logger.info(f"  Site scores: {site_scores}")
-                logger.info(f"  Best AScore: {best_ascore}")
-            
-            # Build meta fields in the required order
-            meta_fields = []
-            meta_fields.append(("search_engine_sequence", original_seq_str))
-            meta_fields.append(("regular_phospho_count", phospho_count))
-            meta_fields.append(("phospho_decoy_count", new_seq_str.count("(PhosphoDecoy)")))
-            meta_fields.append(("AScore_pep_score", ascore_pep_score))
-            for i, score in enumerate(site_scores, 1):
-                meta_fields.append((f"AScore_{i}", score))
-            if scored_hit.metaValueExists("ProForma"):
-                meta_fields.append(("ProForma", scored_hit.getMetaValue("ProForma")))
-            if scored_hit.metaValueExists("AScore_site_scores"):
-                meta_fields.append(("AScore_site_scores", scored_hit.getMetaValue("AScore_site_scores")))
 
-            # Preserve existing ProForma
-            proforma_value = None
-            if scored_hit.metaValueExists("ProForma"):
-                proforma_value = scored_hit.getMetaValue("ProForma")
-            elif new_hit.metaValueExists("ProForma"):
-                proforma_value = new_hit.getMetaValue("ProForma")
-
-            # Remove managed fields to re-insert them
-            for k in [
-                "search_engine_sequence",
-                "regular_phospho_count",
-                "phospho_decoy_count",
-                "AScore_pep_score",
-            ]:
-                if new_hit.metaValueExists(k):
-                    try:
-                        new_hit.removeMetaValue(k)
-                    except Exception:
-                        # Fallback: overwrite later if removal unsupported
-                        pass
-
-            # Remove any existing site-level AScore_* fields
-            i = 1
-            while new_hit.metaValueExists(f"AScore_{i}"):
-                try:
-                    new_hit.removeMetaValue(f"AScore_{i}")
-                except Exception:
-                    pass
-                i += 1
-
-            # Ensure ProForma will be appended last
-            if new_hit.metaValueExists("ProForma"):
-                try:
-                    new_hit.removeMetaValue("ProForma")
-                except Exception:
-                    pass
-
-            # Apply managed metadata (others are preserved)
-            for key, value in meta_fields:
-                new_hit.setMetaValue(key, value)
-            # Re-append preserved ProForma if available
-            if proforma_value is not None and not any(k == "ProForma" for k, _ in meta_fields):
-                new_hit.setMetaValue("ProForma", proforma_value)
-            
-            # Set the score to the best AScore value
-            new_hit.setScore(best_ascore)
-            
-            if logger and logger.isEnabledFor(logging.INFO):
-                logger.info(f"Successfully processed: {original_seq_str} -> {new_seq_str}")
-            
-            scored_peptides.append(new_hit)
-        
-        # Set new hits
-        new_pid.setHits(scored_peptides)
-        
-        if logger and logger.isEnabledFor(logging.INFO):
-            logger.info(f"Successfully processed identification with {len(scored_peptides)} hits")
-        
-        return {"status": "success", "new_pid": new_pid}
-        
-    except Exception as e:
-        error_msg = f"Error processing identification: {str(e)}"
-        if logger and logger.isEnabledFor(logging.ERROR):
-            logger.error(error_msg)
-        return {"status": "error", "reason": str(e)}
-
+def _preserve_plus_new(row, new_metas: list, managed_prefixes: set) -> list:
+    """Merge original psm_metavalues from row with new metas, dropping managed keys."""
+    orig = row.get("psm_metavalues")
+    orig_list = list(orig) if isinstance(orig, np.ndarray) else []
+    def _is_managed(name):
+        return name in managed_prefixes or any(name.startswith(p) for p in managed_prefixes if p.endswith("_"))
+    return [m for m in orig_list if isinstance(m, dict) and not _is_managed(m.get("name", ""))] + new_metas
 
 def main():
-    """Entry point for standalone AScore CLI."""
     ascore()
 
 

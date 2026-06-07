@@ -18,26 +18,26 @@ def data_dir():
 
 
 @pytest.fixture(scope="session")
-def idxml_file(data_dir):
-    """Get the idXML file path."""
-    return data_dir / "1_consensus_fdr_filter_pep.idXML"
-
-
-@pytest.fixture(scope="session")
 def mzml_file(data_dir):
-    """Get the mzML file path."""
-    return data_dir / "1.mzML"
+    """Get the mzML file path (rep1)."""
+    return data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML"
 
 
 @pytest.fixture(scope="session")
-def data_files_exist(data_dir, idxml_file, mzml_file):
+def idparquet_dir(data_dir):
+    """Get the idparquet directory path (rep1)."""
+    return data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet"
+
+
+@pytest.fixture(scope="session")
+def data_files_exist(data_dir, mzml_file, idparquet_dir):
     """Check that required data files exist."""
     if not data_dir.exists():
         pytest.skip("Data directory does not exist")
-    if not idxml_file.exists():
-        pytest.skip("idXML file does not exist")
     if not mzml_file.exists():
-        pytest.skip("mzML file does not exist")
+        pytest.skip(f"mzML file not found: {mzml_file}")
+    if not idparquet_dir.exists() or not (idparquet_dir / "psms.parquet").exists():
+        pytest.skip(f"idparquet dir not found: {idparquet_dir}")
     return True
 
 
@@ -52,7 +52,7 @@ def temp_output_dir():
 @pytest.fixture
 def sample_output_file(temp_output_dir):
     """Get a sample output file path."""
-    return os.path.join(temp_output_dir, "test_output.idXML")
+    return os.path.join(temp_output_dir, "test_output.idparquet")
 
 
 # Markers for different test categories
@@ -69,10 +69,10 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     """Modify test collection to skip tests if data files are missing."""
     data_dir = Path(__file__).parent.parent / "data"
-    idxml_file = data_dir / "1_consensus_fdr_filter_pep.idXML"
-    mzml_file = data_dir / "1.mzML"
-    
-    if not data_dir.exists() or not idxml_file.exists() or not mzml_file.exists():
+    mzml_file = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML"
+    idparquet_dir = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet"
+
+    if not data_dir.exists() or not mzml_file.exists() or not idparquet_dir.exists():
         for item in items:
             if "data" in item.keywords:
-                item.add_marker(pytest.mark.skip(reason="Required data files not found"))
+                item.add_marker(pytest.mark.skip(reason="Required data files not found (mzML or idparquet)"))

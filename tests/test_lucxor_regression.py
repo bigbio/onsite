@@ -456,110 +456,71 @@ class TestEndToEndRegression:
     def data_files(self):
         """Check if test data files exist."""
         data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-        idxml = os.path.join(data_dir, "1_consensus_fdr_filter_pep.idXML")
-        mzml = os.path.join(data_dir, "1.mzML")
+        idparquet = os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_feat_perc.idparquet")
+        mzml = os.path.join(data_dir, "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML")
 
-        if not os.path.exists(idxml) or not os.path.exists(mzml):
+        if not os.path.isdir(idparquet) or not os.path.isfile(os.path.join(idparquet, "psms.parquet")) or not os.path.exists(mzml):
             pytest.skip("Test data files not available")
 
-        return idxml, mzml
+        return idparquet, mzml
 
     def test_lucxor_deterministic_with_seed(self, data_files, tmp_path):
         """Test that LucXor produces identical results with same seed."""
-        import subprocess
+        from click.testing import CliRunner
+        from onsite.onsitec import cli
 
-        idxml, mzml = data_files
-        output1 = tmp_path / "output1.idXML"
-        output2 = tmp_path / "output2.idXML"
+        idparquet, mzml = data_files
+        output1 = str(tmp_path / "output1.idparquet")
+        output2 = str(tmp_path / "output2.idparquet")
+        runner = CliRunner()
 
-        # Run twice with seed wrapper
-        for output in [output1, output2]:
-            # Create a wrapper script that sets the seed
-            result = subprocess.run(
-                [
-                    "python3",
-                    "-c",
-                    f"""
-import random
-import numpy as np
-random.seed(42)
-np.random.seed(42)
+        args_base = [
+            "lucxor",
+            "--input-spectrum", mzml,
+            "--input-id", idparquet,
+            "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y)",
+        ]
 
-import sys
-sys.argv = ['lucxor', '--input-id', '{idxml}', '--input-spectrum', '{mzml}', '--output', '{output}']
+        for out in [output1, output2]:
+            r = runner.invoke(cli, args_base + ["--output", out])
+            if r.exit_code != 0:
+                pytest.fail(f"LucXor failed: {r.output[:500]}")
 
-from onsite.lucxor.cli import main
-main()
-""",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode != 0:
-                pytest.fail(f"LucXor failed: {result.stderr}")
-
-        # Compare outputs
-        import re
-
-        def extract_scores(filename):
-            scores = []
-            with open(filename) as f:
-                for line in f:
-                    match = re.search(r'PeptideHit score="([^"]+)"', line)
-                    if match:
-                        scores.append(float(match.group(1)))
-            return np.array(scores)
-
-        scores1 = extract_scores(output1)
-        scores2 = extract_scores(output2)
+        import pandas as pd
+        scores1 = pd.read_parquet(os.path.join(output1, "psms.parquet"))["score"].values
+        scores2 = pd.read_parquet(os.path.join(output2, "psms.parquet"))["score"].values
 
         assert len(scores1) == len(scores2), "Different number of scores"
         np.testing.assert_allclose(
-            scores1,
-            scores2,
-            rtol=1e-10,
-            atol=1e-10,
+            scores1, scores2, rtol=1e-10, atol=1e-10,
             err_msg="Scores differ between runs with same seed",
         )
 
     def test_score_statistics_stability(self, data_files, tmp_path):
         """Test that score statistics remain stable across runs (even without seed)."""
-        import subprocess
-        import re
+        from click.testing import CliRunner
+        from onsite.onsitec import cli
 
-        idxml, mzml = data_files
+        idparquet, mzml = data_files
+        runner = CliRunner()
+
+        args_base = [
+            "lucxor",
+            "--input-spectrum", mzml,
+            "--input-id", idparquet,
+            "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y)",
+        ]
 
         scores_list = []
         for i in range(2):
-            output = tmp_path / f"output_{i}.idXML"
+            output = str(tmp_path / f"output_{i}.idparquet")
+            r = runner.invoke(cli, args_base + ["--output", output])
+            if r.exit_code != 0:
+                pytest.fail(f"LucXor run {i} failed: {r.output[:500]}")
 
-            result = subprocess.run(
-                [
-                    "python3",
-                    "-m",
-                    "onsite.lucxor.cli",
-                    "--input-id",
-                    idxml,
-                    "--input-spectrum",
-                    mzml,
-                    "--output",
-                    str(output),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode != 0:
-                pytest.fail(f"LucXor run {i} failed: {result.stderr}")
-
-            scores = []
-            with open(output) as f:
-                for line in f:
-                    match = re.search(r'PeptideHit score="([^"]+)"', line)
-                    if match:
-                        scores.append(float(match.group(1)))
-            scores_list.append(np.array(scores))
+            import pandas as pd
+            scores = pd.read_parquet(os.path.join(output, "psms.parquet"))["score"].values
+            scores_list.append(scores)
 
         # Statistical comparison - runs should be very similar
         s1, s2 = scores_list
@@ -654,22 +615,22 @@ class TestLucXorSiteScores:
             {"PEPsTYK": 10.0, "PEPStYK": 4.0, "PEPSTyK": 1.0}
         )
         ss = psm.get_site_scores()
-        assert ss[3] == 6.0  # 10 - max(4, 1)
-        assert ss[4] == -6.0  # 4 - 10
-        assert ss[5] == -9.0  # 1 - 10
-        assert max(ss, key=ss.get) == 3  # winning site is most confident
+        assert ss[4] == 6.0  # 10 - max(4, 1)
+        assert ss[5] == -6.0  # 4 - 10
+        assert ss[6] == -9.0  # 1 - 10
+        assert max(ss, key=ss.get) == 4  # winning site is most confident
 
     def test_decoy_a_site_is_rankable(self):
         # Decoy A@0 competes with S@3; both sites get a score.
         psm = self._psm_with_perms({"aEPSK": 2.0, "AEPsK": 9.0})
         ss = psm.get_site_scores()
-        assert set(ss) == {0, 3}
-        assert ss[0] == -7.0 and ss[3] == 7.0
+        assert set(ss) == {1, 4}
+        assert ss[1] == -7.0 and ss[4] == 7.0
 
     def test_unambiguous_site_gets_top_score(self):
         # Single candidate / single phospho: no alternative -> top score.
         psm = self._psm_with_perms({"PEPsK": 8.0})
-        assert psm.get_site_scores() == {3: 8.0}
+        assert psm.get_site_scores() == {4: 8.0}
 
     def test_no_permutations_returns_empty(self):
         assert self._psm_with_perms({}).get_site_scores() == {}

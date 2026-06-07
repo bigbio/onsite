@@ -308,7 +308,7 @@ def site_deltas_from_isomers(isomer_list):
     Args:
         isomer_list: list of (modified_sequence_str, P_random) over all isoforms.
     Returns:
-        dict {residue_index: delta} (0-based); empty if no isoforms.
+        dict {residue_index: delta} (1-based); empty if no isoforms.
     """
     if not isomer_list:
         return {}
@@ -330,7 +330,7 @@ def site_deltas_from_isomers(isomer_list):
             continue
         # No competing isoform (single candidate) -> full score, like the per-PSM
         # convention; otherwise the rank1-vs-best-alternative gap.
-        deltas[s] = best_with if best_without is None else (best_with - best_without)
+        deltas[s + 1] = best_with if best_without is None else (best_with - best_without)
     return deltas
 
 

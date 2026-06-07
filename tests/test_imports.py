@@ -18,7 +18,7 @@ def test_onsite_import():
     """Test that the main onsite package can be imported."""
 
     assert hasattr(onsite, "__version__")
-    assert onsite.__version__ == "0.0.1"
+    assert onsite.__version__ == "0.0.3"
 
 
 def test_ascore_import():

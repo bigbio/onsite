@@ -1,0 +1,420 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+idParquet I/O module for the OnSite package.
+
+Reads and writes identification data in the idParquet format (a directory
+containing psms.parquet, proteins.parquet, protein_groups.parquet, and
+search_params.parquet), working with raw pandas DataFrames — NO pyOpenMS
+dependency.
+
+The parquet schema follows the convention used by quantms / FragPipe:
+- psms.parquet: one row per PSM.
+- proteins.parquet: protein-level identifications.
+- search_params.parquet: search engine configuration (single row).
+- protein_groups.parquet: protein group information (may be empty).
+"""
+
+import ast
+import re
+import time
+import logging
+import os
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Modification name mapping: UNIMOD ↔ pyOpenMS short name
+# ---------------------------------------------------------------------------
+# The pyOpenMS AASequence uses short modification names (e.g. "Phospho"),
+# while idParquet uses ProForma UNIMOD notation (e.g. "[UNIMOD:21]").
+#
+# We build the mapping from a hardcoded fallback for the most common
+# modifications, supplemented by ModificationsDB if pyOpenMS is available.
+# ---------------------------------------------------------------------------
+
+_UNIMOD_TO_PYO: Dict[str, str] = {}   # "unimod:21" -> "Phospho"
+_PYO_TO_UNIMOD: Dict[str, str] = {}   # "Phospho"    -> "UNIMOD:21"
+
+def _ensure_mod_mappings():
+    """Populate UNIMOD ↔ pyOpenMS name caches from ModificationsDB."""
+    if _UNIMOD_TO_PYO:
+        return
+
+    from pyopenms import ModificationsDB
+
+    db = ModificationsDB()
+    n = db.getNumberOfModifications()
+    for i in range(n):
+        try:
+            mod = db.getModification(i)
+        except Exception:
+            continue
+        try:
+            uname = mod.getUniModAccession()
+            sname = mod.getName()
+            fname = mod.getFullName()
+            idname = mod.getId()
+        except Exception:
+            continue
+        if not uname:
+            continue
+        parts = uname.split(":")
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        unimod_str = f"UNIMOD:{parts[1]}"
+
+        # getId() returns the short name AASequence.toString() uses (e.g. "Phospho")
+        for name in (sname, fname, idname):
+            if name and name not in _PYO_TO_UNIMOD:
+                _PYO_TO_UNIMOD[name] = unimod_str
+
+        uname_lower = uname.lower()
+        short_name = sname or idname or fname or unimod_str
+        if uname_lower not in _UNIMOD_TO_PYO:
+            _UNIMOD_TO_PYO[uname_lower] = short_name
+
+
+# ---------------------------------------------------------------------------
+# String-level conversion: UNIMOD notation ↔ pyOpenMS notation
+# These are pure string functions (no pyOpenMS dependency).
+# ---------------------------------------------------------------------------
+
+
+def unimod_to_pyopenms_notation(peptidoform: str) -> str:
+    """Convert ProForma UNIMOD notation (``S[UNIMOD:21]``) to pyOpenMS
+    notation (``S(Phospho)``).
+
+    Handles residue-specific, N-terminal, and C-terminal modifications.
+    """
+    _ensure_mod_mappings()
+
+    def _lookup(num: str) -> str:
+        name = _UNIMOD_TO_PYO.get(f"unimod:{num}")
+        return name if name else num
+
+    peptidoform = re.sub(
+        r"\[UNIMOD:(\d+)\]-",
+        lambda m: f"({_lookup(m.group(1))})",
+        peptidoform,
+    )
+    peptidoform = re.sub(
+        r"-\[UNIMOD:(\d+)\]",
+        lambda m: f"({_lookup(m.group(1))})",
+        peptidoform,
+    )
+    peptidoform = re.sub(
+        r"([A-Z])\[UNIMOD:(\d+)\]",
+        lambda m: f"{m.group(1)}({_lookup(m.group(2))})",
+        peptidoform,
+    )
+    return peptidoform
+
+
+def pyopenms_to_unimod_notation(seq_str: str) -> str:
+    """Convert pyOpenMS notation (``S(Phospho)``) back to ProForma UNIMOD
+    notation (``S[UNIMOD:21]``).
+
+    Handles residue-specific and N-terminal (leading ``.(Acetyl)``) forms.
+    """
+    _ensure_mod_mappings()
+
+    def _to_unimod(mod_name: str) -> str:
+        return _PYO_TO_UNIMOD.get(mod_name, mod_name)
+
+    seq_str = re.sub(
+        r"^\.\(([^)]+)\)",
+        lambda m: f"[{_to_unimod(m.group(1))}]-",
+        seq_str,
+    )
+    seq_str = re.sub(
+        r"([A-Z])\(([^)]+)\)",
+        lambda m: f"{m.group(1)}[{_to_unimod(m.group(2))}]",
+        seq_str,
+    )
+    return seq_str
+
+
+def peptidoform_to_modifications(peptidoform: str, site_scores: Optional[Dict[int, float]] = None):
+    """Parse a ProForma peptidoform into the ``modifications`` column format
+    matching the input idparquet schema.
+
+    ``position`` is ``{residue}.{1-based_index}`` (e.g. ``S.9``).
+    ``scores`` is a single float (localization confidence) or None.
+    If ``site_scores`` is provided (``{1-based_pos: score}``), the score
+    is assigned to the matching position.
+    """
+    _ensure_mod_mappings()
+    if not peptidoform or "[UNIMOD:" not in peptidoform:
+        return np.array([], dtype=object)
+    mods = []
+    nterm = re.match(r"^\[UNIMOD:(\d+)\]-", peptidoform)
+    if nterm:
+        uname = f"UNIMOD:{nterm.group(1)}"
+        name = _UNIMOD_TO_PYO.get(f"unimod:{nterm.group(1)}", uname)
+        mods.append({
+            "name": name, "accession": uname,
+            "positions": np.array([{"position": "N-term.0", "scores": None}], dtype=object),
+        })
+        peptidoform = peptidoform[nterm.end():]
+    matches = list(re.finditer(r"([A-Z])\[UNIMOD:(\d+)\]", peptidoform))
+    mod_positions = defaultdict(list)
+    for m in matches:
+        residue = m.group(1)
+        key = f"UNIMOD:{m.group(2)}"
+        pos_in_peptido = m.start()
+        idx = 0
+        pos = 0
+        while pos < len(peptidoform) and pos < pos_in_peptido:
+            if peptidoform[pos].isalpha():
+                idx += 1
+            pos += 1
+        score = None
+        if site_scores and (idx + 1) in site_scores:
+            score = float(site_scores[idx + 1])
+        mod_positions[key].append({"position": f"{residue}.{idx + 1}", "scores": score})
+    for accession, positions in mod_positions.items():
+        unimod_num = accession.split(":")[1]
+        name = _UNIMOD_TO_PYO.get(f"unimod:{unimod_num}", accession)
+        mods.append({"name": name, "accession": accession, "positions": np.array(positions, dtype=object)})
+    return np.array(mods, dtype=object)
+
+# ---------------------------------------------------------------------------
+# Path resolution helper
+# ---------------------------------------------------------------------------
+
+
+def resolve_parquet_path(idparquet_path: str) -> Tuple[str, str]:
+    """Resolve an idparquet path and return (resolved_dir, psm_parquet_path)."""
+    psm_path = os.path.join(idparquet_path, "psms.parquet")
+    if not os.path.isdir(idparquet_path) or not os.path.isfile(psm_path):
+        alt = idparquet_path.rstrip("/\\") + ".idparquet"
+        if os.path.isdir(alt):
+            idparquet_path = alt
+            psm_path = os.path.join(alt, "psms.parquet")
+    return idparquet_path, psm_path
+
+
+# ---------------------------------------------------------------------------
+# Main load / save functions (DataFrame-based, no pyOpenMS)
+# ---------------------------------------------------------------------------
+
+
+def load_dataframes(
+    idparquet_path: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load identification data from an idParquet directory as DataFrames.
+
+    Parameters
+    ----------
+    idparquet_path : str
+        Path to the ``.idparquet`` directory.
+
+    Returns
+    -------
+    psms_df : pd.DataFrame
+    proteins_df : pd.DataFrame
+    search_params_df : pd.DataFrame
+    protein_groups_df : pd.DataFrame
+    """
+    idparquet_path, psm_path = resolve_parquet_path(idparquet_path)
+    print(
+        f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idparquet_path}"
+    )
+
+    psms_df = pd.read_parquet(psm_path)
+    print(f"Loaded {len(psms_df)} PSMs")
+
+    prot_path = os.path.join(idparquet_path, "proteins.parquet")
+    if os.path.isfile(prot_path):
+        proteins_df = pd.read_parquet(prot_path)
+        print(f"Loaded {len(proteins_df)} proteins")
+    else:
+        proteins_df = pd.DataFrame()
+
+    sp_path = os.path.join(idparquet_path, "search_params.parquet")
+    if os.path.isfile(sp_path):
+        search_params_df = pd.read_parquet(sp_path)
+    else:
+        search_params_df = pd.DataFrame()
+
+    pg_path = os.path.join(idparquet_path, "protein_groups.parquet")
+    if os.path.isfile(pg_path):
+        protein_groups_df = pd.read_parquet(pg_path)
+    else:
+        protein_groups_df = pd.DataFrame()
+
+    return psms_df, proteins_df, search_params_df, protein_groups_df
+
+
+def _fill_schema(psms_df: pd.DataFrame, template: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Ensure psms_df has all columns present in template, filling with defaults."""
+    df = psms_df.copy()
+    if template is None:
+        for col in ["modifications", "protein_accessions", "additional_scores"]:
+            if col not in df.columns:
+                df[col] = np.array([np.array([], dtype=object)] * len(df), dtype=object)
+        if "run_identifier" not in df.columns:
+            df["run_identifier"] = ""
+        return df
+
+    for col in template.columns:
+        if col not in df.columns:
+            if pd.api.types.is_integer_dtype(template[col]):
+                df[col] = np.zeros(len(df), dtype=template[col].dtype)
+            elif pd.api.types.is_float_dtype(template[col]):
+                df[col] = np.full(len(df), np.nan, dtype=template[col].dtype)
+            elif pd.api.types.is_bool_dtype(template[col]):
+                df[col] = np.zeros(len(df), dtype=bool)
+            else:
+                df[col] = np.array([None] * len(df), dtype=object)
+    # Reorder columns to match template
+    df = df[[c for c in template.columns if c in df.columns] +
+            [c for c in df.columns if c not in template.columns]]
+    return df
+
+
+
+def save_dataframes(
+    out_path: str,
+    psms_df: pd.DataFrame,
+    proteins_df: Optional[pd.DataFrame] = None,
+    run_identifier: Optional[str] = None,
+    template_df: Optional[pd.DataFrame] = None,
+    source_idparquet: Optional[str] = None,
+) -> str:
+    """Save identification DataFrames to an idParquet directory.
+
+    Parameters
+    ----------
+    out_path : str
+        Output path. If it ends with ``.idparquet`` it is treated as a
+        directory; otherwise ``.idparquet`` is appended.
+    psms_df : pd.DataFrame
+        PSM-level data to save.
+    proteins_df : pd.DataFrame, optional
+        Protein-level data to save.
+    run_identifier : str, optional
+        Identifier for the run (default: auto-generated).
+    template_df : pd.DataFrame, optional
+        Template DataFrame whose schema (columns, dtypes) the output should match.
+        Missing columns in psms_df are filled with defaults.
+    source_idparquet : str, optional
+        Source idparquet directory to copy search_params.parquet and
+        protein_groups.parquet from (preserves original format).
+
+    Returns
+    -------
+    out_dir : str
+        The actual directory written to.
+    """
+    if out_path.endswith(".idparquet"):
+        out_dir = out_path
+    else:
+        out_dir = out_path + ".idparquet"
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_dir}")
+
+    # Locate source psms.parquet for schema
+    src_psm = None
+    if source_idparquet:
+        p = os.path.join(source_idparquet, "psms.parquet")
+        if os.path.isfile(p):
+            src_psm = p
+
+    if psms_df is not None and len(psms_df) > 0:
+        if src_psm and os.path.isfile(src_psm):
+            import shutil
+            shutil.copy2(src_psm, os.path.join(out_dir, "psms.parquet"))
+            tbl = pq.read_table(os.path.join(out_dir, "psms.parquet"))
+            src_cols = set(tbl.schema.names)
+
+            def _pa_col(name, values):
+                field = tbl.schema.field(name)
+                return pa.array(values, type=field.type)
+
+            updates = {}
+            for col in ("peptidoform", "sequence", "score", "score_type", "higher_score_better"):
+                if col in psms_df.columns and col in src_cols:
+                    updates[col] = _pa_col(col, psms_df[col].tolist())
+            if "psm_metavalues" in psms_df.columns and "psm_metavalues" in src_cols:
+                updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
+
+
+            for name, arr in updates.items():
+                idx = tbl.schema.get_field_index(name)
+                if idx >= 0:
+                    tbl = tbl.set_column(idx, tbl.schema.field(idx), arr)
+
+            pq.write_table(tbl, os.path.join(out_dir, "psms.parquet"))
+            print(f"Saved {len(psms_df)} PSMs to psms.parquet")
+        else:
+            # Fallback without schema preservation
+            df = _fill_schema(psms_df, template=template_df)
+            if "run_identifier" in df.columns:
+                df["run_identifier"] = df["run_identifier"].fillna(run_identifier or "")
+            df.to_parquet(os.path.join(out_dir, "psms.parquet"), index=False)
+            print(f"Saved {len(df)} PSMs to psms.parquet")
+    else:
+        print("Warning: No PSMs to save")
+
+    # proteins.parquet (copy from source if available)
+    prot_in = os.path.join(source_idparquet, "proteins.parquet") if source_idparquet else None
+    if prot_in and os.path.isfile(prot_in):
+        import shutil
+        shutil.copy2(prot_in, os.path.join(out_dir, "proteins.parquet"))
+    elif proteins_df is not None and len(proteins_df) > 0:
+        df_prot = proteins_df.copy()
+        if "run_identifier" not in df_prot.columns:
+            df_prot["run_identifier"] = run_identifier or ""
+        df_prot.to_parquet(os.path.join(out_dir, "proteins.parquet"), index=False)
+        print(f"Saved {len(df_prot)} proteins to proteins.parquet")
+
+    # search_params.parquet (copy from source if available)
+    sp_path = os.path.join(out_dir, "search_params.parquet")
+    if source_idparquet and os.path.isfile(os.path.join(source_idparquet, "search_params.parquet")):
+        import shutil
+        shutil.copy2(os.path.join(source_idparquet, "search_params.parquet"), sp_path)
+    elif not os.path.isfile(sp_path):
+        sp_row = {
+            "run_identifier": run_identifier or "",
+            "search_engine": "",
+            "search_engine_version": "",
+            "score_type": "",
+            "higher_score_better": True,
+            "significance_threshold": 0.0,
+            "db": "",
+            "charges": "",
+            "mass_type": "MONOISOTOPIC",
+            "digestion_enzyme": "",
+            "missed_cleavages": 0,
+            "variable_modifications": np.array([], dtype=object),
+            "fixed_modifications": np.array([], dtype=object),
+        }
+        pd.DataFrame([sp_row]).to_parquet(sp_path, index=False)
+
+    # protein_groups.parquet (copy from source if available)
+    pg_path = os.path.join(out_dir, "protein_groups.parquet")
+    if source_idparquet and os.path.isfile(os.path.join(source_idparquet, "protein_groups.parquet")):
+        import shutil
+        shutil.copy2(os.path.join(source_idparquet, "protein_groups.parquet"), pg_path)
+    elif not os.path.isfile(pg_path):
+        pg_row = {
+            "group_type": "",
+            "probability": 0.0,
+            "accessions": np.array([], dtype=object),
+            "run_identifier": run_identifier or "",
+        }
+        pd.DataFrame([pg_row]).to_parquet(pg_path, index=False)
+
+    print(f"Results saved to {out_dir}")
+    return out_dir

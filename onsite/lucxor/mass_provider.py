@@ -5,8 +5,11 @@ Extracts amino acid and modification masses from PyOpenMS at module load time,
 providing fast O(1) lookup during processing.
 """
 
+import logging
 import numpy as np
 from pyopenms import ResidueDB, ModificationsDB, ResidueModification, Residue, Constants, EmpiricalFormula
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level caches populated at import time
@@ -16,7 +19,7 @@ _INITIALIZED: bool = False
 _PHOSPHO_DECOY_REGISTERED: bool = False
 
 # Residues that already have PhosphoDecoy defined in PyOpenMS
-_BUILTIN_PHOSPHO_DECOY_RESIDUES = {'A', 'G', 'L'}
+_BUILTIN_PHOSPHO_DECOY_RESIDUES = set()
 
 # All standard amino acids
 _STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
@@ -51,8 +54,8 @@ def _register_phospho_decoy_modifications():
             mod.setDiffMonoMass(phospho_decoy_mass)
             mod.setOrigin(aa.encode())
             mod_db.addModification(mod)
-        except Exception:
-            pass  # Ignore if already registered or other errors
+        except Exception as e:
+            logger.debug(f"PhosphoDecoy registration for {aa}: {e}")
 
     _PHOSPHO_DECOY_REGISTERED = True
 
