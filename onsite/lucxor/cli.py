@@ -728,9 +728,7 @@ class PyLuciPHOr2:
             sequence = hit.getSequence().toString()
             # Strip pyOpenMS N-terminal dot notation like ".(Acetyl)"
             if sequence.startswith("."):
-                end_paren = sequence.find(")")
-                if end_paren >= 0:
-                    sequence = sequence[end_paren + 1:]
+                sequence = sequence[1:]
             charge = hit.getCharge()
             rt = pep_id.getRT()
             
@@ -991,10 +989,22 @@ class PyLuciPHOr2:
             ref_file = (str(orig_pep_id.getMetaValue("reference_file_name"))
                        if orig_pep_id and orig_pep_id.metaValueExists("reference_file_name") else "")
 
+            # Capture N-terminal modification (e.g. "(Acetyl)") before lucxor drops it
+            _nterm = ""
+            _orig_seq = psm.peptide.peptide
+            if _orig_seq.startswith("."):
+                _orig_seq = _orig_seq[1:]
+            if _orig_seq.startswith("(") and not _orig_seq.startswith("(Phospho"):
+                end = _orig_seq.find(")", 1)
+                if end > 0:
+                    _nterm = _orig_seq[:end + 1]
+
             # Best sequence
             best_sequence = psm.get_best_sequence(include_decoys=False)
-            seq_str = best_sequence or psm.peptide.peptide
-            base_seq = psm.peptide.peptide  # fallback unmodified
+            seq_str = best_sequence or _orig_seq
+            if _nterm and not seq_str.startswith(_nterm):
+                seq_str = _nterm + seq_str
+            base_seq = _orig_seq
             peptidoform = pyopenms_to_unimod_notation(seq_str)
 
             # Use pyOpenMS to get unmodified string if possible

@@ -690,6 +690,11 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
             best_isomer = min(isomer_list, key=lambda x: x[1])
             final_score = float(best_isomer[1])
             new_sequence = best_isomer[0]
+            # Re-attach N-terminal modification dropped by isomer generation
+            if seq_str.startswith("(") and not new_sequence.startswith("("):
+                end = seq_str.find(")", 1)
+                if end > 0 and not any(seq_str.startswith(t) for t in ("(Phospho", "(PhosphoDecoy")):
+                    new_sequence = seq_str[:end + 1] + new_sequence
             new_peptidoform = pyopenms_to_unimod_notation(new_sequence)
 
             metas_list = _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, isomer_list)

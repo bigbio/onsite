@@ -15,6 +15,7 @@ The parquet schema follows the convention used by quantms / FragPipe:
 - protein_groups.parquet: protein group information (may be empty).
 """
 
+import ast
 import re
 import time
 import logging
@@ -125,6 +126,12 @@ def pyopenms_to_unimod_notation(seq_str: str) -> str:
         lambda m: f"[{_to_unimod(m.group(1))}]-",
         seq_str,
     )
+    # N-terminal without leading dot: "(name)seq" -> "[UNIMOD:N]-seq"
+    seq_str = re.sub(
+        r"^\(([^)]+)\)([A-Z])",
+        lambda m: f"[{_to_unimod(m.group(1))}]-{m.group(2)}",
+        seq_str,
+    )
     seq_str = re.sub(
         r"([A-Z])\(([^)]+)\)",
         lambda m: f"{m.group(1)}[{_to_unimod(m.group(2))}]",
@@ -164,6 +171,11 @@ def peptidoform_to_modifications(peptidoform: str, site_scores: Optional[Dict[in
         idx = 0
         pos = 0
         while pos < len(peptidoform) and pos < pos_in_peptido:
+            if peptidoform[pos] == "[":
+                j = peptidoform.find("]", pos)
+                if j >= 0:
+                    pos = j + 1
+                    continue
             if peptidoform[pos].isalpha():
                 idx += 1
             pos += 1
@@ -342,6 +354,29 @@ def save_dataframes(
             if "psm_metavalues" in psms_df.columns and "psm_metavalues" in src_cols:
                 updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
 
+            # Regenerate modifications from peptidoform with site scores
+            if "peptidoform" in src_cols and "modifications" in src_cols:
+                _pf_col = psms_df["peptidoform"] if "peptidoform" in psms_df.columns else None
+                _mv_col = psms_df["psm_metavalues"] if "psm_metavalues" in psms_df.columns else None
+                if _pf_col is not None:
+                    _score_meta_keys = ["AScore_site_scores", "Luciphor_site_scores", "PhosphoRS_site_delta"]
+                    _new_mods = []
+                    for i in range(len(psms_df)):
+                        pf = str(_pf_col.iloc[i]) if _pf_col is not None else ""
+                        ss = None
+                        if _mv_col is not None:
+                            mv = _mv_col.iloc[i]
+                            if isinstance(mv, np.ndarray):
+                                for m in mv:
+                                    if isinstance(m, dict) and m.get("name") in _score_meta_keys:
+                                        try:
+                                            d = ast.literal_eval(m["value"])
+                                            ss = {int(k): float(v) for k, v in d.items()}
+                                        except Exception:
+                                            pass
+                                        break
+                        _new_mods.append(peptidoform_to_modifications(pf, ss))
+                    updates["modifications"] = _pa_col("modifications", _new_mods)
 
             for name, arr in updates.items():
                 idx = tbl.schema.get_field_index(name)
