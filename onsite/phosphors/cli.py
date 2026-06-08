@@ -609,14 +609,20 @@ def _make_phosphors_row(seq, raw_seq, charge, mz, rt, scan_num, spectrum_referen
     }
 
 
-_EMPTY_PHOSPHORS_METAS = [
-    {"name": "search_engine_sequence", "value": "", "value_type": "string"},
-    {"name": "regular_phospho_count", "value": "0", "value_type": "int"},
-    {"name": "phospho_decoy_count", "value": "0", "value_type": "int"},
-    {"name": "PhosphoRS_pep_score", "value": "-1.0", "value_type": "double"},
-    {"name": "PhosphoRS_site_probs", "value": "{}", "value_type": "string"},
-    {"name": "PhosphoRS_site_delta", "value": "{}", "value_type": "string"},
+_EMPTY_META_KEYS = [
+    "search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
+    "PhosphoRS_pep_score", "PhosphoRS_site_probs", "PhosphoRS_site_delta",
 ]
+
+_EMPTY_META_VALUES = lambda s: [s, "0", "0", "-1.0", "{}", "{}"]
+_EMPTY_META_TYPES = lambda: ["string", "int", "int", "double", "string", "string"]
+
+
+def _fresh_empty_metas(seq_str=""):
+    return [{"name": n, "value": v, "value_type": t}
+            for n, v, t in zip(_EMPTY_META_KEYS, _EMPTY_META_VALUES(seq_str), _EMPTY_META_TYPES())]
+
+_EMPTY_PHOSPHORS_METAS = _fresh_empty_metas()  # backward compat
 
 _PHOSPHORS_MANAGED = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
                       "PhosphoRS_pep_score", "PhosphoRS_site_probs", "PhosphoRS_site_delta",
@@ -665,11 +671,9 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
                 hit.setCharge(charge)
 
             if not _has_localizable_phospho(seq_str):
-                metas = _EMPTY_PHOSPHORS_METAS.copy()
-                metas[0]["value"] = seq_str
                 psm_rows.append(_make_phosphors_row(
                     seq, raw_seq, charge, mz, rt, scan_num, spectrum_reference,
-                    ref_file, hit_idx, pep_idx, -1.0, metas, row, row0))
+                    ref_file, hit_idx, pep_idx, -1.0, _fresh_empty_metas(seq_str), row, row0))
                 continue
 
             site_probs, isomer_list = calculate_phospho_localization_compomics_style(
@@ -680,11 +684,9 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
             )
 
             if site_probs is None or isomer_list is None:
-                metas = _EMPTY_PHOSPHORS_METAS.copy()
-                metas[0]["value"] = seq_str
                 psm_rows.append(_make_phosphors_row(
                     seq, raw_seq, charge, mz, rt, scan_num, spectrum_reference,
-                    ref_file, hit_idx, pep_idx, -1.0, metas, row, row0))
+                    ref_file, hit_idx, pep_idx, -1.0, _fresh_empty_metas(seq_str), row, row0))
                 continue
 
             best_isomer = min(isomer_list, key=lambda x: x[1])
