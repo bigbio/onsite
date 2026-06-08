@@ -538,11 +538,9 @@ class PyLuciPHOr2:
                             val = m["value"]
                             vtype = str(m.get("value_type", "string"))
                             if vtype in ("double", "float"):
-                                try: val = float(val)
-                                except: pass
+                                val = float(val)
                             elif vtype in ("int", "integer"):
-                                try: val = int(val)
-                                except: pass
+                                val = int(val)
                             hit.setMetaValue(str(m["name"]), val)
                         except Exception:
                             pass
@@ -1082,7 +1080,6 @@ class PyLuciPHOr2:
         total = len(pep_ids)
         processed = len(result_rows)
         errors = max(0, total - processed)
-        new_pep_ids = result_rows  # alias for backward compat in reporting
 
         print("\nProcessing Complete:")
         print(f"  Total identifications: {total}")

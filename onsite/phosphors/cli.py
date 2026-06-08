@@ -12,7 +12,7 @@ import numpy as np
 import click
 import pandas as pd
 from pyopenms import AASequence, MSExperiment, FileHandler, PeptideHit
-from onsite.idparquet import unimod_to_pyopenms_notation
+from onsite.idparquet import unimod_to_pyopenms_notation, pyopenms_to_unimod_notation
 from onsite.idparquet import save_dataframes as _save_df
 
 from .phosphors import (
@@ -304,7 +304,6 @@ def save_identifications(out_file, psms_df, proteins_df=None, template_df=None, 
             existing_names = {m["name"] for m in metas if isinstance(m, dict)}
 
             seq_str = str(row.get("peptidoform", row.get("sequence", "")))
-            from onsite.idparquet import unimod_to_pyopenms_notation
             pyo_seq = unimod_to_pyopenms_notation(seq_str)
 
             if "search_engine_sequence" not in existing_names:
@@ -655,7 +654,6 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
         pep_idx = int(row0["peptide_identification_index"])
 
         for hit_idx, (_, row) in enumerate(group_df.iterrows()):
-            from onsite.idparquet import unimod_to_pyopenms_notation, pyopenms_to_unimod_notation
             raw_seq = str(row.get("peptidoform", row.get("sequence", "")))
             seq_str = unimod_to_pyopenms_notation(raw_seq)
             charge = int(row.get("precursor_charge", 0)) if pd.notna(row.get("precursor_charge")) else 0
