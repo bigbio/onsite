@@ -875,7 +875,10 @@ class PyLuciPHOr2:
         
         # Log the score type and threshold being used
         self.logger.info(f"Using score type '{self.score_type}' for PSM filtering")
-        self.logger.info(f"Score direction: {'higher is better' if self.higher_score_better else 'lower is better'}")
+        dir_str = "higher is better" if self.higher_score_better else "lower is better"
+        if self.score_type and any(k in self.score_type.lower() for k in ["posterior error probability", "pep"]):
+            dir_str += " (PEP converted to 1-PEP internally)"
+        self.logger.info(f"Score direction: {dir_str}")
         self.logger.info(f"Final modeling score threshold: {modeling_score_threshold_val}")
         
         # First filter PSMs with modification sites

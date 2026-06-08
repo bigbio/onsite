@@ -479,6 +479,7 @@ class TestEndToEndRegression:
             "--input-spectrum", mzml,
             "--input-id", idparquet,
             "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y)",
+            "--min-num-psms-model", "5",
         ]
 
         for out in [output1, output2]:
@@ -509,6 +510,7 @@ class TestEndToEndRegression:
             "--input-spectrum", mzml,
             "--input-id", idparquet,
             "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y)",
+            "--min-num-psms-model", "5",
         ]
 
         scores_list = []

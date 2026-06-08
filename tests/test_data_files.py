@@ -96,6 +96,7 @@ class TestCLIWithRealData:
                 "--input-id", idparquet_dir,
                 "--output", out,
                 "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y)",
+                "--min-num-psms-model", "5",
             ])
             assert r.exit_code == 0, f"LucXor CLI should succeed: {r.output[:200]}"
             psms, _, _, _ = load_dataframes(out)

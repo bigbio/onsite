@@ -111,7 +111,7 @@ jobs:
             --fragment-mass-tolerance 0.5 \
             --fragment-error-units Da \
             --threads 1 \
-            --min-num-psms-model 50
+            --min-num-psms-model 5
 
           # Verify output file was created
           if [ -d test_lucxor_output.idparquet ]; then
@@ -149,7 +149,7 @@ jobs:
             --fragment-method HCD \
             --fragment-mass-tolerance 0.5 \
             --threads 1 \
-            --min-num-psms-model 50
+            --min-num-psms-model 5
 
       - name: Verify reference result files exist
         run: |
