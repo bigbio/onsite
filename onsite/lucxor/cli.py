@@ -9,7 +9,7 @@ import sys
 import logging
 import time
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 from collections import defaultdict
 import numpy as np
 
@@ -595,20 +595,6 @@ class PyLuciPHOr2:
             self.logger.warning("No spectra found in input file")
             return [], [], None
 
-        return pep_ids, proteins_df, exp
-        
-        # Store score info for later use
-        self.score_type = score_type_param
-        self.higher_score_better = higher_score_better
-
-        # Load spectra
-        exp = MSExperiment()
-        MzMLFile().load(input_spectrum, exp)
-        
-        if exp.empty():
-            self.logger.warning("No spectra found in input file")
-            return [], [], None
-            
         return pep_ids, proteins_df, exp
         
     def initialize_model(self, config: Dict) -> None:

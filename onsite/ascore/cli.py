@@ -13,7 +13,7 @@ from typing import Dict, List
 import click
 import numpy as np
 import pandas as pd
-from pyopenms import *
+from pyopenms import AASequence, PeptideHit, MSExperiment, FileHandler
 from onsite.idparquet import (
     load_dataframes,
     save_dataframes,

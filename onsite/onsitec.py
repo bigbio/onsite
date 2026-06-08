@@ -291,8 +291,6 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
         l_metas = _get_metas_dict(lucxor_df, li)
 
         # Get the actual row data from LucXor for base properties
-        l_row = lucxor_df.loc[li]
-
         for hit_idx in range(3):
             a_hit_row = ascore_df[(ascore_df["peptide_identification_index"] == ai) & (ascore_df["hit_index"] == hit_idx)]
             p_hit_row = phosphors_df[(phosphors_df["peptide_identification_index"] == pi) & (phosphors_df["hit_index"] == hit_idx)]
@@ -375,7 +373,7 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
     out_df = pd.DataFrame(merged_rows)
     save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df)
     click.echo(f"Successfully merged {stats['merged']} peptide identifications")
-    click.echo(f"  Each peptide contains scores from all three algorithms")
+    click.echo("Each peptide contains scores from all three algorithms")
 
 
 def run_all_algorithms_from_single_cli(

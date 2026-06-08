@@ -3,12 +3,12 @@ engines:
   pylint:
     enabled: true
     exclude_paths:
-      - "tests/"
+      - "tests/*"
   duplication:
     enabled: true
     exclude_paths:
-      - "tests/"
+      - "tests/*"
 exclude_paths:
-  - "tests/"
+  - "tests/*"
   - "docs/"
   - ".github/"

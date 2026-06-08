@@ -5,12 +5,15 @@ import sys
 import time
 import logging
 import traceback
+from typing import Dict, List
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import numpy as np
 import click
 import pandas as pd
-from pyopenms import *
+from pyopenms import AASequence, MSExperiment, FileHandler, PeptideHit
+from onsite.idparquet import unimod_to_pyopenms_notation
+from onsite.idparquet import save_dataframes as _save_df
 
 from .phosphors import (
     calculate_phospho_localization_compomics_style,
@@ -162,7 +165,7 @@ def phosphors(
                 f"[{time.strftime('%H:%M:%S')}] Processing {len(grouped)} peptide identifications sequentially..."
             )
 
-            for i, (_, group_df) in enumerate(grouped):
+            for _, (_, group_df) in enumerate(grouped):
                 try:
                     res = _process_psm_group(
                         group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, scan_map
@@ -193,29 +196,29 @@ def phosphors(
                 "add_decoys": bool(add_decoys),
             }
             tasks = []
-            for idx, pid in enumerate(peptide_ids):
+            for idx, (_, group_df) in enumerate(grouped):
                 hit_payloads = []
-                for hit in pid.getHits():
-                    seq_str = hit.getSequence().toString()
-                    proforma = hit.getMetaValue("ProForma") if hit.metaValueExists("ProForma") else None
+                for _, row in group_df.iterrows():
+                    raw_seq = str(row.get("peptidoform", row.get("sequence", "")))
+                    seq_str = unimod_to_pyopenms_notation(raw_seq)
+                    proforma = None
+                    mv = row.get("psm_metavalues")
+                    if isinstance(mv, np.ndarray):
+                        for m in mv:
+                            if isinstance(m, dict) and m.get("name") == "ProForma":
+                                proforma = m.get("value")
+                                break
                     hit_payloads.append({"sequence": seq_str, "proforma": proforma})
-
-                # Extract spectrum_reference for scan number lookup
-                spectrum_reference = None
-                if pid.metaValueExists("spectrum_reference"):
-                    spectrum_reference = pid.getMetaValue("spectrum_reference")
-
+                row0 = group_df.iloc[0]
                 tasks.append({
                     "idx": idx,
-                    "exp": exp,  # Pass spectrum object directly - shared between threads
-                    "scan_map": scan_map,  # Pass scan map directly - shared between threads
+                    "exp": exp,
+                    "scan_map": scan_map,
                     "params": params,
-                    "pid": {
-                        "mz": pid.getMZ(),
-                        "rt": pid.getRT(),
-                        "spectrum_reference": spectrum_reference,
-                        "hits": hit_payloads,
-                    }
+                    "mz": float(row0.get("observed_mz", row0.get("calculated_mz", 0.0))),
+                    "rt": float(row0.get("rt", 0.0)),
+                    "spectrum_reference": str(row0.get("spectrum_reference", "")) if pd.notna(row0.get("spectrum_reference")) else None,
+                    "hits": hit_payloads,
                 })
 
             indexed_results = {}
@@ -294,8 +297,6 @@ def load_identifications(idparquet_path):
 
 def save_identifications(out_file, psms_df, proteins_df=None, template_df=None, source_idparquet=None):
     """Save results directly as DataFrames to an idParquet directory."""
-    from onsite.idparquet import save_dataframes as _save_df
-
     # Ensure metadata fields on the DataFrame rows
     if "psm_metavalues" in psms_df.columns:
         for idx, row in psms_df.iterrows():
@@ -587,8 +588,56 @@ def _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, 
     ]
 
 
+def _make_phosphors_row(seq, raw_seq, charge, mz, rt, scan_num, spectrum_reference,
+                        ref_file, hit_idx, pep_idx, score, metas, row, row0):
+    return {
+        "sequence": seq.toUnmodifiedString(),
+        "peptidoform": raw_seq,
+        "precursor_charge": charge,
+        "calculated_mz": mz, "observed_mz": mz,
+        "is_decoy": False, "score": score,
+        "score_type": "PhosphoRSScore",
+        "higher_score_better": False,
+        "rt": rt, "scan": scan_num,
+        "spectrum_reference": spectrum_reference or "",
+        "reference_file_name": ref_file,
+        "hit_index": hit_idx, "peptide_identification_index": pep_idx,
+        "psm_metavalues": np.array(_preserve_plus_new(row, metas, _PHOSPHORS_MANAGED), dtype=object),
+        "modifications": np.array([], dtype=object),
+        "protein_accessions": np.array([], dtype=object),
+        "additional_scores": np.array([], dtype=object),
+        "run_identifier": str(row0.get("run_identifier", "")) if pd.notna(row0.get("run_identifier", "")) else "",
+    }
+
+
+_EMPTY_PHOSPHORS_METAS = [
+    {"name": "search_engine_sequence", "value": "", "value_type": "string"},
+    {"name": "regular_phospho_count", "value": "0", "value_type": "int"},
+    {"name": "phospho_decoy_count", "value": "0", "value_type": "int"},
+    {"name": "PhosphoRS_pep_score", "value": "-1.0", "value_type": "double"},
+    {"name": "PhosphoRS_site_probs", "value": "{}", "value_type": "string"},
+    {"name": "PhosphoRS_site_delta", "value": "{}", "value_type": "string"},
+]
+
+_PHOSPHORS_MANAGED = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
+                      "PhosphoRS_pep_score", "PhosphoRS_site_probs", "PhosphoRS_site_delta",
+                      "SpecEValue_score"}
+
+
+def _find_spectrum(spectrum_reference, mz, rt, exp, scan_map=None):
+    spectrum = None
+    if spectrum_reference:
+        sn = extract_scan_number_from_reference(spectrum_reference)
+        if sn is not None:
+            if scan_map is None:
+                scan_map = build_scan_to_spectrum_map(exp)
+            spectrum = find_spectrum_by_scan(exp, sn, scan_map)
+    if spectrum is None:
+        spectrum = find_spectrum_by_mz(exp, mz, rt)
+    return spectrum
+
+
 def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, scan_map=None):
-    """Process a DataFrame PSM group (one identification, multiple hits) using PhosphoRS."""
     try:
         row0 = group_df.iloc[0]
         mz = float(row0.get("observed_mz", row0.get("calculated_mz", 0.0)))
@@ -597,16 +646,7 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
         scan_num = int(row0.get("scan", 0)) if pd.notna(row0.get("scan")) else 0
         ref_file = str(row0.get("reference_file_name", "")) if pd.notna(row0.get("reference_file_name")) else ""
 
-        # Find spectrum: try scan number first
-        spectrum = None
-        if spectrum_reference:
-            sn = extract_scan_number_from_reference(spectrum_reference)
-            if sn is not None:
-                if scan_map is None:
-                    scan_map = build_scan_to_spectrum_map(exp)
-                spectrum = find_spectrum_by_scan(exp, sn, scan_map)
-        if spectrum is None:
-            spectrum = find_spectrum_by_mz(exp, mz, rt)
+        spectrum = _find_spectrum(spectrum_reference, mz, rt, exp, scan_map)
         if not spectrum:
             return {"status": "error", "reason": "spectrum_not_found"}
 
@@ -616,7 +656,6 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
 
         for hit_idx, (_, row) in enumerate(group_df.iterrows()):
             from onsite.idparquet import unimod_to_pyopenms_notation, pyopenms_to_unimod_notation
-
             raw_seq = str(row.get("peptidoform", row.get("sequence", "")))
             seq_str = unimod_to_pyopenms_notation(raw_seq)
             charge = int(row.get("precursor_charge", 0)) if pd.notna(row.get("precursor_charge")) else 0
@@ -628,27 +667,11 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
                 hit.setCharge(charge)
 
             if not _has_localizable_phospho(seq_str):
-                metas = [
-                    {"name": "search_engine_sequence", "value": seq_str, "value_type": "string"},
-                    {"name": "regular_phospho_count", "value": "0", "value_type": "int"},
-                    {"name": "phospho_decoy_count", "value": "0", "value_type": "int"},
-                    {"name": "PhosphoRS_pep_score", "value": "-1.0", "value_type": "double"},
-                    {"name": "PhosphoRS_site_probs", "value": "{}", "value_type": "string"},
-                    {"name": "PhosphoRS_site_delta", "value": "{}", "value_type": "string"},
-                ]
-                psm_rows.append({
-                    "sequence": seq.toUnmodifiedString(), "peptidoform": raw_seq,
-                    "precursor_charge": charge, "calculated_mz": mz, "observed_mz": mz,
-                    "is_decoy": False, "score": -1.0, "score_type": "PhosphoRSScore",
-                    "higher_score_better": False, "rt": rt, "scan": scan_num,
-                    "spectrum_reference": spectrum_reference or "", "reference_file_name": ref_file,
-                    "hit_index": hit_idx, "peptide_identification_index": pep_idx,
-                    "psm_metavalues": np.array(_preserve_plus_new(row, metas, {"search_engine_sequence","regular_phospho_count","phospho_decoy_count","PhosphoRS_pep_score","PhosphoRS_site_probs","PhosphoRS_site_delta","SpecEValue_score"}), dtype=object),
-                    "modifications": np.array([], dtype=object),
-                    "protein_accessions": np.array([], dtype=object),
-                    "additional_scores": np.array([], dtype=object),
-                    "run_identifier": str(row0.get("run_identifier", "")) if pd.notna(row0.get("run_identifier", "")) else "",
-                })
+                metas = _EMPTY_PHOSPHORS_METAS.copy()
+                metas[0]["value"] = seq_str
+                psm_rows.append(_make_phosphors_row(
+                    seq, raw_seq, charge, mz, rt, scan_num, spectrum_reference,
+                    ref_file, hit_idx, pep_idx, -1.0, metas, row, row0))
                 continue
 
             site_probs, isomer_list = calculate_phospho_localization_compomics_style(
@@ -659,28 +682,11 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
             )
 
             if site_probs is None or isomer_list is None:
-                # Failed scoring - emit empty result
-                empty_metas = [
-                    {"name": "search_engine_sequence", "value": seq_str, "value_type": "string"},
-                    {"name": "regular_phospho_count", "value": "0", "value_type": "int"},
-                    {"name": "phospho_decoy_count", "value": "0", "value_type": "int"},
-                    {"name": "PhosphoRS_pep_score", "value": "-1.0", "value_type": "double"},
-                    {"name": "PhosphoRS_site_probs", "value": "{}", "value_type": "string"},
-                    {"name": "PhosphoRS_site_delta", "value": "{}", "value_type": "string"},
-                ]
-                psm_rows.append({
-                    "sequence": seq.toUnmodifiedString(), "peptidoform": raw_seq,
-                    "precursor_charge": charge, "calculated_mz": mz, "observed_mz": mz,
-                    "is_decoy": False, "score": -1.0, "score_type": "PhosphoRSScore",
-                    "higher_score_better": False, "rt": rt, "scan": scan_num,
-                    "spectrum_reference": spectrum_reference or "", "reference_file_name": ref_file,
-                    "hit_index": hit_idx, "peptide_identification_index": pep_idx,
-                    "psm_metavalues": np.array(_preserve_plus_new(row, empty_metas, {"search_engine_sequence","regular_phospho_count","phospho_decoy_count","PhosphoRS_pep_score","PhosphoRS_site_probs","PhosphoRS_site_delta","SpecEValue_score"}), dtype=object),
-                    "modifications": np.array([], dtype=object),
-                    "protein_accessions": np.array([], dtype=object),
-                    "additional_scores": np.array([], dtype=object),
-                    "run_identifier": str(row0.get("run_identifier", "")) if pd.notna(row0.get("run_identifier", "")) else "",
-                })
+                metas = _EMPTY_PHOSPHORS_METAS.copy()
+                metas[0]["value"] = seq_str
+                psm_rows.append(_make_phosphors_row(
+                    seq, raw_seq, charge, mz, rt, scan_num, spectrum_reference,
+                    ref_file, hit_idx, pep_idx, -1.0, metas, row, row0))
                 continue
 
             best_isomer = min(isomer_list, key=lambda x: x[1])
@@ -691,24 +697,9 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
             metas_list = _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, isomer_list)
             phospho_count += 1
 
-            psm_rows.append({
-                "sequence": seq.toUnmodifiedString(),
-                "peptidoform": new_peptidoform,
-                "precursor_charge": charge,
-                "calculated_mz": mz, "observed_mz": mz,
-                "is_decoy": False,
-                "score": float(final_score),
-                "score_type": "PhosphoRSScore",
-                "higher_score_better": False,
-                "rt": rt, "scan": scan_num,
-                "spectrum_reference": spectrum_reference or "", "reference_file_name": ref_file,
-                "hit_index": hit_idx, "peptide_identification_index": pep_idx,
-                "psm_metavalues": np.array(_preserve_plus_new(row, metas_list, {"search_engine_sequence","regular_phospho_count","phospho_decoy_count","PhosphoRS_pep_score","PhosphoRS_site_probs","PhosphoRS_site_delta","SpecEValue_score"}), dtype=object),
-                "modifications": np.array([], dtype=object),
-                "protein_accessions": np.array([], dtype=object),
-                "additional_scores": np.array([], dtype=object),
-                "run_identifier": str(row0.get("run_identifier", "")) if pd.notna(row0.get("run_identifier", "")) else "",
-            })
+            psm_rows.append(_make_phosphors_row(
+                seq, new_peptidoform, charge, mz, rt, scan_num, spectrum_reference,
+                ref_file, hit_idx, pep_idx, float(final_score), metas_list, row, row0))
 
         return {"status": "success", "rows": psm_rows, "phospho_count": phospho_count}
 
@@ -716,7 +707,6 @@ def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_uni
         if logger:
             logger.error(f"Error: {e}")
         return {"status": "error", "reason": str(e)}
-
 
 def log_debug(log_file, enabled):
     """Initialize debug logging only when enabled"""

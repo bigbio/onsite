@@ -15,13 +15,12 @@ The parquet schema follows the convention used by quantms / FragPipe:
 - protein_groups.parquet: protein group information (may be empty).
 """
 
-import ast
 import re
 import time
 import logging
 import os
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -51,17 +50,12 @@ def _ensure_mod_mappings():
     db = ModificationsDB()
     n = db.getNumberOfModifications()
     for i in range(n):
-        try:
-            mod = db.getModification(i)
-        except Exception:
-            continue
-        try:
-            uname = mod.getUniModAccession()
-            sname = mod.getName()
-            fname = mod.getFullName()
-            idname = mod.getId()
-        except Exception:
-            continue
+        mod = db.getModification(i)
+        uname = mod.getUniModAccession()
+        sname = mod.getName()
+        fname = mod.getFullName()
+        idname = mod.getId()
+
         if not uname:
             continue
         parts = uname.split(":")
@@ -87,8 +81,7 @@ def _ensure_mod_mappings():
 
 
 def unimod_to_pyopenms_notation(peptidoform: str) -> str:
-    """Convert ProForma UNIMOD notation (``S[UNIMOD:21]``) to pyOpenMS
-    notation (``S(Phospho)``).
+    """Convert ProForma UNIMOD notation (``S[UNIMOD:21]``) to pyOpenMS notation (``S(Phospho)``).
 
     Handles residue-specific, N-terminal, and C-terminal modifications.
     """
