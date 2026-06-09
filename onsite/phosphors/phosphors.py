@@ -32,7 +32,6 @@ ADD_DECOYS = False  # Configuration parameter to include A as phosphorylation si
 FRAGMENT_TOLERANCE = 0.05  # Typical tolerance for PhosphoRS scoring (Da)
 FRAGMENT_METHOD_PPM = False  # PhosphoRS typically uses Da tolerance
 ADD_PRECURSOR_PEAK = False
-ADD_ION_TYPES = ("b", "y", "a", "c", "x", "z")  # Add more ion types
 ADD_NEUTRAL_LOSSES = True  # Include neutral losses
 WINDOW_SIZE = 100.0
 MAX_DEPTH = 8
@@ -940,7 +939,6 @@ def calculate_phospho_localization_compomics_style(
     fragment_tolerance: float = FRAGMENT_TOLERANCE,
     fragment_method_ppm: bool = FRAGMENT_METHOD_PPM,
     add_precursor_peak: bool = ADD_PRECURSOR_PEAK,
-    add_ion_types: tuple = ADD_ION_TYPES,
     add_neutral_losses: bool = ADD_NEUTRAL_LOSSES,
     add_decoys: bool = ADD_DECOYS,
 ):
