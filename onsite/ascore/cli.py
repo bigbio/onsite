@@ -13,7 +13,7 @@ from typing import Dict, List
 import click
 import numpy as np
 import pandas as pd
-from pyopenms import AASequence, PeptideHit, MSExperiment, FileHandler
+from pyopenms import AASequence, PeptideHit, MSExperiment, FileHandler, SpectrumLookup
 from onsite.idparquet import (
     load_dataframes,
     save_dataframes,
@@ -134,13 +134,18 @@ def ascore(
         stats = {"total": len(grouped), "processed": 0, "phospho": 0, "errors": 0}
         start_time = time.time()
         result_rows: List[Dict] = []
+        lookup = SpectrumLookup()
+        if "spectrum=" in exp.getSpectrum(0).getNativeID():
+            lookup.readSpectra(exp, "spectrum=(?<SCAN>\\d+)")
+        else:
+            lookup.readSpectra(exp, "scan=(?<SCAN>\\d+)")
 
         if max(1, int(threads)) == 1:
             click.echo(f"[{time.strftime('%H:%M:%S')}] Processing {len(grouped)} peptide identifications sequentially...")
             for _, (_, group_df) in enumerate(grouped):
                 try:
                     res = process_psm_group(
-                        group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug
+                        group_df, exp, lookup, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug
                     )
                     if res["status"] == "success":
                         result_rows.extend(res["rows"])
@@ -174,9 +179,9 @@ def ascore(
                 tasks.append({
                     "idx": idx,
                     "exp": exp,
+                    "lookup": lookup,
                     "params": params,
-                    "mz": float(group_df.iloc[0].get("observed_mz", group_df.iloc[0].get("calculated_mz", 0.0))),
-                    "rt": float(group_df.iloc[0].get("rt", 0.0)),
+                    "scan": int(group_df.iloc[0].get("scan")),
                     "hits": hit_payloads,
                 })
 
@@ -358,19 +363,13 @@ def _process_hit_serial(hit, fragment_mass_tolerance, fragment_mass_unit, add_de
     return meta_fields, best_ascore, new_seq_str, phospho_count
 
 
-def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug=False):
+def process_psm_group(group_df, exp, lookup, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug=False):
     """Process a group of PSM rows (one identification, possibly multiple hits)."""
     try:
         row0 = group_df.iloc[0]
-        mz = float(row0.get("observed_mz"))
-        rt = float(row0.get("rt", 0.0))
-
-        spectrum = find_spectrum_by_mz(exp, mz, rt)
-        if not spectrum:
-            return {"status": "error", "reason": "spectrum_not_found"}
-        spectrum_reference = str(row0.get("spectrum_reference"))
         scan_num = int(row0.get("scan"))
-        ref_file = str(row0.get("reference_file_name"))
+        index = lookup.findByScanNumber(scan_num)
+        spectrum = exp.getSpectrum(index)
         score_type = "PhosphoScore"
         higher_better = True
         pep_idx = int(row0["peptide_identification_index"])
@@ -403,23 +402,22 @@ def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit
                 "sequence": hit.getSequence().toUnmodifiedString(),
                 "peptidoform": peptidoform_out,
                 "precursor_charge": charge,
-                "calculated_mz": mz,
-                "observed_mz": mz,
+                "observed_mz": float(row0.get("observed_mz")),
                 "is_decoy": False,
                 "score": float(best_ascore),
                 "score_type": score_type,
                 "higher_score_better": higher_better,
-                "rt": rt,
+                "rt": float(row0.get("rt")),
                 "scan": scan_num,
-                "spectrum_reference": spectrum_reference,
-                "reference_file_name": ref_file,
+                "spectrum_reference": str(row0.get("spectrum_reference")),
+                "reference_file_name": str(row0.get("reference_file_name")),
                 "hit_index": hit_idx,
                 "peptide_identification_index": pep_idx,
                 "psm_metavalues": np.array(combined_metas, dtype=object),
                 "modifications": np.array([], dtype=object),
                 "protein_accessions": np.array([], dtype=object),
                 "additional_scores": np.array([], dtype=object),
-                "run_identifier": str(row0.get("run_identifier", "")) if pd.notna(row0.get("run_identifier", "")) else "",
+                "run_identifier": str(row0.get("run_identifier"))
             })
 
         return {"status": "success", "rows": psm_rows, "phospho_count": phospho_count}
@@ -431,13 +429,12 @@ def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit
 
 
 def _worker_process_pid_threaded(task):
-    """Thread worker. task has: exp, params, mz, rt, hits=[{sequence, charge}]."""
+    """Thread worker. task has: exp, lookup, params, hits=[{sequence, charge}]."""
     try:
-        exp = task["exp"]
+        lookup = task["lookup"]
         params = task["params"]
-        spectrum = find_spectrum_by_mz(exp, task["mz"], task.get("rt"))
-        if spectrum is None:
-            return {"status": "error", "reason": "spectrum_not_found"}
+        index = lookup.findByScanNumber(task["scan"])
+        spectrum = task["exp"].getSpectrum(index)
 
         rows = []
         for hit_info in task["hits"]:
@@ -457,7 +454,7 @@ def _worker_process_pid_threaded(task):
 
             metas_list = [{"name": k, "value": str(v), "value_type": "double" if isinstance(v, float) else "string"} for k, v in meta_fields]
             _ascore_prefixes = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
-                              "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
+                                "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
             orig = hit_info.get("orig_metas", [])
             filtered_orig = [m for m in orig if isinstance(m, dict) and m.get("name") not in _ascore_prefixes
                             and not m.get("name", "").startswith("AScore_")]

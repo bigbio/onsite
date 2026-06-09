@@ -1,19 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-idParquet I/O module for the OnSite package.
-
-Reads and writes identification data in the idParquet format (a directory
-containing psms.parquet, proteins.parquet, protein_groups.parquet, and
-search_params.parquet), working with raw pandas DataFrames — NO pyOpenMS
-dependency.
-
-The parquet schema follows the convention used by quantms / FragPipe:
-- psms.parquet: one row per PSM.
-- proteins.parquet: protein-level identifications.
-- search_params.parquet: search engine configuration (single row).
-- protein_groups.parquet: protein group information (may be empty).
-"""
+"""idParquet I/O module for the OnSite package."""
 
 import ast
 import re
@@ -79,10 +66,7 @@ def _ensure_mod_mappings():
 
 
 def unimod_to_pyopenms_notation(peptidoform: str) -> str:
-    """Convert ProForma UNIMOD notation (``S[UNIMOD:21]``) to pyOpenMS notation (``S(Phospho)``).
-
-    Handles residue-specific, N-terminal, and C-terminal modifications.
-    """
+    """Convert ProForma UNIMOD notation (``S[UNIMOD:21]``) to pyOpenMS notation (``S(Phospho)``)."""
     _ensure_mod_mappings()
 
     def _lookup(num: str) -> str:
@@ -108,11 +92,7 @@ def unimod_to_pyopenms_notation(peptidoform: str) -> str:
 
 
 def pyopenms_to_unimod_notation(seq_str: str) -> str:
-    """Convert pyOpenMS notation (``S(Phospho)``) back to ProForma UNIMOD
-    notation (``S[UNIMOD:21]``).
-
-    Handles residue-specific and N-terminal (leading ``.(Acetyl)``) forms.
-    """
+    """Convert pyOpenMS notation (``S(Phospho)``) back to ProForma UNIMOD notation (``S[UNIMOD:21]``)."""
     _ensure_mod_mappings()
 
     def _to_unimod(mod_name: str) -> str:
@@ -138,14 +118,7 @@ def pyopenms_to_unimod_notation(seq_str: str) -> str:
 
 
 def peptidoform_to_modifications(peptidoform: str, site_scores: Optional[Dict[int, float]] = None):
-    """Parse a ProForma peptidoform into the ``modifications`` column format
-    matching the input idparquet schema.
-
-    ``position`` is ``{residue}.{1-based_index}`` (e.g. ``S.9``).
-    ``scores`` is a single float (localization confidence) or None.
-    If ``site_scores`` is provided (``{1-based_pos: score}``), the score
-    is assigned to the matching position.
-    """
+    """Parse a ProForma peptidoform into the ``modifications`` column format"""
     _ensure_mod_mappings()
     if not peptidoform or "[UNIMOD:" not in peptidoform:
         return np.array([], dtype=object)
@@ -210,20 +183,7 @@ def resolve_parquet_path(idparquet_path: str) -> Tuple[str, str]:
 def load_dataframes(
     idparquet_path: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load identification data from an idParquet directory as DataFrames.
-
-    Parameters
-    ----------
-    idparquet_path : str
-        Path to the ``.idparquet`` directory.
-
-    Returns
-    -------
-    psms_df : pd.DataFrame
-    proteins_df : pd.DataFrame
-    search_params_df : pd.DataFrame
-    protein_groups_df : pd.DataFrame
-    """
+    """Load identification data from an idParquet directory as DataFrames."""
     idparquet_path, psm_path = resolve_parquet_path(idparquet_path)
     print(
         f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idparquet_path}"
@@ -262,31 +222,7 @@ def save_dataframes(
     template_df: Optional[pd.DataFrame] = None,
     source_idparquet: Optional[str] = None,
 ) -> str:
-    """Save identification DataFrames to an idParquet directory.
-
-    Parameters
-    ----------
-    out_path : str
-        Output path. If it ends with ``.idparquet`` it is treated as a
-        directory; otherwise ``.idparquet`` is appended.
-    psms_df : pd.DataFrame
-        PSM-level data to save.
-    proteins_df : pd.DataFrame, optional
-        Protein-level data to save.
-    run_identifier : str, optional
-        Identifier for the run (default: auto-generated).
-    template_df : pd.DataFrame, optional
-        Template DataFrame whose schema (columns, dtypes) the output should match.
-        Missing columns in psms_df are filled with defaults.
-    source_idparquet : str, optional
-        Source idparquet directory to copy search_params.parquet and
-        protein_groups.parquet from (preserves original format).
-
-    Returns
-    -------
-    out_dir : str
-        The actual directory written to.
-    """
+    """Save identification DataFrames to an idParquet directory."""
     out_dir = out_path if out_path.endswith(".idparquet") else out_path + ".idparquet"
     os.makedirs(out_dir, exist_ok=True)
     print(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_dir}")
@@ -370,8 +306,7 @@ def _save_proteins_parquet(out_dir: str, proteins_df: Optional[pd.DataFrame],
 def _copy_or_create_parquet(name: str, out_dir: str,
                             source_idparquet: Optional[str],
                             run_identifier: Optional[str]):
-    """Write a non-PSM parquet file (search_params / protein_groups) by copying
-    from source, or creating a minimal default if none exists."""
+    """Write a non-PSM parquet file (search_params / protein_groups)"""
     path = os.path.join(out_dir, f"{name}.parquet")
     src = os.path.join(source_idparquet, f"{name}.parquet") if source_idparquet else None
     if src and os.path.isfile(src):

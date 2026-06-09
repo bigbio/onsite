@@ -3,16 +3,12 @@ import math
 import numpy as np
 from pyopenms import (
     AASequence,
-    ResidueModification,
     ModificationsDB,
     TheoreticalSpectrumGenerator,
     MSSpectrum,
-    MSExperiment,
-    PeptideIdentification,
     PeptideHit,
     Precursor,
-    Constants,
-    Peak1D,
+    Constants
 )
 import sys  # For checking float limits
 

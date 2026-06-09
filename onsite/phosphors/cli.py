@@ -507,8 +507,7 @@ def _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, 
 
 @dataclass
 class _RowCtx:
-    """Invariant context for _make_phosphors_row — per-hit values extracted from
-    row0 so they are computed once per PSM group rather than once per hit."""
+    """Invariant context for _make_phosphors_row — per-hit values."""
     mz: float
     rt: float
     scan_num: int

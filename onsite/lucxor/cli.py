@@ -18,11 +18,13 @@ import pandas as pd
 from pyopenms import (
     MzMLFile,
     MSExperiment,
-    SpectrumLookup
+    SpectrumLookup,
+    AASequence, 
+    PeptideHit, 
+    PeptideIdentification
 )
 
 from onsite.idparquet import pyopenms_to_unimod_notation, save_dataframes, load_dataframes, unimod_to_pyopenms_notation
-from pyopenms import AASequence, PeptideHit, PeptideIdentification
 from .psm import PSM
 from .peptide import Peptide
 from .models import CIDModel, HCDModel
@@ -795,7 +797,6 @@ class PyLuciPHOr2:
 
             # Use pyOpenMS to get unmodified string if possible
             try:
-                from pyopenms import AASequence
                 seq_obj = AASequence.fromString(seq_str) if seq_str else None
                 if seq_obj:
                     base_seq = seq_obj.toUnmodifiedString()
