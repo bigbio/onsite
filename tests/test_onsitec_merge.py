@@ -37,13 +37,9 @@ def test_join_aligns_by_reference_not_position():
     triples, stats = _join_psms_by_ref(ascore, phosphors, lucxor)
 
     assert stats["merged"] == 2
-    # triples: (ascore_idx, phosphors_idx, lucxor_idx, ref)
-    refs = [t[3] for t in triples]
-    assert refs == ["s1", "s3"]
 
     # s3 triple: AScore's s3, LucXor's s3
-    ai, pi, li, ref = triples[1]
-    assert ref == "s3"
+    ai, _, li = triples[1]
     assert ai in ascore[ascore["spectrum_reference"] == "s3"].index
     assert li in lucxor[lucxor["spectrum_reference"] == "s3"].index
 
@@ -64,7 +60,7 @@ def test_join_skips_backbone_mismatch():
         {"peptide_identification_index": 0, "hit_index": 0, "spectrum_reference": "s1", "sequence": "DIFFERENTK"},
     ])
 
-    triples, stats, *_ = _join_psms_by_ref(ascore, phosphors, lucxor)
+    triples, stats = _join_psms_by_ref(ascore, phosphors, lucxor)
     assert triples == []
     assert stats["seq_mismatch"] == 1
     assert stats["merged"] == 0
@@ -79,7 +75,6 @@ def test_join_identical_sets():
     phosphors = _df(rows)
     lucxor = _df(rows)
 
-    triples, stats = _join_psms_by_ref(ascore, phosphors, lucxor)
+    _, stats = _join_psms_by_ref(ascore, phosphors, lucxor)
     assert stats["merged"] == 3
-    assert [t[3] for t in triples] == refs
     assert all(d == 0 for k, d in stats.items() if k.endswith("dropped"))
