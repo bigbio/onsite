@@ -1,5 +1,7 @@
 import itertools
 import math
+import re
+from decimal import Decimal, ROUND_FLOOR
 import numpy as np
 from pyopenms import (
     AASequence,
@@ -49,11 +51,21 @@ _distribution_cache = {}  # p -> {n -> BinomialDistribution}
 
 # --- Utility helpers ---
 def _floor_double(value: float, n_decimals: int) -> float:
-    """Mimic Util.floorDouble(x, nDecimals)."""
+    """Floor ``value`` to ``n_decimals`` decimal places, matching compomics
+    ``Util.floorDouble = new BigDecimal(String.valueOf(x)).setScale(n, FLOOR)``:
+    a DECIMAL-string floor, NOT a binary floor of ``value*10**n``.
+
+    The previous binary form (``math.floor(value*10**n)/10**n``) dropped a digit
+    whenever ``value*10**n`` landed a hair below an integer in IEEE arithmetic
+    (e.g. ``0.29 -> 0.28``, ``0.0006 -> 0.0005``), which perturbed the random-
+    match probability ``p`` fed to the binomial (D13c). ``repr(value)`` is the
+    shortest round-trip decimal, mirroring Java's ``String.valueOf(double)``."""
     if n_decimals <= 0:
-        return math.floor(value)
-    factor = 10.0**n_decimals
-    return math.floor(value * factor) / factor
+        return float(math.floor(value))
+    if not math.isfinite(value):
+        return value
+    quantum = Decimal(1).scaleb(-n_decimals)  # 10**-n_decimals
+    return float(Decimal(repr(value)).quantize(quantum, rounding=ROUND_FLOOR))
 
 
 # --- Helper functions ---
@@ -727,17 +739,60 @@ def calculate_phosphors_score(
 ENABLE_PEAK_DEPTH_OPTIMIZATION = True  # if False, score against the filtered spectrum directly
 
 
-def _isoform_theo_mz(spec_gen, seq_profile, precursor_charge):
-    """Sorted theoretical fragment-ion m/z for one isoform, using a pre-configured
-    TheoreticalSpectrumGenerator (same ion types / losses as the scoring step)."""
+# compomics chargeValidated gate for peptide-fragment ions, applied to the
+# pyOpenMS theoretical spectrum so the binomial trial count n matches the
+# reference (D9). Without it, getSpectrum(seq, 1, precursor_charge) emits
+# fragments AT the precursor charge and at charges above the ion number (e.g.
+# y1 at 2+) - physically impossible ions that inflated n by ~35%.
+_ION_PREFIX_RE = re.compile(r"^([abcxyz])(\d+)")
+
+
+def _theo_mz_charge_valid(spec_gen, seq, precursor_charge) -> list:
+    """Charge-validated b/y theoretical fragment m/z for one (modified) peptide.
+
+    Replicates compomics PhosphoRS chargeValidated for PEPTIDE_FRAGMENT_ION:
+        fragment charge in 1 .. max(1, precursor_charge - 1)   (charge < precursor)
+        and charge <= ion number                               (a y1 cannot be 2+)
+    and drops phospho neutral-loss ions by annotation name (-HPO3 / -PO3H). The
+    charge upper bound is enforced at generation; the charge<=ion-number gate and
+    the loss filter are read from the ion annotations, so ``spec_gen`` MUST have
+    ``add_metainfo='true'``. Returns m/z in generator order (caller sorts if
+    needed)."""
+    max_z = max(1, int(precursor_charge) - 1)
     spec = MSSpectrum()
     try:
-        spec_gen.getSpectrum(spec, seq_profile, 1, max(1, int(precursor_charge)))
+        spec_gen.getSpectrum(spec, seq, 1, max_z)
     except Exception:
         return []
-    if spec.size() == 0:
+    peaks = spec.get_peaks()
+    if not peaks or len(peaks[0]) == 0:
         return []
-    return sorted(float(m) for m in spec.get_peaks()[0])
+    mzs = peaks[0]
+    try:
+        annotations = spec.getStringDataArrays()[0]
+    except Exception:
+        # No annotations: cannot apply the per-ion gate; keep all generated m/z.
+        return [float(m) for m in mzs]
+    out = []
+    for i, raw in enumerate(annotations):
+        nm = raw.decode() if isinstance(raw, bytes) else str(raw)
+        if ("-HPO3" in nm) or ("-PO3H" in nm):
+            continue
+        m = _ION_PREFIX_RE.match(nm)
+        if m:
+            ion_number = int(m.group(2))
+            charge = len(nm) - len(nm.rstrip("+"))  # trailing '+' run = charge
+            if charge > ion_number:  # chargeValidated: charge must be <= ion number
+                continue
+        out.append(float(mzs[i]))
+    return out
+
+
+def _isoform_theo_mz(spec_gen, seq_profile, precursor_charge):
+    """Sorted, charge-validated theoretical b/y m/z for one isoform (same ion
+    model and chargeValidated gate as the final scoring step). ``spec_gen`` must
+    have ``add_metainfo='true'`` so the per-ion charge/loss gates apply."""
+    return sorted(_theo_mz_charge_valid(spec_gen, seq_profile, precursor_charge))
 
 
 def _window_has_site_determining_ions(isoform_theo_in_window, tol_da):
@@ -837,7 +892,10 @@ def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_toleran
     # one generator, matching the scoring step's ion model (b/y + optional losses)
     spec_gen = TheoreticalSpectrumGenerator()
     pr = spec_gen.getParameters()
-    pr.setValue("add_metainfo", "false")
+    # metainfo ON: _theo_mz_charge_valid needs ion annotations for the
+    # charge<=ion-number gate; it also makes depth selection use the same
+    # charge-validated, loss-filtered ion set as final scoring (was D10).
+    pr.setValue("add_metainfo", "true")
     pr.setValue("add_precursor_peaks", "false")
     pr.setValue("add_losses", "true" if add_neutral_losses else "false")
     for ion_type in ["a", "b", "c", "x", "y", "z"]:
@@ -1139,34 +1197,14 @@ def calculate_phospho_localization_compomics_style(
         p_calc = getp_style(n_exp_peaks, w, tolerance_da_for_p)
 
         for seq_profile, site_indices_set in profiles:
-            theo_spectrum = MSSpectrum()
-            try:
-                spec_gen.getSpectrum(theo_spectrum, seq_profile, 1, precursor_charge)
-            except Exception as e:
-                print(f"Warning: Failed to generate theoretical spectrum: {e}")
+            # Charge-validated b/y theoretical m/z (compomics chargeValidated:
+            # fragment charge 1..precursor-1, charge <= ion number) with the
+            # phospho neutral-loss name filter. Replaces the previous
+            # 1..precursor_charge ladder, which over-generated physically
+            # impossible ions and inflated the binomial trial count n (D9).
+            theo_mz = _theo_mz_charge_valid(spec_gen, seq_profile, precursor_charge)
+            if not theo_mz:
                 continue
-
-            theo_peaks = theo_spectrum.get_peaks()
-            if not theo_peaks or len(theo_peaks[0]) == 0:
-                continue
-
-            # Filter out neutral losses ~ phospho mass by name
-            theo_mz_all = list(theo_peaks[0])
-            theo_keep_idx = list(range(len(theo_mz_all)))
-            try:
-                sdas = theo_spectrum.getStringDataArrays()
-                if sdas and len(sdas) > 0:
-                    annotations = list(sdas[0])
-                    filtered_idx = []
-                    for i, name in enumerate(annotations):
-                        nm = str(name)
-                        if ("-HPO3" in nm) or ("-PO3H" in nm):
-                            continue
-                        filtered_idx.append(i)
-                    theo_keep_idx = filtered_idx if filtered_idx else theo_keep_idx
-            except Exception:
-                pass
-            theo_mz = [theo_mz_all[i] for i in theo_keep_idx]
 
             # Count unique theoretical ions and matches, merging indistinguishable
             # theoretical ions and consuming each experimental peak at most once
