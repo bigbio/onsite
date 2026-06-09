@@ -492,64 +492,6 @@ def _generate_isomer_profiles(
     return profiles
 
 
-def _expected_fragment_mzs(
-    seq: AASequence, precursor_charge: int, add_neutral_losses: bool
-) -> list:
-    """Return b/y fragment ion m/z values.
-
-    - Generate only b/y ions
-    - Charge range: 1 .. min(precursor_charge - 1, MAX_ION_CHARGE)
-    - Optional neutral losses
-    - Filter out neutral losses approximating phospho (HPO3/PO3H) by name
-    """
-    spec_gen = TheoreticalSpectrumGenerator()
-    params = spec_gen.getParameters()
-    params.setValue("add_metainfo", "true")
-    params.setValue("add_precursor_peaks", "false")
-    params.setValue("add_losses", "true" if add_neutral_losses else "false")
-    for ion_type in ["a", "b", "c", "x", "y", "z"]:
-        params.setValue(
-            f"add_{ion_type}_ions", "true" if ion_type in ("b", "y") else "false"
-        )
-    spec_gen.setParameters(params)
-    theo = MSSpectrum()
-    try:
-        # Limit fragment charge to (precursor_charge - 1) and not exceeding MAX_ION_CHARGE
-        max_frag_z = max(
-            1,
-            min(
-                MAX_ION_CHARGE,
-                (
-                    (precursor_charge - 1)
-                    if precursor_charge and precursor_charge > 1
-                    else 1
-                ),
-            ),
-        )
-        spec_gen.getSpectrum(theo, seq, 1, max_frag_z)
-    except Exception:
-        return []
-    peaks = theo.get_peaks()
-    if not peaks:
-        return []
-    # Optionally filter out losses approximately equal to phospho mass by name
-    try:
-        sdas = theo.getStringDataArrays()
-        keep_idx = []
-        for i, nm in enumerate(list(sdas[0])):
-            s = str(nm)
-            if ("-HPO3" in s) or ("-PO3H" in s):
-                continue
-            keep_idx.append(i)
-        if keep_idx:
-            mzs = [peaks[0][i] for i in keep_idx]
-        else:
-            mzs = list(peaks[0])
-    except Exception:
-        mzs = list(peaks[0])
-    return mzs
-
-
 def _get_window_indexes(mz_arr: list, start_mz: float, end_mz: float) -> tuple:
     start = 0
     while start < len(mz_arr) and mz_arr[start] < start_mz:
