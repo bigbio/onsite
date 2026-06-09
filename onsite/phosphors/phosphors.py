@@ -8,6 +8,7 @@ from pyopenms import (
     ResidueModification,
     ModificationsDB,
     TheoreticalSpectrumGenerator,
+    EmpiricalFormula,
     MSSpectrum,
     MSExperiment,
     PeptideIdentification,
@@ -60,6 +61,9 @@ def _floor_double(value: float, n_decimals: int) -> float:
     (e.g. ``0.29 -> 0.28``, ``0.0006 -> 0.0005``), which perturbed the random-
     match probability ``p`` fed to the binomial (D13c). ``repr(value)`` is the
     shortest round-trip decimal, mirroring Java's ``String.valueOf(double)``."""
+    # Coerce numpy scalars to a Python float: repr(np.float64(0.0006)) is
+    # 'np.float64(0.0006)' on numpy >= 2.0, which Decimal(...) cannot parse.
+    value = float(value)
     if n_decimals <= 0:
         return float(math.floor(value))
     if not math.isfinite(value):
@@ -688,6 +692,57 @@ ENABLE_PEAK_DEPTH_OPTIMIZATION = True  # if False, score against the filtered sp
 # y1 at 2+) - physically impossible ions that inflated n by ~35%.
 _ION_PREFIX_RE = re.compile(r"^([abcxyz])(\d+)")
 
+# compomics PhosphoRS drops a neutral loss whose mass equals the modification
+# mass: a fragment that has lost the whole modification is mass-identical to the
+# corresponding UNMODIFIED fragment, so it cannot localize the site. For Phospho
+# that is the HPO3 loss (79.966 Da); the H3PO4 (98) and H2O/NH3 losses are kept.
+# (PhosphoRS.java: keep iff |neutralLoss.getMass() - modificationMass| > tol.)
+_PHOSPHO_MOD_MASS = 79.96633  # Da, monoisotopic HPO3 (the Phospho modification mass)
+_MOD_LOSS_MATCH_TOL = 0.01    # Da; a loss within this of the mod mass is dropped
+_loss_mass_cache = {}         # loss-formula string -> monoisotopic mass (Da)
+
+
+def _annotation_loss_mass(name: str) -> float:
+    """Total monoisotopic mass (Da) of the neutral loss(es) in a pyOpenMS ion
+    annotation: ``b4-H3O4P1++`` -> 97.977, ``y5++`` (no loss) -> 0.0. Returns 0.0
+    when there is no loss or a formula cannot be parsed, so the ion is kept."""
+    core = name.rstrip("+")  # strip the trailing '+' charge run
+    if "-" not in core:
+        return 0.0
+    total = 0.0
+    for formula in core.split("-")[1:]:  # [0] is the ion (e.g. 'b4'); rest are losses
+        mass = _loss_mass_cache.get(formula)
+        if mass is None:
+            try:
+                mass = EmpiricalFormula(formula).getMonoWeight()
+            except Exception:
+                mass = 0.0  # unparseable -> treat as no loss (keep the ion)
+            _loss_mass_cache[formula] = mass
+        total += mass
+    return total
+
+
+_ion_gate_cache = {}  # annotation string -> bool (passes both per-ion gates)
+
+
+def _ion_passes_gates(nm: str) -> bool:
+    """Whether a theoretical-ion annotation clears the compomics per-ion gates:
+    charge <= ion number AND not a neutral loss equal to the modification mass.
+    Both gates depend only on the annotation string (the precursor charge bound
+    is enforced at generation), so the decision is memoized -- the distinct
+    annotations are bounded by peptide length x fragment charge x loss types."""
+    keep = _ion_gate_cache.get(nm)
+    if keep is None:
+        loss_mass = _annotation_loss_mass(nm)
+        if loss_mass and abs(loss_mass - _PHOSPHO_MOD_MASS) <= _MOD_LOSS_MATCH_TOL:
+            keep = False  # loss == modification mass -> not site-determining
+        else:
+            m = _ION_PREFIX_RE.match(nm)
+            # charge (the trailing '+' run) must not exceed the ion number
+            keep = not (m and len(nm) - len(nm.rstrip("+")) > int(m.group(2)))
+        _ion_gate_cache[nm] = keep
+    return keep
+
 
 def _theo_mz_charge_valid(spec_gen, seq, precursor_charge) -> list:
     """Charge-validated b/y theoretical fragment m/z for one (modified) peptide.
@@ -695,11 +750,13 @@ def _theo_mz_charge_valid(spec_gen, seq, precursor_charge) -> list:
     Replicates compomics PhosphoRS chargeValidated for PEPTIDE_FRAGMENT_ION:
         fragment charge in 1 .. max(1, precursor_charge - 1)   (charge < precursor)
         and charge <= ion number                               (a y1 cannot be 2+)
-    and drops phospho neutral-loss ions by annotation name (-HPO3 / -PO3H). The
-    charge upper bound is enforced at generation; the charge<=ion-number gate and
-    the loss filter are read from the ion annotations, so ``spec_gen`` MUST have
-    ``add_metainfo='true'``. Returns m/z in generator order (caller sorts if
-    needed)."""
+    and drops any neutral loss whose mass equals the phospho modification mass
+    (HPO3, 79.966 Da), mirroring PhosphoRS.java -- such a fragment is mass-
+    identical to the unmodified ion, so it cannot localize the site (H3PO4 and
+    H2O losses are kept). The charge upper bound is enforced at generation; the
+    charge<=ion-number gate and the loss filter are read from the ion
+    annotations, so ``spec_gen`` MUST have ``add_metainfo='true'``. Returns m/z
+    in generator order (caller sorts if needed)."""
     max_z = max(1, int(precursor_charge) - 1)
     spec = MSSpectrum()
     try:
@@ -718,15 +775,8 @@ def _theo_mz_charge_valid(spec_gen, seq, precursor_charge) -> list:
     out = []
     for i, raw in enumerate(annotations):
         nm = raw.decode() if isinstance(raw, bytes) else str(raw)
-        if ("-HPO3" in nm) or ("-PO3H" in nm):
-            continue
-        m = _ION_PREFIX_RE.match(nm)
-        if m:
-            ion_number = int(m.group(2))
-            charge = len(nm) - len(nm.rstrip("+"))  # trailing '+' run = charge
-            if charge > ion_number:  # chargeValidated: charge must be <= ion number
-                continue
-        out.append(float(mzs[i]))
+        if _ion_passes_gates(nm):
+            out.append(float(mzs[i]))
     return out
 
 
