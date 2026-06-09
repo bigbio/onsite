@@ -34,7 +34,7 @@ def test_join_aligns_by_reference_not_position():
         {"peptide_identification_index": 2, "hit_index": 0, "spectrum_reference": "s3", "sequence": "YEASTPEPK"},
     ])
 
-    triples, stats, a_map, p_map, l_map = _join_psms_by_ref(ascore, phosphors, lucxor)
+    triples, stats = _join_psms_by_ref(ascore, phosphors, lucxor)
 
     assert stats["merged"] == 2
     # triples: (ascore_idx, phosphors_idx, lucxor_idx, ref)
@@ -79,7 +79,7 @@ def test_join_identical_sets():
     phosphors = _df(rows)
     lucxor = _df(rows)
 
-    triples, stats, *_ = _join_psms_by_ref(ascore, phosphors, lucxor)
+    triples, stats = _join_psms_by_ref(ascore, phosphors, lucxor)
     assert stats["merged"] == 3
     assert [t[3] for t in triples] == refs
     assert all(d == 0 for k, d in stats.items() if k.endswith("dropped"))
