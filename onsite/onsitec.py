@@ -16,7 +16,8 @@ import numpy as np
 from onsite.lucxor.cli import lucxor
 from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
-
+import pandas as pd
+from onsite.idparquet import load_dataframes, save_dataframes, unimod_to_pyopenms_notation
 
 @click.group()
 @click.version_option(version="0.0.3")
@@ -110,9 +111,7 @@ def all(
     debug,
     add_decoys,
 ):
-    """
-    Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results.
-    """
+    """Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results."""
     try:
         start_time = time.time()
         click.echo(f"[{time.strftime('%H:%M:%S')}] Starting OnSite with all algorithms")
@@ -203,27 +202,42 @@ def all(
         sys.exit(1)
 
 
+def _is_new_valid_ref(ref, common, seen):
+    """True when ref is non-empty, present in all three tool maps, and not yet seen."""
+    return bool(ref) and ref in common and ref not in seen
+
+
+def _seqs_across_tools_match(ascore_df, phosphors_df, lucxor_df,
+                                a_map, p_map, l_map, ref):
+    """True when the base sequence for ref is identical across all three tools."""
+    ai, pi = a_map[ref], p_map[ref]
+    s_a = _get_ref_seq(ascore_df, ai)
+    s_p = _get_ref_seq(phosphors_df, pi)
+    s_l = _get_ref_seq(lucxor_df, l_map[ref])
+    return bool(s_a) and bool(s_p) and bool(s_l) and s_a == s_p == s_l
+
+
+def _get_ref_seq(df, idx):
+    row = df.iloc[idx]
+    return unimod_to_pyopenms_notation(str(row.get("sequence")))
+
+
+def _by_ref(df):
+    idx = df[df["hit_index"] == 0]["spectrum_reference"]
+    return {str(ref): i for i, ref in idx.items() if ref and str(ref).strip()}
+
+
 def _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df):
     """
     Match PSM rows across three tool DataFrames by spectrum_reference.
 
     Returns (merged_rows, stats).
     """
-    def by_ref(df):
-        idx = df[df["hit_index"] == 0]["spectrum_reference"]
-        return {str(ref): i for i, ref in idx.items() if ref and str(ref).strip()}
-
-    a_map = by_ref(ascore_df)
-    p_map = by_ref(phosphors_df)
-    l_map = by_ref(lucxor_df)
+    a_map = _by_ref(ascore_df)
+    p_map = _by_ref(phosphors_df)
+    l_map = _by_ref(lucxor_df)
 
     common = set(a_map) & set(p_map) & set(l_map)
-
-    def get_seq(df, idx):
-        row = df.iloc[idx]
-        raw = str(row.get("sequence", ""))
-        from onsite.idparquet import unimod_to_pyopenms_notation
-        return unimod_to_pyopenms_notation(raw)
 
     triples = []
     seen = set()
@@ -232,17 +246,16 @@ def _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df):
     lucxor_sorted = lucxor_df[lucxor_df["hit_index"] == 0].copy()
     for _, row in lucxor_sorted.iterrows():
         ref = str(row.get("spectrum_reference", ""))
-        if not ref or ref not in common or ref in seen:
+        if not _is_new_valid_ref(ref, common, seen):
             continue
         seen.add(ref)
-        ai, pi = a_map[ref], p_map[ref]
-        s_a = get_seq(ascore_df, ai)
-        s_p = get_seq(phosphors_df, pi)
-        s_l = get_seq(lucxor_df, l_map[ref])
-        if not (s_a and s_p and s_l and s_a == s_p == s_l):
+        if not _seqs_across_tools_match(
+            ascore_df, phosphors_df, lucxor_df, a_map, p_map, l_map, ref
+        ):
             seq_mismatch += 1
             continue
-        triples.append((ai, pi, l_map[ref], ref))
+        ai, pi = a_map[ref], p_map[ref]
+        triples.append((ai, pi, l_map[ref]))
 
     stats = {
         "ascore_dropped": len(a_map) - len(common),
@@ -251,7 +264,7 @@ def _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df):
         "seq_mismatch": seq_mismatch,
         "merged": len(triples),
     }
-    return triples, stats, a_map, p_map, l_map
+    return triples, stats
 
 
 def _get_metas_dict(df, row_idx: int) -> Dict[str, str]:
@@ -268,14 +281,11 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
     """
     Merge results from all three algorithms into a single idparquet directory.
     """
-    import pandas as pd
-    from onsite.idparquet import load_dataframes, save_dataframes
-
     ascore_df, _, _, _ = load_dataframes(ascore_file)
     phosphors_df, _, _, _ = load_dataframes(phosphors_file)
     lucxor_df, proteins_df, _, _ = load_dataframes(lucxor_file)
 
-    triples, stats, a_map, p_map, l_map = _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df)
+    triples, stats = _join_psms_by_ref(ascore_df, phosphors_df, lucxor_df)
     for tool in ("ascore", "phosphors", "lucxor"):
         if stats[f"{tool}_dropped"]:
             click.echo(f"  Note: {stats[f'{tool}_dropped']} {tool} PSM(s) not in all tools")
@@ -285,7 +295,7 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
     merged_rows = []
     merged_pep_idx = 0
 
-    for ai, pi, li, ref in triples:
+    for ai, pi, li in triples:
         a_metas = _get_metas_dict(ascore_df, ai)
         p_metas = _get_metas_dict(phosphors_df, pi)
         l_metas = _get_metas_dict(lucxor_df, li)

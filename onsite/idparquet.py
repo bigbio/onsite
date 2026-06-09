@@ -22,9 +22,12 @@ import logging
 import os
 from collections import defaultdict
 from typing import Dict, Optional, Tuple
-
+import shutil
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pyopenms import ModificationsDB
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +48,6 @@ def _ensure_mod_mappings():
     """Populate UNIMOD ↔ pyOpenMS name caches from ModificationsDB."""
     if _UNIMOD_TO_PYO:
         return
-
-    from pyopenms import ModificationsDB
-
     db = ModificationsDB()
     n = db.getNumberOfModifications()
     for i in range(n):
@@ -56,9 +56,6 @@ def _ensure_mod_mappings():
         sname = mod.getName()
         fname = mod.getFullName()
         idname = mod.getId()
-
-        if not uname:
-            continue
         parts = uname.split(":")
         if len(parts) != 2 or not parts[1].isdigit():
             continue
@@ -257,34 +254,6 @@ def load_dataframes(
     return psms_df, proteins_df, search_params_df, protein_groups_df
 
 
-def _fill_schema(psms_df: pd.DataFrame, template: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Ensure psms_df has all columns present in template, filling with defaults."""
-    df = psms_df.copy()
-    if template is None:
-        for col in ["modifications", "protein_accessions", "additional_scores"]:
-            if col not in df.columns:
-                df[col] = np.array([np.array([], dtype=object)] * len(df), dtype=object)
-        if "run_identifier" not in df.columns:
-            df["run_identifier"] = ""
-        return df
-
-    for col in template.columns:
-        if col not in df.columns:
-            if pd.api.types.is_integer_dtype(template[col]):
-                df[col] = np.zeros(len(df), dtype=template[col].dtype)
-            elif pd.api.types.is_float_dtype(template[col]):
-                df[col] = np.full(len(df), np.nan, dtype=template[col].dtype)
-            elif pd.api.types.is_bool_dtype(template[col]):
-                df[col] = np.zeros(len(df), dtype=bool)
-            else:
-                df[col] = np.array([None] * len(df), dtype=object)
-    # Reorder columns to match template
-    df = df[[c for c in template.columns if c in df.columns] +
-            [c for c in df.columns if c not in template.columns]]
-    return df
-
-
-
 def save_dataframes(
     out_path: str,
     psms_df: pd.DataFrame,
@@ -318,131 +287,116 @@ def save_dataframes(
     out_dir : str
         The actual directory written to.
     """
-    if out_path.endswith(".idparquet"):
-        out_dir = out_path
-    else:
-        out_dir = out_path + ".idparquet"
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+    out_dir = out_path if out_path.endswith(".idparquet") else out_path + ".idparquet"
     os.makedirs(out_dir, exist_ok=True)
     print(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_dir}")
 
-    # Locate source psms.parquet for schema
-    src_psm = None
-    if source_idparquet:
-        p = os.path.join(source_idparquet, "psms.parquet")
-        if os.path.isfile(p):
-            src_psm = p
+    _save_psms_parquet(out_dir, psms_df, source_idparquet)
+    _save_proteins_parquet(out_dir, proteins_df, source_idparquet, run_identifier)
+    _copy_or_create_parquet("search_params", out_dir, source_idparquet, run_identifier)
+    _copy_or_create_parquet("protein_groups", out_dir, source_idparquet, run_identifier)
 
-    if psms_df is not None and len(psms_df) > 0:
-        if src_psm and os.path.isfile(src_psm):
-            import shutil
-            shutil.copy2(src_psm, os.path.join(out_dir, "psms.parquet"))
-            tbl = pq.read_table(os.path.join(out_dir, "psms.parquet"))
-            src_cols = set(tbl.schema.names)
+    print(f"Results saved to {out_dir}")
+    return out_dir
 
-            def _pa_col(name, values):
-                field = tbl.schema.field(name)
-                return pa.array(values, type=field.type)
 
-            updates = {}
-            for col in ("peptidoform", "sequence", "score", "score_type", "higher_score_better"):
-                if col in psms_df.columns and col in src_cols:
-                    updates[col] = _pa_col(col, psms_df[col].tolist())
-            if "psm_metavalues" in psms_df.columns and "psm_metavalues" in src_cols:
-                updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
-
-            # Regenerate modifications from peptidoform with site scores
-            if "peptidoform" in src_cols and "modifications" in src_cols:
-                _pf_col = psms_df["peptidoform"] if "peptidoform" in psms_df.columns else None
-                _mv_col = psms_df["psm_metavalues"] if "psm_metavalues" in psms_df.columns else None
-                if _pf_col is not None:
-                    _score_meta_keys = ["AScore_site_scores", "Luciphor_site_scores", "PhosphoRS_site_delta"]
-                    _new_mods = []
-                    for i in range(len(psms_df)):
-                        pf = str(_pf_col.iloc[i]) if _pf_col is not None else ""
-                        ss = None
-                        if _mv_col is not None:
-                            mv = _mv_col.iloc[i]
-                            if isinstance(mv, np.ndarray):
-                                for m in mv:
-                                    if isinstance(m, dict) and m.get("name") in _score_meta_keys:
-                                        try:
-                                            d = ast.literal_eval(m["value"])
-                                            ss = {int(k): float(v) for k, v in d.items()}
-                                        except Exception:
-                                            pass
-                                        break
-                        _new_mods.append(peptidoform_to_modifications(pf, ss))
-                    updates["modifications"] = _pa_col("modifications", _new_mods)
-
-            for name, arr in updates.items():
-                idx = tbl.schema.get_field_index(name)
-                if idx >= 0:
-                    tbl = tbl.set_column(idx, tbl.schema.field(idx), arr)
-
-            pq.write_table(tbl, os.path.join(out_dir, "psms.parquet"))
-            print(f"Saved {len(psms_df)} PSMs to psms.parquet")
-        else:
-            # Fallback without schema preservation
-            df = _fill_schema(psms_df, template=template_df)
-            if "run_identifier" in df.columns:
-                df["run_identifier"] = df["run_identifier"].fillna(run_identifier or "")
-            df.to_parquet(os.path.join(out_dir, "psms.parquet"), index=False)
-            print(f"Saved {len(df)} PSMs to psms.parquet")
-    else:
+def _save_psms_parquet(out_dir: str, psms_df: pd.DataFrame, source_idparquet: Optional[str]):
+    """Write psms.parquet by updating columns of the source schema."""
+    if psms_df is None or len(psms_df) == 0:
         print("Warning: No PSMs to save")
+        return
 
-    # proteins.parquet (copy from source if available)
-    prot_in = os.path.join(source_idparquet, "proteins.parquet") if source_idparquet else None
-    if prot_in and os.path.isfile(prot_in):
-        import shutil
-        shutil.copy2(prot_in, os.path.join(out_dir, "proteins.parquet"))
+    src_psm = os.path.join(source_idparquet, "psms.parquet") if source_idparquet else None
+    if src_psm and os.path.isfile(src_psm):
+        shutil.copy2(src_psm, os.path.join(out_dir, "psms.parquet"))
+    tbl = pq.read_table(os.path.join(out_dir, "psms.parquet"))
+    src_cols = set(tbl.schema.names)
+
+    def _pa_col(name, values):
+        return pa.array(values, type=tbl.schema.field(name).type)
+
+    updates = {}
+    for col in ("peptidoform", "sequence", "score", "score_type", "higher_score_better"):
+        if col in psms_df.columns and col in src_cols:
+            updates[col] = _pa_col(col, psms_df[col].tolist())
+    if "psm_metavalues" in psms_df.columns and "psm_metavalues" in src_cols:
+        updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
+
+    if "peptidoform" in src_cols and "modifications" in src_cols:
+        _pf_col = psms_df["peptidoform"] if "peptidoform" in psms_df.columns else None
+        _mv_col = psms_df["psm_metavalues"] if "psm_metavalues" in psms_df.columns else None
+        if _pf_col is not None:
+            _score_meta_keys = ["AScore_site_scores", "Luciphor_site_scores", "PhosphoRS_site_delta"]
+            _new_mods = []
+            for i in range(len(psms_df)):
+                pf = str(_pf_col.iloc[i]) if _pf_col is not None else ""
+                ss = None
+                if _mv_col is not None:
+                    mv = _mv_col.iloc[i]
+                    if isinstance(mv, np.ndarray):
+                        for m in mv:
+                            if isinstance(m, dict) and m.get("name") in _score_meta_keys:
+                                try:
+                                    d = ast.literal_eval(m["value"])
+                                    ss = {int(k): float(v) for k, v in d.items()}
+                                except Exception:
+                                    pass
+                                break
+                _new_mods.append(peptidoform_to_modifications(pf, ss))
+            updates["modifications"] = _pa_col("modifications", _new_mods)
+
+    for name, arr in updates.items():
+        idx = tbl.schema.get_field_index(name)
+        if idx >= 0:
+            tbl = tbl.set_column(idx, tbl.schema.field(idx), arr)
+    pq.write_table(tbl, os.path.join(out_dir, "psms.parquet"))
+    print(f"Saved {len(psms_df)} PSMs to psms.parquet")
+
+
+def _save_proteins_parquet(out_dir: str, proteins_df: Optional[pd.DataFrame],
+                            source_idparquet: Optional[str], run_identifier: Optional[str]):
+    """Write proteins.parquet — copy from source or create from DataFrame."""
+    src = os.path.join(source_idparquet, "proteins.parquet") if source_idparquet else None
+    if src and os.path.isfile(src):
+        shutil.copy2(src, os.path.join(out_dir, "proteins.parquet"))
     elif proteins_df is not None and len(proteins_df) > 0:
-        df_prot = proteins_df.copy()
-        if "run_identifier" not in df_prot.columns:
-            df_prot["run_identifier"] = run_identifier or ""
-        df_prot.to_parquet(os.path.join(out_dir, "proteins.parquet"), index=False)
-        print(f"Saved {len(df_prot)} proteins to proteins.parquet")
+        df = proteins_df.copy()
+        if "run_identifier" not in df.columns:
+            df["run_identifier"] = run_identifier or ""
+        df.to_parquet(os.path.join(out_dir, "proteins.parquet"), index=False)
+        print(f"Saved {len(df)} proteins to proteins.parquet")
 
-    # search_params.parquet (copy from source if available)
-    sp_path = os.path.join(out_dir, "search_params.parquet")
-    if source_idparquet and os.path.isfile(os.path.join(source_idparquet, "search_params.parquet")):
-        import shutil
-        shutil.copy2(os.path.join(source_idparquet, "search_params.parquet"), sp_path)
-    elif not os.path.isfile(sp_path):
-        sp_row = {
+
+def _copy_or_create_parquet(name: str, out_dir: str,
+                            source_idparquet: Optional[str],
+                            run_identifier: Optional[str]):
+    """Write a non-PSM parquet file (search_params / protein_groups) by copying
+    from source, or creating a minimal default if none exists."""
+    path = os.path.join(out_dir, f"{name}.parquet")
+    src = os.path.join(source_idparquet, f"{name}.parquet") if source_idparquet else None
+    if src and os.path.isfile(src):
+        shutil.copy2(src, path)
+        return
+    if os.path.isfile(path):
+        return
+
+    if name == "search_params":
+        row = {
             "run_identifier": run_identifier or "",
-            "search_engine": "",
-            "search_engine_version": "",
-            "score_type": "",
-            "higher_score_better": True,
-            "significance_threshold": 0.0,
-            "db": "",
-            "charges": "",
-            "mass_type": "MONOISOTOPIC",
-            "digestion_enzyme": "",
+            "search_engine": "", "search_engine_version": "",
+            "score_type": "", "higher_score_better": True,
+            "significance_threshold": 0.0, "db": "", "charges": "",
+            "mass_type": "MONOISOTOPIC", "digestion_enzyme": "",
             "missed_cleavages": 0,
             "variable_modifications": np.array([], dtype=object),
             "fixed_modifications": np.array([], dtype=object),
         }
-        pd.DataFrame([sp_row]).to_parquet(sp_path, index=False)
-
-    # protein_groups.parquet (copy from source if available)
-    pg_path = os.path.join(out_dir, "protein_groups.parquet")
-    if source_idparquet and os.path.isfile(os.path.join(source_idparquet, "protein_groups.parquet")):
-        import shutil
-        shutil.copy2(os.path.join(source_idparquet, "protein_groups.parquet"), pg_path)
-    elif not os.path.isfile(pg_path):
-        pg_row = {
-            "group_type": "",
-            "probability": 0.0,
+    elif name == "protein_groups":
+        row = {
+            "group_type": "", "probability": 0.0,
             "accessions": np.array([], dtype=object),
             "run_identifier": run_identifier or "",
         }
-        pd.DataFrame([pg_row]).to_parquet(pg_path, index=False)
-
-    print(f"Results saved to {out_dir}")
-    return out_dir
+    else:
+        return
+    pd.DataFrame([row]).to_parquet(path, index=False)

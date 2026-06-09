@@ -200,9 +200,7 @@ def _find_meta(metavalues, name: str) -> Optional[str]:
 
 
 def parse_tool_idparquet(path: str, tool: str) -> List[PSMRecord]:
-    """
-    Parse a tool's idParquet directory into one PSMRecord per identification.
-    """
+    """Parse a tool's idParquet directory into one PSMRecord per identification."""
     score_meta = TOOL_SCORE_META[tool]
     psm_path = os.path.join(path, "psms.parquet")
     if not os.path.isfile(psm_path):

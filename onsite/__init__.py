@@ -1,6 +1,4 @@
-"""
-OnSite: Mass spectrometry post-translational modification localization tool.
-"""
+"""OnSite: Mass spectrometry post-translational modification localization tool."""
 
 __version__ = "0.0.3"
 __author__ = "BigBio Stack"

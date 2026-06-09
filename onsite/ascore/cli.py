@@ -98,9 +98,7 @@ def ascore(
     add_decoys,
     compute_all_scores,
 ):
-    """
-    Phosphorylation site localization scoring tool using AScore algorithm.
-    """
+    """Phosphorylation site localization scoring tool using AScore algorithm."""
     if compute_all_scores:
         from onsite.onsitec import run_all_algorithms_from_single_cli
         return run_all_algorithms_from_single_cli(
@@ -139,7 +137,7 @@ def ascore(
 
         if max(1, int(threads)) == 1:
             click.echo(f"[{time.strftime('%H:%M:%S')}] Processing {len(grouped)} peptide identifications sequentially...")
-            for i, (_, group_df) in enumerate(grouped):
+            for _, (_, group_df) in enumerate(grouped):
                 try:
                     res = process_psm_group(
                         group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, debug
@@ -284,20 +282,11 @@ def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
 
 
 def _metas_from_scored_hit(scored_hit, original_seq_str: str) -> tuple:
-    """Extract meta_fields and best_ascore from a scored PeptideHit.
-
-    Returns (meta_fields, best_ascore, new_seq_str, phospho_count).
-    """
+    """Extract meta_fields and best_ascore from a scored PeptideHit."""
     new_seq_str = scored_hit.getSequence().toString()
     phospho_count = new_seq_str.count("(Phospho)")
 
-    site_scores = []
-    rank = 1
-    while scored_hit.metaValueExists(f"AScore_{rank}"):
-        site_scores.append(float(scored_hit.getMetaValue(f"AScore_{rank}")))
-        rank += 1
-    while len(site_scores) < phospho_count:
-        site_scores.append(1000.0)
+    site_scores = _extract_ascore_list(scored_hit, phospho_count)
 
     ascore_pep_score = (
         float(scored_hit.getMetaValue("AScore_pep_score"))
@@ -328,7 +317,21 @@ def _metas_from_scored_hit(scored_hit, original_seq_str: str) -> tuple:
     return meta_fields, best_ascore, new_seq_str, phospho_count
 
 
-def _process_hit_serial(hit, seq_str, fragment_mass_tolerance, fragment_mass_unit, add_decoys, spectrum, logger):
+def _extract_ascore_list(scored_hit, phospho_count: int):
+    site_scores = []
+    rank = 1
+
+    while scored_hit.metaValueExists(f"AScore_{rank}"):
+        site_scores.append(float(scored_hit.getMetaValue(f"AScore_{rank}")))
+        rank += 1
+
+    if len(site_scores) < phospho_count:
+        site_scores.extend([1000.0] * (phospho_count - len(site_scores)))
+
+    return site_scores
+
+
+def _process_hit_serial(hit, fragment_mass_tolerance, fragment_mass_unit, add_decoys, spectrum):
     """Process a single hit in serial mode. Returns meta_fields, best_ascore, new_seq_str, phospho_count."""
     new_hit = PeptideHit(hit)
     original_seq_str = new_hit.getSequence().toString()
@@ -359,16 +362,15 @@ def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit
     """Process a group of PSM rows (one identification, possibly multiple hits)."""
     try:
         row0 = group_df.iloc[0]
-        mz = float(row0.get("observed_mz", row0.get("calculated_mz", 0.0)))
+        mz = float(row0.get("observed_mz"))
         rt = float(row0.get("rt", 0.0))
 
         spectrum = find_spectrum_by_mz(exp, mz, rt)
         if not spectrum:
             return {"status": "error", "reason": "spectrum_not_found"}
-
-        spectrum_reference = str(row0.get("spectrum_reference", "")) if pd.notna(row0.get("spectrum_reference")) else ""
-        scan_num = int(row0.get("scan", 0)) if pd.notna(row0.get("scan")) else 0
-        ref_file = str(row0.get("reference_file_name", "")) if pd.notna(row0.get("reference_file_name")) else ""
+        spectrum_reference = str(row0.get("spectrum_reference"))
+        scan_num = int(row0.get("scan"))
+        ref_file = str(row0.get("reference_file_name"))
         score_type = "PhosphoScore"
         higher_better = True
         pep_idx = int(row0["peptide_identification_index"])
@@ -377,33 +379,28 @@ def process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit
         phospho_count = 0
 
         for hit_idx, (_, row) in enumerate(group_df.iterrows()):
-            seq_str = unimod_to_pyopenms_notation(str(row.get("peptidoform", row.get("sequence", ""))))
-            charge = int(row.get("precursor_charge", 0)) if pd.notna(row.get("precursor_charge")) else 0
+            seq_str = unimod_to_pyopenms_notation(str(row.get("peptidoform")))
+            charge = int(row.get("precursor_charge", 0))
 
             # Build a PeptideHit for the algorithm (internal)
             seq = AASequence.fromString(seq_str)
             hit = PeptideHit()
             hit.setSequence(seq)
-            if pd.notna(row.get("score")):
-                hit.setScore(float(row["score"]))
-            if charge:
-                hit.setCharge(charge)
+            hit.setScore(float(row["score"]))
+            hit.setCharge(charge)
 
             meta_fields, best_ascore, new_seq_str, ph_count = _process_hit_serial(
-                hit, seq_str, fragment_mass_tolerance, fragment_mass_unit, add_decoys, spectrum, logger
+                hit, fragment_mass_tolerance, fragment_mass_unit, add_decoys, spectrum
             )
             phospho_count += 1 if ph_count > 0 else 0
             peptidoform_out = pyopenms_to_unimod_notation(new_seq_str)
-            base_seq_out = seq.toUnmodifiedString() if new_seq_str == seq_str else ""
-
             metas_list = [{"name": k, "value": str(v), "value_type": "double" if isinstance(v, float) else "string"} for k, v in meta_fields]
-
             _ascore_prefixes = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
-                              "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
+                                "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
             combined_metas = _preserve_plus_new(row, metas_list, _ascore_prefixes)
 
             psm_rows.append({
-                "sequence": base_seq_out or hit.getSequence().toUnmodifiedString(),
+                "sequence": hit.getSequence().toUnmodifiedString(),
                 "peptidoform": peptidoform_out,
                 "precursor_charge": charge,
                 "calculated_mz": mz,
@@ -482,6 +479,7 @@ def _preserve_plus_new(row, new_metas: list, managed_prefixes: set) -> list:
     """Merge original psm_metavalues from row with new metas, dropping managed keys."""
     orig = row.get("psm_metavalues")
     orig_list = list(orig) if isinstance(orig, np.ndarray) else []
+
     def _is_managed(name):
         return name in managed_prefixes or any(name.startswith(p) for p in managed_prefixes if p.endswith("_"))
     return [m for m in orig_list if isinstance(m, dict) and not _is_managed(m.get("name", ""))] + new_metas

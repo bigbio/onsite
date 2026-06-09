@@ -161,7 +161,6 @@ class AScore:
         phospho.setMetaValue("AScore_pep_score", peptide1_score)
 
         second_best_score = ranking[-2][0]
-        second_best_permutation_idx = ranking[-2][1]
         peptide2_score = second_best_score
 
         phospho_sites = []
