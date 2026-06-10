@@ -97,19 +97,19 @@ def main():
     
     # Check if data files exist
     data_dir = Path(__file__).parent.parent / "data"
-    idxml_file = data_dir / "1_consensus_fdr_filter_pep.idXML"
-    mzml_file = data_dir / "1.mzML"
-    
+    idparquet_dir = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1_comet_perc.idparquet"
+    mzml_file = data_dir / "SF_200217_pPeptideLibrary_pool1_HCDnlETcaD_OT_rep1.mzML"
+
     if not data_dir.exists():
-        print("❌ Data directory not found")
+        print("Data directory not found")
         return 1
-    
-    if not idxml_file.exists():
-        print("❌ idXML file not found")
+
+    if not idparquet_dir.exists() or not (idparquet_dir / "psms.parquet").exists():
+        print("idparquet directory not found")
         return 1
-        
+
     if not mzml_file.exists():
-        print("❌ mzML file not found")
+        print("mzML file not found")
         return 1
     
     print("✅ Data files found")

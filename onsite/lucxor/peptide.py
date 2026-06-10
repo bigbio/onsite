@@ -478,7 +478,7 @@ class Peptide:
                 ion_name = ""
                 if theo_spectrum.getStringDataArrays():
                     for sda in theo_spectrum.getStringDataArrays():
-                        if sda.getName() == "IonNames" and i < len(sda):
+                        if sda.getName() == "IonNames" and i < sda.size():
                             raw_name = sda[i]
                             ion_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
                             break

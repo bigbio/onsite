@@ -103,13 +103,13 @@ onsite provides a unified command-line interface for all algorithms:
 
 ```bash
 # AScore algorithm
-onsite ascore -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite ascore -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # PhosphoRS algorithm  
-onsite phosphors -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite phosphors -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # LucXor algorithm
-onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparquet
 ```
 
 #### Individual Pipeline Tools
@@ -118,10 +118,10 @@ onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
 
 ```bash
 # Basic usage
-python -m onsite.ascore.cli -in spectra.mzML -id identifications.idXML -out results.idXML
+python -m onsite.ascore.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-python -m onsite.ascore.cli -in spectra.mzML -id identifications.idXML -out results.idXML \
+python -m onsite.ascore.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-mass-tolerance 0.05 \
     --fragment-mass-unit Da \
     --threads 4 \
@@ -132,10 +132,10 @@ python -m onsite.ascore.cli -in spectra.mzML -id identifications.idXML -out resu
 
 ```bash
 # Basic usage
-python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idXML -out results.idXML
+python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idXML -out results.idXML \
+python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-mass-tolerance 0.05 \
     --fragment-mass-unit Da \
     --threads 1 \
@@ -146,10 +146,10 @@ python -m onsite.phosphors.cli -in spectra.mzML -id identifications.idXML -out r
 
 ```bash
 # Basic usage
-python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out results.idXML
+python -m onsite.lucxor.cli --input-spectrum spectra.mzML --input-id identifications.idparquet --output results.idparquet
 
 # With custom parameters
-python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out results.idXML \
+python -m onsite.lucxor.cli --input-spectrum spectra.mzML --input-id identifications.idparquet --output results.idparquet \
     --fragment-method HCD \
     --fragment-mass-tolerance 0.5 \
     --fragment-error-units Da \
@@ -164,8 +164,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | Option | Default | Description |
 |---|---|---|
 | `-in` | - | Input mzML file with spectra |
-| `-id` | - | Input idXML file with identifications |
-| `-out` | - | Output idXML file with scores |
+| `-id` | - | Input idparquet file with identifications |
+| `-out` | - | Output idparquet file with scores |
 | `--fragment-mass-tolerance` | 0.05 | Fragment mass tolerance |
 | `--fragment-mass-unit` | Da | Tolerance unit (Da or ppm) |
 | `--threads` | 1 | Number of threads for parallel processing |
@@ -178,8 +178,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | Option | Default | Description |
 |---|---|---|
 | `-in` | - | Input mzML file with spectra |
-| `-id` | - | Input idXML file with identifications |
-| `-out` | - | Output idXML file with scores |
+| `-id` | - | Input idparquet file with identifications |
+| `-out` | - | Output idparquet file with scores |
 | `--fragment-mass-tolerance` | 0.05 | Fragment mass tolerance |
 | `--fragment-mass-unit` | Da | Tolerance unit (Da or ppm) |
 | `--threads` | 1 | Number of threads for parallel processing |
@@ -192,8 +192,8 @@ python -m onsite.lucxor.cli -in spectra.mzML -id identifications.idXML -out resu
 | Option | Default | Description |
 |---|---|---|
 | `-in` | - | Input mzML file with spectra |
-| `-id` | - | Input idXML file with identifications |
-| `-out` | - | Output idXML file with scores |
+| `-id` | - | Input idparquet file with identifications |
+| `-out` | - | Output idparquet file with scores |
 | `--fragment-method` | CID | Fragmentation method (CID or HCD) |
 | `--fragment-mass-tolerance` | 0.5 | Fragment mass tolerance |
 | `--fragment-error-units` | Da | Tolerance units (Da or ppm) |
@@ -254,9 +254,9 @@ LucXor implements the complete LuciPHOr2 algorithm with two-stage processing for
 
 ## Interpreting the output: PSM-FDR vs localization FLR
 
-These tools assume your input idXML is **already filtered at the PSM level** (e.g. 1% PSM-FDR). That FDR answers *"is the peptide identification correct?"* and is left untouched. Localization adds a **second, orthogonal** error axis: *"is the PTM on the right residue?"* — the **false localization rate (FLR)**. A confident identification can still carry an ambiguous site, so the two rates are independent and you typically control both.
+These tools assume your input idparquet is **already filtered at the PSM level** (e.g. 1% PSM-FDR). That FDR answers *"is the peptide identification correct?"* and is left untouched. Localization adds a **second, orthogonal** error axis: *"is the PTM on the right residue?"* — the **false localization rate (FLR)**. A confident identification can still carry an ambiguous site, so the two rates are independent and you typically control both.
 
-Running any tool on a 1%-PSM-FDR idXML re-localizes each hit to its best-scoring site and writes these scores:
+Running any tool on a 1%-PSM-FDR idparquet re-localizes each hit to its best-scoring site and writes these scores:
 
 | | primary score | per-site confidence | typical cutoff | native FLR? |
 |---|---|---|---|---|
@@ -274,11 +274,11 @@ AScore and PhosphoRS report a per-site *confidence* but no global FLR. To put al
 
 ```bash
 python -m onsite.decoy_flr \
-    --ascore a.idXML --phosphors p.idXML --lucxor l.idXML \
+    --ascore a.idparquet --phosphors p.idparquet --lucxor l.idparquet \
     --q-value-threshold 0.01 --flr-threshold 0.05
 ```
 
-This reads the `target_decoy` and `q-value` UserParams from your FDR-filtered idXML, re-applies the q-value cutoff, intersects the PSM set across the supplied tools, and reports the sites recovered at your global FLR threshold (decoy-amino-acid method of Ramsbottom et al. 2022; **5%** is the recommended cutoff). `--add-decoys` is only needed for this FLR estimation — for plain localization you can omit it. Any subset of `--ascore` / `--phosphors` / `--lucxor` may be passed.
+This reads the `target_decoy` and `q-value` UserParams from your FDR-filtered idparquet, re-applies the q-value cutoff, intersects the PSM set across the supplied tools, and reports the sites recovered at your global FLR threshold (decoy-amino-acid method of Ramsbottom et al. 2022; **5%** is the recommended cutoff). `--add-decoys` is only needed for this FLR estimation — for plain localization you can omit it. Any subset of `--ascore` / `--phosphors` / `--lucxor` may be passed.
 
 ## Example Results
 
@@ -286,9 +286,9 @@ You can find example result files in the `data` directory. Here are the direct l
 
 | Algorithm | Description | Result File |
 |---|---|---|
-| AScore | AScore phosphorylation site localization results | [AScore Example](data/1_ascore_result.idXML) |
-| PhosphoRS | PhosphoRS phosphorylation site localization results | [PhosphoRS Example](data/1_phosphors_result.idXML) |
-| LucXor | LucXor (LuciPHOr2) PTM localization results with FLR | [LucXor Example](data/1_lucxor_result.idXML) |
+| AScore | AScore phosphorylation site localization results | [AScore Example](data/1_ascore_result.idparquet) |
+| PhosphoRS | PhosphoRS phosphorylation site localization results | [PhosphoRS Example](data/1_phosphors_result.idparquet) |
+| LucXor | LucXor (LuciPHOr2) PTM localization results with FLR | [LucXor Example](data/1_lucxor_result.idparquet) |
 
 ## Documentation
 

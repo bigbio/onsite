@@ -6,7 +6,6 @@ This module contains the main processing logic for scoring PSMs and calculating 
 
 import logging
 import numpy as np
-import pyopenms
 from typing import List, Dict, Any, Optional
 from .psm import PSM
 from .flr import FLRCalculator
@@ -181,7 +180,7 @@ class CoreProcessor:
 
         file_extension = output_file.lower().split(".")[-1]
 
-        if file_extension == "idxml":
+        if "idparquet" in output_file.lower() or file_extension in ("idparquet", "parquet"):
             # Update peptide identification data for all PSMs
             logger.info("Updating peptide identification data for PSMs")
             for psm in self.psms:
@@ -198,13 +197,10 @@ class CoreProcessor:
             if protein_ids is None:
                 protein_ids = []
 
-            # Write idXML file
-            try:
-                pyopenms.IdXMLFile().store(output_file, protein_ids, peptide_ids)
-                logger.info(f"Results successfully written to: {output_file}")
-            except Exception as e:
-                logger.error(f"Error writing idXML file: {str(e)}")
-                raise
+            # Write idParquet file
+            from onsite.idparquet import save_identifications as _save_parquet
+            _save_parquet(output_file, protein_ids, peptide_ids)
+            logger.info(f"Results successfully written to: {output_file}")
 
         elif file_extension == "csv":
             # Write CSV file

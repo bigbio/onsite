@@ -27,13 +27,12 @@ S/T/Y : A ratio across peptides (the paper's approximation).
 import argparse
 import ast
 import logging
-import re
-import xml.etree.ElementTree as ET
-from collections import defaultdict
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +54,6 @@ TOOL_SCORE_META = {
     "phosphors": "PhosphoRS_site_delta",
     "lucxor": "Luciphor_site_scores",
 }
-
-_MOD_RE = re.compile(r"\(([^)]*)\)")
 
 
 # ───────────────────────────── pure estimator ──────────────────────────────
@@ -130,13 +127,12 @@ def parse_localized_sites(seq_str: str) -> Tuple[str, List[Tuple[int, str, str]]
     Phospho / PhosphoDecoy sites.
 
     Returns (unmodified_sequence, [(residue_index, residue, mod_name), ...])
-    with 0-based residue indices (the convention used by every tool's
-    position-keyed score dict).
+    with 1-based residue indices (N-terminus = 0, first residue = 1, etc.).
     """
     sites: List[Tuple[int, str, str]] = []
     unmod: List[str] = []
     i = 0
-    pos = -1
+    pos = 0
     while i < len(seq_str):
         c = seq_str[i]
         if c == "(":
@@ -166,7 +162,7 @@ def _candidate_counts(unmod_seq: str) -> Tuple[int, int]:
     return t, x
 
 
-# ───────────────────────────── idXML parsing ───────────────────────────────
+# ───────────────────────────── idParquet parsing ───────────────────────────────
 @dataclass
 class PSMRecord:
     spectrum_ref: str
@@ -188,35 +184,60 @@ def _parse_site_dict(raw: str) -> Dict[int, float]:
         return {}
 
 
-def parse_tool_idxml(path: str, tool: str) -> List[PSMRecord]:
-    """
-    Parse a tool's idXML into one PSMRecord per PeptideIdentification (best hit).
+def _find_meta(metavalues, name: str) -> Optional[str]:
+    """Look up a meta value by name in a psm_metavalues array."""
+    if metavalues is None:
+        return None
+    items = []
+    if isinstance(metavalues, np.ndarray):
+        items = list(metavalues)
+    elif isinstance(metavalues, (list, tuple)):
+        items = list(metavalues)
+    for item in items:
+        if isinstance(item, dict) and item.get("name") == name:
+            return str(item.get("value", ""))
+    return None
 
-    Parsing is kept separate from the estimator so both stay independently
-    testable (advisor guidance).
-    """
+
+def parse_tool_idparquet(path: str, tool: str) -> List[PSMRecord]:
+    """Parse a tool's idParquet directory into one PSMRecord per identification."""
     score_meta = TOOL_SCORE_META[tool]
-    tree = ET.parse(path)
-    root = tree.getroot()
+    psm_path = os.path.join(path, "psms.parquet")
+    if not os.path.isfile(psm_path):
+        raise FileNotFoundError(f"Expected psms.parquet in {path}")
+
+    df = pd.read_parquet(psm_path)
+    # Use the best hit per identification (hit_index == 0).
+    if "hit_index" in df.columns:
+        df = df[df["hit_index"] == 0].copy()
     records: List[PSMRecord] = []
 
-    for pid in root.iter("PeptideIdentification"):
-        spectrum_ref = pid.get("spectrum_reference")
-        hit = pid.find("PeptideHit")  # rank-1 / best hit
-        if hit is None:
-            continue
-        seq = hit.get("sequence", "")
-        unmod, sites = parse_localized_sites(seq)
+    for _, row in df.iterrows():
+        raw_seq = str(row.get("peptidoform", row.get("sequence", "")))
+        if "[UNIMOD:" in raw_seq:
+            from onsite.idparquet import unimod_to_pyopenms_notation
 
-        params = {p.get("name"): p.get("value") for p in hit.findall("UserParam")}
-        is_ident_decoy = params.get("target_decoy") == "decoy"
+            seq = unimod_to_pyopenms_notation(raw_seq)
+        else:
+            seq = raw_seq
+
+        unmod, sites = parse_localized_sites(seq)
+        spectrum_ref = str(row.get("spectrum_reference", ""))
+        is_ident_decoy = bool(row.get("is_decoy", False))
+
+        site_scores: Dict[int, float] = {}
+        mv = row.get("psm_metavalues")
+        raw_scores = _find_meta(mv, score_meta)
+        if raw_scores:
+            site_scores = _parse_site_dict(raw_scores)
+
         q_value = None
-        if "q-value" in params:
+        raw_q = _find_meta(mv, "percolator_q_value")
+        if raw_q:
             try:
-                q_value = float(params["q-value"])
+                q_value = float(raw_q)
             except (ValueError, TypeError):
-                q_value = None
-        site_scores = _parse_site_dict(params.get(score_meta, ""))
+                pass
 
         records.append(
             PSMRecord(
@@ -369,7 +390,9 @@ def compute_decoy_flr(
     Returns:
         {tool: ToolResult}
     """
-    parsed = {t: parse_tool_idxml(p, t) for t, p in tool_paths.items()}
+    parsed = {}
+    for t, p in tool_paths.items():
+        parsed[t] = parse_tool_idparquet(p, t)
 
     # Intersection of spectrum references that survive the identification filter
     # in EVERY tool, so all tools report on the identical PSM population.
@@ -408,9 +431,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Unified decoy-amino-acid global FLR across AScore / PhosphoRS / LucXor (issue #40)."
     )
-    ap.add_argument("--ascore", help="AScore result idXML")
-    ap.add_argument("--phosphors", help="PhosphoRS result idXML")
-    ap.add_argument("--lucxor", help="LucXor result idXML")
+    ap.add_argument("--ascore", help="AScore result idparquet directory")
+    ap.add_argument("--phosphors", help="PhosphoRS result idparquet directory")
+    ap.add_argument("--lucxor", help="LucXor result idparquet directory")
     ap.add_argument("--q-value-threshold", type=float, default=0.01,
                     help="PSM q-value cutoff applied to all tools (default 0.01; <0 to skip)")
     ap.add_argument("--flr-threshold", type=float, default=0.05,

@@ -132,10 +132,10 @@ class PSM:
 
 ```bash
 # Basic usage
-onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML
+onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparquet
 
 # With custom parameters
-onsite lucxor -in spectra.mzML -id identifications.idXML -out results.idXML \
+onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-method HCD \
     --fragment-mass-tolerance 0.5 \
     --fragment-error-units Da \
@@ -209,7 +209,7 @@ results = processor.process_all_psms(psm_list, spectrum_map)
 
 ### LucXor Output
 
-The tool generates an idXML file containing:
+The tool generates an idparquet file containing:
 
 - **Luciphor_delta_score**: Main localization score
 - **Luciphor_pep_score**: Peptide identification score

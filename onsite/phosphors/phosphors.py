@@ -3,16 +3,12 @@ import math
 import numpy as np
 from pyopenms import (
     AASequence,
-    ResidueModification,
     ModificationsDB,
     TheoreticalSpectrumGenerator,
     MSSpectrum,
-    MSExperiment,
-    PeptideIdentification,
     PeptideHit,
     Precursor,
-    Constants,
-    Peak1D,
+    Constants
 )
 import sys  # For checking float limits
 
@@ -240,13 +236,15 @@ def _count_matched_ions(theo_mz, exp_mz_sorted, fragment_tolerance, fragment_met
     2. Each experimental peak is consumed by at most one theoretical ion, so a
        single peak cannot satisfy several theoretical ions.
 
-    Args:
+    Parameters
+    ----------
         theo_mz: iterable of theoretical m/z (any order).
         exp_mz_sorted: experimental peak m/z, ascending.
         fragment_tolerance: match tolerance (Da, or ppm if fragment_method_ppm).
         fragment_method_ppm: interpret tolerance as ppm.
 
-    Returns:
+    Returns
+    -------
         (n_expected, k_matches): unique theoretical ions, and how many matched.
     """
     def tol(mz):
@@ -305,10 +303,13 @@ def site_deltas_from_isomers(isomer_list):
     normalized site probability it does NOT saturate toward 0/100, so it
     preserves the ranking resolution needed to threshold a global FLR.
 
-    Args:
+    Parameters
+    ----------
         isomer_list: list of (modified_sequence_str, P_random) over all isoforms.
-    Returns:
-        dict {residue_index: delta} (0-based); empty if no isoforms.
+
+    Returns
+    -------
+        dict {residue_index: delta} (1-based); empty if no isoforms.
     """
     if not isomer_list:
         return {}
@@ -330,7 +331,7 @@ def site_deltas_from_isomers(isomer_list):
             continue
         # No competing isoform (single candidate) -> full score, like the per-PSM
         # convention; otherwise the rank1-vs-best-alternative gap.
-        deltas[s] = best_with if best_without is None else (best_with - best_without)
+        deltas[s + 1] = best_with if best_without is None else (best_with - best_without)
     return deltas
 
 
@@ -554,11 +555,13 @@ def get_occurrence_probability(exp_spectrum: MSSpectrum, tolerance_da: float) ->
     Calculates the probability "p" of matching a single theoretical peak
     to any experimental peak by chance.
 
-    Args:
+    Parameters
+    ----------
         exp_spectrum: The experimental spectrum (should be peak-picked).
         tolerance_da: The fragment tolerance in Daltons.
 
-    Returns:
+    Returns
+    -------
         The occurrence probability "p". Returns MIN_PROBABILITY if spectrum is empty or range is invalid.
     """
     try:
@@ -618,14 +621,16 @@ def calculate_phosphors_score(
     """
     Calculates a PhosphoRS-like score based on binomial probability.
 
-    Args:
+    Parameters
+    ----------
         theo_spectrum: Theoretical spectrum.
         exp_spectrum: Experimental spectrum (should be peak-picked).
         occurrence_probability (p): Probability of random peak match.
         tolerance: Fragment tolerance.
         is_ppm: Whether tolerance is in ppm.
 
-    Returns:
+    Returns
+    -------
         PhosphoRS-like score (lower is better).
     """
     try:
@@ -781,10 +786,13 @@ def _choose_window_depth(window_peaks, isoform_theo_in_window, has_sdi, tol_da,
     -- i.e. the depth that best SEPARATES isoforms. Otherwise maximize the best
     absolute score. Ties prefer the smaller depth (fewer noisy peaks).
 
-    Args:
+    Parameters
+    ----------
         window_peaks: list of (mz, intensity) in the window (any order).
         isoform_theo_in_window: per-isoform list of theoretical m/z within the window.
-    Returns:
+
+    Returns
+    -------
         chosen depth (int); 0 if the window has no peaks.
     """
     if not window_peaks:
@@ -817,8 +825,8 @@ def _choose_window_depth(window_peaks, isoform_theo_in_window, has_sdi, tol_da,
 
 def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_tolerance,
                                        fragment_method_ppm, add_neutral_losses):
-    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window,
-    the top-`depth` peaks where `depth` is chosen to best separate the isoforms.
+    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window.
+    The top-`depth` peaks where `depth` is chosen to best separate the isoforms.
     Returns the reduced MSSpectrum (or the input unchanged if it has no peaks)."""
     peaks = filtered_spec.get_peaks()
     if not peaks or len(peaks[0]) == 0:

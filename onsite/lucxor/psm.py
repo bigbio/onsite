@@ -1763,8 +1763,7 @@ class PSM:
         sites participate exactly like S/T/Y, so a decoy A-site receives a
         rankable score too.
 
-        Positions are 0-based indices into the unmodified peptide sequence
-        (matching the convention used for PhosphoRS site probabilities).
+        Positions are 1-based indices (N-terminus = 0, first residue = 1).
 
         For a site phosphorylated in *every* permutation (an unambiguous peptide,
         where the number of candidate sites equals the number of phospho groups)
@@ -1805,9 +1804,9 @@ class PSM:
                 continue  # unreachable: s comes from the occupied union
             if best_without is None:
                 # Occupied in every permutation (unambiguous) -> no alternative.
-                site_scores[s] = float(best_with)
+                site_scores[s + 1] = float(best_with)
             else:
-                site_scores[s] = float(best_with - best_without)
+                site_scores[s + 1] = float(best_with - best_without)
 
         return site_scores
 

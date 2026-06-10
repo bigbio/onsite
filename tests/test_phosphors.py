@@ -106,15 +106,15 @@ def test_site_deltas_from_isomers():
         ("PEPSTY(Phospho)K", 1e-05),  # Y@5, score 50
     ]
     d = site_deltas_from_isomers(iso)
-    assert round(d[3], 1) == 200.0   # 300 - max(100, 50)
-    assert round(d[4], 1) == -200.0  # 100 - 300
-    assert round(d[5], 1) == -250.0  # 50 - 300
-    assert max(d, key=d.get) == 3    # winning site has the largest delta
+    assert round(d[4], 1) == 200.0   # 300 - max(100, 50)
+    assert round(d[5], 1) == -200.0  # 100 - 300
+    assert round(d[6], 1) == -250.0  # 50 - 300
+    assert max(d, key=d.get) == 4    # winning site has the largest delta
 
     # Single candidate: no competing isoform -> full peptide score.
-    assert round(site_deltas_from_isomers([("PEPS(Phospho)K", 1e-20)])[3], 1) == 200.0
+    assert round(site_deltas_from_isomers([("PEPS(Phospho)K", 1e-20)])[4], 1) == 200.0
     # Underflowed P_random stays finite (floored), not +inf.
-    assert site_deltas_from_isomers([("PEPS(Phospho)K", 0.0)])[3] < 1e6
+    assert site_deltas_from_isomers([("PEPS(Phospho)K", 0.0)])[4] < 1e6
     assert site_deltas_from_isomers([]) == {}
 
 

@@ -2,14 +2,14 @@
 
 ## Overview
 
-This document presents the benchmark results of four phosphorylation site localization tools (LuciPHOr, Ascore, pyLucXor, and PhosphoRS) on the PXD000138 dataset. All tools were tested using identical input files (mzML and idXML) to ensure fair comparison.
+This document presents the benchmark results of four phosphorylation site localization tools (LuciPHOr, Ascore, pyLucXor, and PhosphoRS) on the PXD000138 dataset. All tools were tested using identical input files (mzML and idparquet) to ensure fair comparison.
 
 ## Methodology
 
 ### Data Processing Pipeline
 
 1. **Initial Processing**: LuciPHOr results were obtained using quantms workflow on PXD000138 dataset
-2. **Comparative Testing**: Ascore, pyLucXor, and PhosphoRS were tested using the same mzML and idXML files as LuciPHOr
+2. **Comparative Testing**: Ascore, pyLucXor, and PhosphoRS were tested using the same mzML and idparquet files as LuciPHOr
 3. **Quality Filtering** (applied first to all PSMs):
    - **LuciPHOr & pyLucXor**: local_flr < 0.01
    - **Ascore**: Ascore_site > 20
@@ -150,7 +150,7 @@ The choice of tool should be guided by the specific requirements of the analysis
 ## Dataset Information
 
 - **Dataset**: PXD000138
-- **Input Files**: mzML and idXML files
+- **Input Files**: mzML and idparquet files
 - **Validation**: Ground truth results
 
 ## References
