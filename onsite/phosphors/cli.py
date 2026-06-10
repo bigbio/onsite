@@ -306,8 +306,8 @@ def load_identifications(idparquet_path):
 def save_identifications(out_file, psms_df, proteins_df=None, template_df=None, source_idparquet=None):
     """Save results directly as DataFrames to an idParquet directory."""
     for idx, row in psms_df.iterrows():
-        metas = list(row["psm_metavalues"]) if isinstance(row["psm_metavalues"], np.ndarray) else []
-        existing_names = {m["name"] for m in metas if isinstance(m, dict)}
+        metas = list(row["psm_metavalues"])
+        existing_names = {m["name"] for m in metas}
 
         seq_str = str(row.get("peptidoform", row.get("sequence", "")))
         pyo_seq = unimod_to_pyopenms_notation(seq_str)
@@ -507,7 +507,6 @@ def _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, 
 
 @dataclass
 class _RowCtx:
-    """Invariant context for _make_phosphors_row — per-hit values."""
     mz: float
     rt: float
     scan_num: int
@@ -539,73 +538,64 @@ def _make_phosphors_row(ctx: _RowCtx, seq, raw_seq, charge, hit_idx, score, meta
 
 
 def _process_psm_group(group_df, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, lookup):
-    try:
-        row0 = group_df.iloc[0]
-        mz = float(row0.get("observed_mz"))
-        rt = float(row0.get("rt"))
-        spectrum_reference = str(row0.get("spectrum_reference"))
-        scan_num = int(row0.get("scan"))
-        ref_file = str(row0.get("reference_file_name"))
-        run_id = str(row0.get("run_identifier"))
-        ctx = _RowCtx(mz=mz, rt=rt, scan_num=scan_num, spectrum_reference=spectrum_reference,
-                        ref_file=ref_file, pep_idx=int(row0["peptide_identification_index"]),
-                        run_identifier=run_id)
 
-        index = lookup.findByScanNumber(scan_num)
-        spectrum = exp.getSpectrum(index)
+    row0 = group_df.iloc[0]
+    mz = float(row0.get("observed_mz"))
+    spectrum_reference = str(row0.get("spectrum_reference"))
+    scan_num = int(row0.get("scan"))
+    run_id = str(row0.get("run_identifier"))
+    ctx = _RowCtx(mz=mz, rt=float(row0.get("rt")), scan_num=scan_num, spectrum_reference=spectrum_reference,
+                    ref_file=str(row0.get("reference_file_name")), pep_idx=int(row0["peptide_identification_index"]),
+                    run_identifier=run_id)
 
-        psm_rows = []
-        phospho_count = 0
+    index = lookup.findByScanNumber(scan_num)
+    spectrum = exp.getSpectrum(index)
 
-        for hit_idx, (_, row) in enumerate(group_df.iterrows()):
-            raw_seq = str(row.get("peptidoform"))
-            seq_str = unimod_to_pyopenms_notation(raw_seq)
-            charge = int(row.get("precursor_charge"))
+    psm_rows = []
+    phospho_count = 0
 
-            seq = AASequence.fromString(seq_str)
-            hit = PeptideHit()
-            hit.setSequence(seq)
-            hit.setCharge(charge)
+    for hit_idx, (_, row) in enumerate(group_df.iterrows()):
+        raw_seq = str(row.get("peptidoform"))
+        seq_str = unimod_to_pyopenms_notation(raw_seq)
+        charge = int(row.get("precursor_charge"))
+        seq = AASequence.fromString(seq_str)
+        hit = PeptideHit()
+        hit.setSequence(seq)
+        hit.setCharge(charge)
 
-            if not _has_localizable_phospho(seq_str):
-                psm_rows.append(_make_phosphors_row(
-                    ctx, seq, raw_seq, charge, hit_idx, -1.0, _fresh_empty_metas(seq_str), row))
-                continue
-
-            site_probs, isomer_list = calculate_phospho_localization_compomics_style(
-                hit, spectrum,
-                fragment_tolerance=fragment_mass_tolerance,
-                fragment_method_ppm=(fragment_mass_unit == "ppm"),
-                add_decoys=add_decoys,
-            )
-
-            if site_probs is None or isomer_list is None:
-                psm_rows.append(_make_phosphors_row(
-                    ctx, seq, raw_seq, charge, hit_idx, -1.0, _fresh_empty_metas(seq_str), row))
-                continue
-
-            best_isomer = min(isomer_list, key=lambda x: x[1])
-            final_score = float(best_isomer[1])
-            new_sequence = best_isomer[0]
-            # Re-attach N-terminal modification dropped by isomer generation
-            if seq_str.startswith("(") and not new_sequence.startswith("("):
-                end = seq_str.find(")", 1)
-                if end > 0 and not any(seq_str.startswith(t) for t in ("(Phospho", "(PhosphoDecoy")):
-                    new_sequence = seq_str[:end + 1] + new_sequence
-            new_peptidoform = pyopenms_to_unimod_notation(new_sequence)
-
-            metas_list = _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, isomer_list)
-            phospho_count += 1
-
+        if not _has_localizable_phospho(seq_str):
             psm_rows.append(_make_phosphors_row(
-                ctx, seq, new_peptidoform, charge, hit_idx, float(final_score), metas_list, row))
+                ctx, seq, raw_seq, charge, hit_idx, -1.0, _fresh_empty_metas(seq_str), row))
+            continue
 
-        return {"status": "success", "rows": psm_rows, "phospho_count": phospho_count}
+        site_probs, isomer_list = calculate_phospho_localization_compomics_style(
+            hit, spectrum, fragment_tolerance=fragment_mass_tolerance,
+            fragment_method_ppm=(fragment_mass_unit == "ppm"), add_decoys=add_decoys,
+        )
 
-    except Exception as e:
-        if logger:
-            logger.error(f"Error: {e}")
-        return {"status": "error", "reason": str(e)}
+        if site_probs is None or isomer_list is None:
+            psm_rows.append(_make_phosphors_row(
+                ctx, seq, raw_seq, charge, hit_idx, -1.0, _fresh_empty_metas(seq_str), row))
+            continue
+
+        best_isomer = min(isomer_list, key=lambda x: x[1])
+        final_score = float(best_isomer[1])
+        new_sequence = best_isomer[0]
+        # Re-attach N-terminal modification dropped by isomer generation
+        if seq_str.startswith("(") and not new_sequence.startswith("("):
+            end = seq_str.find(")", 1)
+            if end > 0 and not any(seq_str.startswith(t) for t in ("(Phospho", "(PhosphoDecoy")):
+                new_sequence = seq_str[:end + 1] + new_sequence
+        new_peptidoform = pyopenms_to_unimod_notation(new_sequence)
+
+        metas_list = _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, isomer_list)
+        phospho_count += 1
+
+        psm_rows.append(_make_phosphors_row(
+            ctx, seq, new_peptidoform, charge, hit_idx, float(final_score), metas_list, row))
+
+    return {"status": "success", "rows": psm_rows, "phospho_count": phospho_count}
+
 
 def log_debug(log_file, enabled):
     """Initialize debug logging only when enabled"""

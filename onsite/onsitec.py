@@ -278,9 +278,7 @@ def _get_metas_dict(df, row_idx: int) -> Dict[str, str]:
 
 
 def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_file):
-    """
-    Merge results from all three algorithms into a single idparquet directory.
-    """
+    """Merge results from all three algorithms into a single idparquet directory."""
     ascore_df, _, _, _ = load_dataframes(ascore_file)
     phosphors_df, _, _, _ = load_dataframes(phosphors_file)
     lucxor_df, proteins_df, _, _ = load_dataframes(lucxor_file)

@@ -19,145 +19,160 @@ from pyopenms import ModificationsDB
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Modification name mapping: UNIMOD ↔ pyOpenMS short name
+# ModMapper — UNIMOD ↔ pyOpenMS name mapping + peptidoform parsing
 # ---------------------------------------------------------------------------
 # The pyOpenMS AASequence uses short modification names (e.g. "Phospho"),
 # while idParquet uses ProForma UNIMOD notation (e.g. "[UNIMOD:21]").
 #
-# We build the mapping from a hardcoded fallback for the most common
-# modifications, supplemented by ModificationsDB if pyOpenMS is available.
+# ModMapper lazily loads the mapping from ModificationsDB on first use,
+# then exposes converters and the peptidoform-to-modifications parser.
+# All state lives on the singleton ``_MAPPER`` instance; module-level
+# functions below it are thin wrappers for backward compatibility.
 # ---------------------------------------------------------------------------
 
-_UNIMOD_TO_PYO: Dict[str, str] = {}   # "unimod:21" -> "Phospho"
-_PYO_TO_UNIMOD: Dict[str, str] = {}   # "Phospho"    -> "UNIMOD:21"
 
-def _ensure_mod_mappings():
-    """Populate UNIMOD ↔ pyOpenMS name caches from ModificationsDB."""
-    if _UNIMOD_TO_PYO:
-        return
-    db = ModificationsDB()
-    n = db.getNumberOfModifications()
-    for i in range(n):
-        mod = db.getModification(i)
+class ModMapper:
+    """UNIMOD ↔ pyOpenMS modification name mapper and peptidoform parser."""
+
+    def __init__(self):
+        self._unimod_to_pyo: Dict[str, str] = {}  # "unimod:21" -> "Phospho"
+        self._pyo_to_unimod: Dict[str, str] = {}  # "Phospho"    -> "UNIMOD:21"
+
+    # -- lazy loading -------------------------------------------------------
+
+    def _ensure(self):
+        if not self._unimod_to_pyo:
+            self._load_from_db()
+
+    def _load_from_db(self):
+        db = ModificationsDB()
+        for i in range(db.getNumberOfModifications()):
+            self._register_mod(db.getModification(i))
+
+    def _register_mod(self, mod):
         uname = mod.getUniModAccession()
-        sname = mod.getName()
-        fname = mod.getFullName()
-        idname = mod.getId()
         parts = uname.split(":")
         if len(parts) != 2 or not parts[1].isdigit():
-            continue
-        unimod_str = f"UNIMOD:{parts[1]}"
+            return
+        u = f"UNIMOD:{parts[1]}"
+        self._populate_pyo_to_unimod(mod, u)
+        self._populate_unimod_to_pyo(uname, mod, u)
 
-        # getId() returns the short name AASequence.toString() uses (e.g. "Phospho")
-        for name in (sname, fname, idname):
-            if name and name not in _PYO_TO_UNIMOD:
-                _PYO_TO_UNIMOD[name] = unimod_str
+    def _populate_pyo_to_unimod(self, mod, unimod_str):
+        for name in (mod.getName(), mod.getFullName(), mod.getId()):
+            if name and name not in self._pyo_to_unimod:
+                self._pyo_to_unimod[name] = unimod_str
 
-        uname_lower = uname.lower()
-        short_name = sname or idname or fname or unimod_str
-        if uname_lower not in _UNIMOD_TO_PYO:
-            _UNIMOD_TO_PYO[uname_lower] = short_name
+    def _populate_unimod_to_pyo(self, uname, mod, unimod_str):
+        short = next(n for n in (mod.getName(), mod.getId(), mod.getFullName(), unimod_str) if n)
+        key = uname.lower()
+        if key not in self._unimod_to_pyo:
+            self._unimod_to_pyo[key] = short
+
+    # -- public converters --------------------------------------------------
+
+    def unimod_to_pyopenms(self, peptidoform: str) -> str:
+        """``S[UNIMOD:21]`` → ``S(Phospho)``"""
+        self._ensure()
+
+        def _lookup(num: str) -> str:
+            return self._unimod_to_pyo.get(f"unimod:{num}", num)
+
+        s = re.sub(r"\[UNIMOD:(\d+)\]-", lambda m: f"({_lookup(m.group(1))})", peptidoform)
+        s = re.sub(r"-\[UNIMOD:(\d+)\]", lambda m: f"({_lookup(m.group(1))})", s)
+        s = re.sub(r"([A-Z])\[UNIMOD:(\d+)\]", lambda m: f"{m.group(1)}({_lookup(m.group(2))})", s)
+        return s
+
+    def pyopenms_to_unimod(self, seq_str: str) -> str:
+        """``S(Phospho)`` → ``S[UNIMOD:21]``"""
+        self._ensure()
+
+        def _to_u(name: str) -> str:
+            return self._pyo_to_unimod.get(name, name)
+
+        s = re.sub(r"^\.\(([^)]+)\)", lambda m: f"[{_to_u(m.group(1))}]-", seq_str)
+        s = re.sub(r"^\(([^)]+)\)([A-Z])", lambda m: f"[{_to_u(m.group(1))}]-{m.group(2)}", s)
+        s = re.sub(r"([A-Z])\(([^)]+)\)", lambda m: f"{m.group(1)}[{_to_u(m.group(2))}]", s)
+        return s
+
+    # -- modifications parser -----------------------------------------------
+
+    def peptidoform_to_modifications(self, peptidoform: str,
+                                    site_scores: Optional[Dict[int, float]] = None):
+        """Parse a ProForma peptidoform into the ``modifications`` column format."""
+        self._ensure()
+        if not peptidoform or "[UNIMOD:" not in peptidoform:
+            return np.array([], dtype=object)
+
+        mods = []
+
+        # N-terminal
+        nterm = re.match(r"^\[UNIMOD:(\d+)\]-", peptidoform)
+        if nterm:
+            acc = f"UNIMOD:{nterm.group(1)}"
+            name = self._unimod_to_pyo.get(f"unimod:{nterm.group(1)}", acc)
+            mods.append({
+                "name": name, "accession": acc,
+                "positions": np.array([{"position": "N-term.0", "scores": None}], dtype=object),
+            })
+            peptidoform = peptidoform[nterm.end():]
+
+        # Residue-specific
+        for acc, positions in self._group_residue_mods(peptidoform, site_scores).items():
+            num = acc.split(":")[1]
+            name = self._unimod_to_pyo.get(f"unimod:{num}", acc)
+            mods.append({"name": name, "accession": acc,
+                        "positions": np.array(positions, dtype=object)})
+
+        return np.array(mods, dtype=object)
+
+    # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _compute_residue_index_map(peptidoform: str):
+        """Return a list where list[pos] = 1-based residue index (0 = not a residue)."""
+        res_idx = [0] * len(peptidoform)
+        depth = cnt = 0
+        for i, c in enumerate(peptidoform):
+            if c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+            elif c.isalpha() and depth == 0:
+                cnt += 1
+                res_idx[i] = cnt
+        return res_idx
+
+    def _group_residue_mods(self, peptidoform: str, site_scores):
+        """Group residue-position data by modification accession.``"""
+        res_idx = self._compute_residue_index_map(peptidoform)
+        groups = defaultdict(list)
+        for m in re.finditer(r"([A-Z])\[UNIMOD:(\d+)\]", peptidoform):
+            residue, acc_num = m.group(1), m.group(2)
+            key = f"UNIMOD:{acc_num}"
+            r_idx = res_idx[m.start()]
+            score = site_scores.get(r_idx) if site_scores else None
+            groups[key].append({"position": f"{residue}.{r_idx}", "scores": score})
+        return groups
 
 
-# ---------------------------------------------------------------------------
-# String-level conversion: UNIMOD notation ↔ pyOpenMS notation
-# These are pure string functions (no pyOpenMS dependency).
-# ---------------------------------------------------------------------------
+# -- Singleton instance -------------------------------------------------------
 
+_MAPPER = ModMapper()
+
+
+# -- Module-level convenience wrappers (backward-compatible API) --------------
 
 def unimod_to_pyopenms_notation(peptidoform: str) -> str:
-    """Convert ProForma UNIMOD notation (``S[UNIMOD:21]``) to pyOpenMS notation (``S(Phospho)``)."""
-    _ensure_mod_mappings()
-
-    def _lookup(num: str) -> str:
-        name = _UNIMOD_TO_PYO.get(f"unimod:{num}")
-        return name if name else num
-
-    peptidoform = re.sub(
-        r"\[UNIMOD:(\d+)\]-",
-        lambda m: f"({_lookup(m.group(1))})",
-        peptidoform,
-    )
-    peptidoform = re.sub(
-        r"-\[UNIMOD:(\d+)\]",
-        lambda m: f"({_lookup(m.group(1))})",
-        peptidoform,
-    )
-    peptidoform = re.sub(
-        r"([A-Z])\[UNIMOD:(\d+)\]",
-        lambda m: f"{m.group(1)}({_lookup(m.group(2))})",
-        peptidoform,
-    )
-    return peptidoform
+    return _MAPPER.unimod_to_pyopenms(peptidoform)
 
 
 def pyopenms_to_unimod_notation(seq_str: str) -> str:
-    """Convert pyOpenMS notation (``S(Phospho)``) back to ProForma UNIMOD notation (``S[UNIMOD:21]``)."""
-    _ensure_mod_mappings()
-
-    def _to_unimod(mod_name: str) -> str:
-        return _PYO_TO_UNIMOD.get(mod_name, mod_name)
-
-    seq_str = re.sub(
-        r"^\.\(([^)]+)\)",
-        lambda m: f"[{_to_unimod(m.group(1))}]-",
-        seq_str,
-    )
-    # N-terminal without leading dot: "(name)seq" -> "[UNIMOD:N]-seq"
-    seq_str = re.sub(
-        r"^\(([^)]+)\)([A-Z])",
-        lambda m: f"[{_to_unimod(m.group(1))}]-{m.group(2)}",
-        seq_str,
-    )
-    seq_str = re.sub(
-        r"([A-Z])\(([^)]+)\)",
-        lambda m: f"{m.group(1)}[{_to_unimod(m.group(2))}]",
-        seq_str,
-    )
-    return seq_str
+    return _MAPPER.pyopenms_to_unimod(seq_str)
 
 
 def peptidoform_to_modifications(peptidoform: str, site_scores: Optional[Dict[int, float]] = None):
-    """Parse a ProForma peptidoform into the ``modifications`` column format"""
-    _ensure_mod_mappings()
-    if not peptidoform or "[UNIMOD:" not in peptidoform:
-        return np.array([], dtype=object)
-    mods = []
-    nterm = re.match(r"^\[UNIMOD:(\d+)\]-", peptidoform)
-    if nterm:
-        uname = f"UNIMOD:{nterm.group(1)}"
-        name = _UNIMOD_TO_PYO.get(f"unimod:{nterm.group(1)}", uname)
-        mods.append({
-            "name": name, "accession": uname,
-            "positions": np.array([{"position": "N-term.0", "scores": None}], dtype=object),
-        })
-        peptidoform = peptidoform[nterm.end():]
-    matches = list(re.finditer(r"([A-Z])\[UNIMOD:(\d+)\]", peptidoform))
-    mod_positions = defaultdict(list)
-    for m in matches:
-        residue = m.group(1)
-        key = f"UNIMOD:{m.group(2)}"
-        pos_in_peptido = m.start()
-        idx = 0
-        pos = 0
-        while pos < len(peptidoform) and pos < pos_in_peptido:
-            if peptidoform[pos] == "[":
-                j = peptidoform.find("]", pos)
-                if j >= 0:
-                    pos = j + 1
-                    continue
-            if peptidoform[pos].isalpha():
-                idx += 1
-            pos += 1
-        score = None
-        if site_scores and (idx + 1) in site_scores:
-            score = float(site_scores[idx + 1])
-        mod_positions[key].append({"position": f"{residue}.{idx + 1}", "scores": score})
-    for accession, positions in mod_positions.items():
-        unimod_num = accession.split(":")[1]
-        name = _UNIMOD_TO_PYO.get(f"unimod:{unimod_num}", accession)
-        mods.append({"name": name, "accession": accession, "positions": np.array(positions, dtype=object)})
-    return np.array(mods, dtype=object)
+    return _MAPPER.peptidoform_to_modifications(peptidoform, site_scores)
 
 # ---------------------------------------------------------------------------
 # Path resolution helper
@@ -242,44 +257,35 @@ def _save_psms_parquet(out_dir: str, psms_df: pd.DataFrame, source_idparquet: Op
         print("Warning: No PSMs to save")
         return
 
-    src_psm = os.path.join(source_idparquet, "psms.parquet") if source_idparquet else None
-    if src_psm and os.path.isfile(src_psm):
-        shutil.copy2(src_psm, os.path.join(out_dir, "psms.parquet"))
+    src_psm = os.path.join(source_idparquet, "psms.parquet")
+    shutil.copy2(src_psm, os.path.join(out_dir, "psms.parquet"))
     tbl = pq.read_table(os.path.join(out_dir, "psms.parquet"))
-    src_cols = set(tbl.schema.names)
 
     def _pa_col(name, values):
         return pa.array(values, type=tbl.schema.field(name).type)
 
     updates = {}
     for col in ("peptidoform", "sequence", "score", "score_type", "higher_score_better"):
-        if col in psms_df.columns and col in src_cols:
-            updates[col] = _pa_col(col, psms_df[col].tolist())
-    if "psm_metavalues" in psms_df.columns and "psm_metavalues" in src_cols:
-        updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
+        updates[col] = _pa_col(col, psms_df[col].tolist())
 
-    if "peptidoform" in src_cols and "modifications" in src_cols:
-        _pf_col = psms_df["peptidoform"] if "peptidoform" in psms_df.columns else None
-        _mv_col = psms_df["psm_metavalues"] if "psm_metavalues" in psms_df.columns else None
-        if _pf_col is not None:
-            _score_meta_keys = ["AScore_site_scores", "Luciphor_site_scores", "PhosphoRS_site_delta"]
-            _new_mods = []
-            for i in range(len(psms_df)):
-                pf = str(_pf_col.iloc[i]) if _pf_col is not None else ""
-                ss = None
-                if _mv_col is not None:
-                    mv = _mv_col.iloc[i]
-                    if isinstance(mv, np.ndarray):
-                        for m in mv:
-                            if isinstance(m, dict) and m.get("name") in _score_meta_keys:
-                                try:
-                                    d = ast.literal_eval(m["value"])
-                                    ss = {int(k): float(v) for k, v in d.items()}
-                                except Exception:
-                                    pass
-                                break
-                _new_mods.append(peptidoform_to_modifications(pf, ss))
-            updates["modifications"] = _pa_col("modifications", _new_mods)
+    updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
+
+    _pf_col = psms_df["peptidoform"] 
+    _mv_col = psms_df["psm_metavalues"]
+    _score_meta_keys = ["AScore_site_scores", "Luciphor_site_scores", "PhosphoRS_site_delta"]
+    _new_mods = []
+    for i in range(len(psms_df)):
+        pf = str(_pf_col.iloc[i])
+        ss = None
+        if _mv_col is not None:
+            mv = _mv_col.iloc[i]
+            for m in mv:
+                if m.get("name") in _score_meta_keys:
+                    d = ast.literal_eval(m["value"])
+                    ss = {int(k): float(v) for k, v in d.items()}
+                    break
+        _new_mods.append(peptidoform_to_modifications(pf, ss))
+    updates["modifications"] = _pa_col("modifications", _new_mods)
 
     for name, arr in updates.items():
         idx = tbl.schema.get_field_index(name)
@@ -306,9 +312,9 @@ def _save_proteins_parquet(out_dir: str, proteins_df: Optional[pd.DataFrame],
 def _copy_or_create_parquet(name: str, out_dir: str,
                             source_idparquet: Optional[str],
                             run_identifier: Optional[str]):
-    """Write a non-PSM parquet file (search_params / protein_groups)"""
+    """Write a non-PSM parquet file (search_params / protein_groups)."""
     path = os.path.join(out_dir, f"{name}.parquet")
-    src = os.path.join(source_idparquet, f"{name}.parquet") if source_idparquet else None
+    src = os.path.join(source_idparquet, f"{name}.parquet")
     if src and os.path.isfile(src):
         shutil.copy2(src, path)
         return
