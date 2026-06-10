@@ -32,8 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 class ModMapper:
-
-    """UNIMOD ↔ pyOpenMS modification name mapper and peptidoform parser."""
+    """
+    UNIMOD ↔ pyOpenMS modification name mapper and peptidoform parser.
+    
+    convert UNIMOD accessions in ProForma peptidoforms to pyOpenMS names for AASequence parsing
+    and convert pyOpenMS-style strings back to UNIMOD notation for idParquet output.
+    """
 
     def __init__(self):
         """Initialize empty mappers; lazily populated from ModificationsDB on first use."""
@@ -74,7 +78,6 @@ class ModMapper:
     # -- public converters --------------------------------------------------
 
     def unimod_to_pyopenms(self, peptidoform: str) -> str:
-        """S[UNIMOD:21] → S(Phospho)"""
         self._ensure()
 
         def _lookup(num: str) -> str:
@@ -86,7 +89,6 @@ class ModMapper:
         return s
 
     def pyopenms_to_unimod(self, seq_str: str) -> str:
-        """``S(Phospho)`` → ``S[UNIMOD:21]``"""
         self._ensure()
 
         def _to_u(name: str) -> str:
