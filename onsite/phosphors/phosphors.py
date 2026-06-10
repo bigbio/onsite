@@ -825,8 +825,8 @@ def _choose_window_depth(window_peaks, isoform_theo_in_window, has_sdi, tol_da,
 
 def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_tolerance,
                                        fragment_method_ppm, add_neutral_losses):
-    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window,
-    the top-`depth` peaks where `depth` is chosen to best separate the isoforms.
+    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window.
+    The top-`depth` peaks where `depth` is chosen to best separate the isoforms.
     Returns the reduced MSSpectrum (or the input unchanged if it has no peaks)."""
     peaks = filtered_spec.get_peaks()
     if not peaks or len(peaks[0]) == 0:
