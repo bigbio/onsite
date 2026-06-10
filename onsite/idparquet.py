@@ -32,9 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 class ModMapper:
+
     """UNIMOD ↔ pyOpenMS modification name mapper and peptidoform parser."""
 
     def __init__(self):
+        """Initialize empty mappers; lazily populated from ModificationsDB on first use."""
         self._unimod_to_pyo: Dict[str, str] = {}  # "unimod:21" -> "Phospho"
         self._pyo_to_unimod: Dict[str, str] = {}  # "Phospho"    -> "UNIMOD:21"
 
@@ -72,7 +74,7 @@ class ModMapper:
     # -- public converters --------------------------------------------------
 
     def unimod_to_pyopenms(self, peptidoform: str) -> str:
-        """``S[UNIMOD:21]`` → ``S(Phospho)``"""
+        """S[UNIMOD:21] → S(Phospho)"""
         self._ensure()
 
         def _lookup(num: str) -> str:
@@ -144,7 +146,7 @@ class ModMapper:
         return res_idx
 
     def _group_residue_mods(self, peptidoform: str, site_scores):
-        """Group residue-position data by modification accession.``"""
+        """Group residue-position data by modification accession."""
         res_idx = self._compute_residue_index_map(peptidoform)
         groups = defaultdict(list)
         for m in re.finditer(r"([A-Z])\[UNIMOD:(\d+)\]", peptidoform):
@@ -253,10 +255,6 @@ def save_dataframes(
 
 def _save_psms_parquet(out_dir: str, psms_df: pd.DataFrame, source_idparquet: Optional[str]):
     """Write psms.parquet by updating columns of the source schema."""
-    if psms_df is None or len(psms_df) == 0:
-        print("Warning: No PSMs to save")
-        return
-
     src_psm = os.path.join(source_idparquet, "psms.parquet")
     shutil.copy2(src_psm, os.path.join(out_dir, "psms.parquet"))
     tbl = pq.read_table(os.path.join(out_dir, "psms.parquet"))
@@ -277,13 +275,12 @@ def _save_psms_parquet(out_dir: str, psms_df: pd.DataFrame, source_idparquet: Op
     for i in range(len(psms_df)):
         pf = str(_pf_col.iloc[i])
         ss = None
-        if _mv_col is not None:
-            mv = _mv_col.iloc[i]
-            for m in mv:
-                if m.get("name") in _score_meta_keys:
-                    d = ast.literal_eval(m["value"])
-                    ss = {int(k): float(v) for k, v in d.items()}
-                    break
+        mv = _mv_col.iloc[i]
+        for m in mv:
+            if m.get("name") in _score_meta_keys:
+                d = ast.literal_eval(m["value"])
+                ss = {int(k): float(v) for k, v in d.items()}
+                break
         _new_mods.append(peptidoform_to_modifications(pf, ss))
     updates["modifications"] = _pa_col("modifications", _new_mods)
 
