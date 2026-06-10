@@ -277,7 +277,7 @@ def _get_metas_dict(df, row_idx: int) -> Dict[str, str]:
     return {str(m["name"]): str(m["value"]) for m in items if isinstance(m, dict)}
 
 
-def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_file):
+def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_file, input_idparquet):
     """Merge results from all three algorithms into a single idparquet directory."""
     ascore_df, _, _, _ = load_dataframes(ascore_file)
     phosphors_df, _, _, _ = load_dataframes(phosphors_file)
@@ -291,7 +291,6 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
         click.echo(f"  Warning: {stats['seq_mismatch']} PSM(s) skipped (seq mismatch)")
 
     merged_rows = []
-    merged_pep_idx = 0
 
     for ai, pi, li in triples:
         a_metas = _get_metas_dict(ascore_df, ai)
@@ -369,17 +368,37 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
                 "spectrum_reference": spec_ref,
                 "reference_file_name": ref_file,
                 "hit_index": hit_idx,
-                "peptide_identification_index": merged_pep_idx,
+                "peptide_identification_index": li,
                 "psm_metavalues": np.array(merged_metas, dtype=object),
                 "modifications": np.array([], dtype=object),
                 "protein_accessions": np.array([], dtype=object),
                 "additional_scores": np.array([], dtype=object),
                 "run_identifier": str(l_hit.get("run_identifier", "")),
             })
-        merged_pep_idx += 1
 
     out_df = pd.DataFrame(merged_rows)
-    save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df)
+
+    full_df = lucxor_df.copy()
+
+    out_df = out_df.set_index(["peptide_identification_index", "hit_index"])
+    full_df = full_df.set_index(["peptide_identification_index", "hit_index"])
+
+    for col in out_df.columns:
+        if col in full_df.columns and out_df[col].dtype != full_df[col].dtype:
+            try:
+                out_df[col] = out_df[col].astype(full_df[col].dtype)
+            except Exception:
+                pass
+
+    full_df.update(out_df)
+
+    missing_mask = ~full_df.index.isin(out_df.index)
+    full_df.loc[missing_mask, "score"] = np.nan
+    full_df.loc[missing_mask, "score_type"] = "onsite_combined_score"
+
+    out_df = full_df.reset_index()
+
+    save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df, source_idparquet=input_idparquet)
     click.echo(f"Successfully merged {stats['merged']} peptide identifications")
     click.echo("Each peptide contains scores from all three algorithms")
 
@@ -447,7 +466,7 @@ def run_all_algorithms_from_single_cli(
             if exit_code != 0:
                 raise RuntimeError(f"LucXor failed with exit code {exit_code}")
 
-            merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
+            merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file, id_file)
 
         elapsed = time.time() - start_time
         click.echo(f"All algorithms completed in {elapsed:.2f}s")
