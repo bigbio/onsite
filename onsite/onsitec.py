@@ -387,8 +387,10 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
         if col in full_df.columns and out_df[col].dtype != full_df[col].dtype:
             try:
                 out_df[col] = out_df[col].astype(full_df[col].dtype)
-            except Exception:
-                pass
+            except Exception as e:
+                click.echo(
+                    f"Could not convert column '{col}' from {out_df[col].dtype} to {full_df[col].dtype}: {e}"
+                )
 
     full_df.update(out_df)
 
