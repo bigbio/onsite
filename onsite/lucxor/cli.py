@@ -5,6 +5,7 @@ Command line interface for pyLuciPHOr2
 
 import click
 import os
+import re
 import sys
 import logging
 import time
@@ -385,21 +386,42 @@ class PyLuciPHOr2:
         return score
 
     def load_input_files(
-        self, input_id: str, input_spectrum: str
+        self, input_id: str, input_spectrum: str, config: dict = None
     ):
-        """Load input files from idParquet directory. Returns (pep_ids, prot_ids, exp)."""
+        """Load input files from idParquet directory and build PSM objects.
+
+        Returns (all_psms, prot_ids, exp).
+        """
         psms_df, proteins_df, _, _ = load_dataframes(input_id)
         self._psms_df_template = psms_df  # preserved for output schema
         if psms_df.empty:
             self.logger.warning("No peptide identifications found in input file")
-            return [], [], None
+            return [], None, None
 
-        pep_ids = []
+        config = config or {}
         self.logger.info(f"Loaded {len(psms_df)} PSMs from idParquet")
 
-        # Build PeptideIdentification objects from DataFrame rows
+        # Load spectra first
+        exp = MSExperiment()
+        MzMLFile().load(input_spectrum, exp)
+        if exp.empty():
+            self.logger.warning("No spectra found in input file")
+            return [], None, None
+
+        # Build SpectrumLookup for scan-number → spectrum index
+        lookup = SpectrumLookup()
+        if "spectrum=" in exp.getSpectrum(0).getNativeID():
+            lookup.readSpectra(exp, "spectrum=(?<SCAN>\\d+)")
+        else:
+            lookup.readSpectra(exp, "scan=(?<SCAN>\\d+)")
+
+        # PEP converted 1-PEP — set early so get_psm_score uses it inline
+        self.score_type = "Posterior Error Probability"
+        self.higher_score_better = True
+
+        # Build pep_ids + PSM objects in a single pass over DataFrame rows
+        all_psms = []
         for _, row in psms_df.iterrows():
-            pid = PeptideIdentification()
             peptidoform = str(row.get("peptidoform"))
             pyo_seq = unimod_to_pyopenms_notation(peptidoform)
             seq = AASequence.fromString(pyo_seq)
@@ -409,32 +431,54 @@ class PyLuciPHOr2:
             hit.setCharge(int(row["precursor_charge"]))
             hit.setScore(float(row["posterior_error_probability"]))
             hit.setMetaValue("Posterior Error Probability", float(row["posterior_error_probability"]))
-            # Populate additional_scores
             add_scores = row.get("additional_scores")
             for ascore in add_scores:
                 sname = ascore.get("score_name", "")
                 sval = ascore.get("score_value", "")
                 hit.setMetaValue(str(sname), float(sval))
 
+            pid = PeptideIdentification()
             pid.setHits([hit])
             pid.setRT(float(row["rt"]))
             pid.setMZ(float(row["observed_mz"]))
             pid.setMetaValue("scan_number", int(row["scan"]))
             pid.setScoreType(str(row.get("score_type")))
-            pep_ids.append(pid)
 
-        # PEP converted 1-PEP
-        self.score_type = "Posterior Error Probability"
-        self.higher_score_better = True
+            # Build PSM object
+            sequence = seq.toString()
+            if sequence.startswith("."):
+                sequence = sequence[1:]
+            charge = int(row["precursor_charge"])
+            scan_num = int(row["scan"])
 
-        # Load spectra
-        exp = MSExperiment()
-        MzMLFile().load(input_spectrum, exp)
-        if exp.empty():
-            self.logger.warning("No spectra found in input file")
-            return [], [], None
+            index = lookup.findByScanNumber(scan_num)
+            spectrum = exp.getSpectrum(index)
+            spectrum_dict = {
+                "mz": spectrum.get_peaks()[0],
+                "intensities": spectrum.get_peaks()[1],
+                "native_id": spectrum.getNativeID(),
+                "rt": spectrum.getRT(),
+            }
+            peptide = Peptide(sequence, config, charge=charge)
+            psm = PSM(peptide, spectrum_dict, config=config)
+            psm.search_engine_sequence = sequence
 
-        return pep_ids, proteins_df, exp
+            score = self.get_psm_score(pid, hit, self.score_type, self.higher_score_better)
+            psm.psm_score = score
+            peptide.score = score
+            psm.score_type = self.score_type
+            psm.higher_score_better = self.higher_score_better
+
+            # Stash metadata for the output-message-building loop later
+            psm._mz = float(row["observed_mz"])
+            psm._rt = float(row["rt"])
+            psm._scan_num = scan_num
+            psm._spectrum_reference = str(row.get("spectrum_reference", ""))
+            psm._reference_file_name = str(row.get("reference_file_name", ""))
+
+            all_psms.append(psm)
+
+        return all_psms, proteins_df, exp
         
     def initialize_model(self, config: Dict) -> None:
         """Initialize scoring model"""
@@ -529,64 +573,9 @@ class PyLuciPHOr2:
         self.logger.debug(f"Debug mode: {debug}")
         self.logger.debug(f"Log level: {logging.getLogger().level}")
 
-        pep_ids, prot_ids, exp = self.load_input_files(input_id, input_spectrum)
-        if not pep_ids or exp is None:
+        all_psms, prot_ids, exp = self.load_input_files(input_id, input_spectrum, config)
+        if not all_psms or exp is None:
             self.logger.error("No valid peptide identification or spectrum data found, process terminated.")
-            return 1
-
-        # 1. Create scan number to spectrum mapping
-
-        lookup = SpectrumLookup()
-        if "spectrum=" in exp.getSpectrum(0).getNativeID():
-            lookup.readSpectra(exp, "spectrum=(?<SCAN>\\d+)")
-        else:
-            lookup.readSpectra(exp, "scan=(?<SCAN>\\d+)")
-
-        # 2. Collect all PSM objects
-        all_psms = []
-        for _, pep_id in enumerate(pep_ids, 1):
-            hit = pep_id.getHits()[0]
-            sequence = hit.getSequence().toString()
-            # Strip pyOpenMS N-terminal dot notation like ".(Acetyl)"
-            if sequence.startswith("."):
-                sequence = sequence[1:]
-            charge = hit.getCharge()
-            rt = pep_id.getRT()
-            
-            # Try to get scan number
-            spectrum = None
-            
-            # Get scan number from peptide identification
-            scan_num = pep_id.getMetaValue("scan_number")
-            index = lookup.findByScanNumber(scan_num)
-            spectrum = exp.getSpectrum(index)
-            spectrum_dict = {
-                "mz": spectrum.get_peaks()[0],
-                "intensities": spectrum.get_peaks()[1],
-                "native_id": spectrum.getNativeID(),
-                "rt": spectrum.getRT()
-            }
-            peptide = Peptide(sequence, config, charge=charge)
-            psm = PSM(peptide, spectrum_dict, config=config)
-            
-            # Set search_engine_sequence to the original sequence
-            psm.search_engine_sequence = sequence
-            
-            # Get score using the selected score type
-            score = self.get_psm_score(pep_id, hit, self.score_type, self.higher_score_better)
-            
-            # Assign score to PSM and peptide
-            psm.psm_score = score
-            peptide.score = score
-            
-            # Store score metadata for filtering
-            psm.score_type = self.score_type
-            psm.higher_score_better = self.higher_score_better
-            all_psms.append(psm)
-
-
-        if not all_psms:
-            self.logger.error("No PSMs collected, process terminated.")
             return 1
 
         # 3. Train model with high-scoring PSMs
@@ -766,16 +755,12 @@ class PyLuciPHOr2:
         result_rows = []
         phospho_count = 0
         for pep_idx, psm in enumerate(all_psms):
-            # Get original pep_id info
-            orig_pep_id = pep_ids[pep_idx] if pep_idx < len(pep_ids) else None
-            mz = orig_pep_id.getMZ() if orig_pep_id else 0.0
-            rt = orig_pep_id.getRT() if orig_pep_id else 0.0
-            spec_ref = (str(orig_pep_id.getMetaValue("spectrum_reference"))
-                       if orig_pep_id and orig_pep_id.metaValueExists("spectrum_reference") else "")
-            scan_num = (int(orig_pep_id.getMetaValue("scan_number"))
-                       if orig_pep_id and orig_pep_id.metaValueExists("scan_number") else 0)
-            ref_file = (str(orig_pep_id.getMetaValue("reference_file_name"))
-                       if orig_pep_id and orig_pep_id.metaValueExists("reference_file_name") else "")
+            # Use metadata stashed during load_input_files
+            mz = getattr(psm, "_mz", 0.0)
+            rt = getattr(psm, "_rt", 0.0)
+            scan_num = getattr(psm, "_scan_num", 0)
+            spec_ref = getattr(psm, "_spectrum_reference", "")
+            ref_file = getattr(psm, "_reference_file_name", "")
 
             # Capture N-terminal modification (e.g. "(Acetyl)") before lucxor drops it
             _nterm = ""
@@ -800,8 +785,11 @@ class PyLuciPHOr2:
                 seq_obj = AASequence.fromString(seq_str) if seq_str else None
                 if seq_obj:
                     base_seq = seq_obj.toUnmodifiedString()
+                else:
+                    base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
             except Exception:
-                pass
+                # Fallback: strip all (...) modification annotations and uppercase
+                base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
 
             # Build psm_metavalues: preserve original + add Luciphor scores
             _lucxor_df = getattr(self, "_psms_df_template", None)
@@ -874,7 +862,7 @@ class PyLuciPHOr2:
 
         # 8. Processing completed - print run summary similar to Ascore
         elapsed = time.time() - start_time
-        total = len(pep_ids)
+        total = len(all_psms)
         processed = len(result_rows)
         errors = max(0, total - processed)
 
