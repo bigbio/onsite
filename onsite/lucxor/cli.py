@@ -244,6 +244,7 @@ def lucxor(
             threads=threads,
             debug=debug,
             add_decoys=add_decoys,
+            fragment_method=fragment_method,
         )
     
     try:
