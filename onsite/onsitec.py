@@ -85,6 +85,13 @@ cli.add_command(lucxor)
     help="Tolerance unit (default: Da)",
 )
 @click.option(
+    "--fragment-method",
+    "fragment_method",
+    type=click.Choice(["CID", "HCD"], case_sensitive=False),
+    default="CID",
+    help="Fragmentation method for LucXor (default: CID)",
+)
+@click.option(
     "--threads",
     "threads",
     type=int,
@@ -107,6 +114,7 @@ def all(
     out_file,
     fragment_mass_tolerance,
     fragment_mass_unit,
+    fragment_method,
     threads,
     debug,
     add_decoys,
@@ -167,7 +175,7 @@ def all(
             ctx.invoke(
                 lucxor_func,
                 input_spectrum=in_file, input_id=id_file, output=lucxor_out,
-                fragment_method="CID",
+                fragment_method=fragment_method,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_error_units=fragment_mass_unit,
                 min_mz=150.0,
@@ -409,6 +417,7 @@ def run_all_algorithms_from_single_cli(
     in_file, id_file, out_file,
     fragment_mass_tolerance, fragment_mass_unit,
     threads, debug, add_decoys,
+    fragment_method="CID",
 ):
     """Run all three algorithms when --compute-all-scores is specified."""
     try:
@@ -453,7 +462,7 @@ def run_all_algorithms_from_single_cli(
             tool = PyLuciPHOr2()
             exit_code = tool.run(
                 input_spectrum=in_file, input_id=id_file, output=lucxor_out,
-                fragment_method="CID",
+                fragment_method=fragment_method,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_error_units=fragment_mass_unit,
                 min_mz=150.0, target_modifications=target_mods,
