@@ -343,7 +343,7 @@ class PyLuciPHOr2:
         self.psms = []
         self.config = {}
 
-    def get_psm_score(self, pep_id, hit, score_type: str, higher_score_better: bool) -> float:
+    def get_psm_score(self, hit, score_type: str, higher_score_better: bool) -> float:
         """
         Extract score from peptide hit based on score type.
         
@@ -437,13 +437,6 @@ class PyLuciPHOr2:
                 sval = ascore.get("score_value", "")
                 hit.setMetaValue(str(sname), float(sval))
 
-            pid = PeptideIdentification()
-            pid.setHits([hit])
-            pid.setRT(float(row["rt"]))
-            pid.setMZ(float(row["observed_mz"]))
-            pid.setMetaValue("scan_number", int(row["scan"]))
-            pid.setScoreType(str(row.get("score_type")))
-
             # Build PSM object
             sequence = seq.toString()
             if sequence.startswith("."):
@@ -463,7 +456,7 @@ class PyLuciPHOr2:
             psm = PSM(peptide, spectrum_dict, config=config)
             psm.search_engine_sequence = sequence
 
-            score = self.get_psm_score(pid, hit, self.score_type, self.higher_score_better)
+            score = self.get_psm_score(hit, self.score_type, self.higher_score_better)
             psm.psm_score = score
             peptide.score = score
             psm.score_type = self.score_type
@@ -778,7 +771,8 @@ class PyLuciPHOr2:
             if _nterm and not seq_str.startswith(_nterm):
                 seq_str = _nterm + seq_str
             base_seq = _orig_seq
-            peptidoform = pyopenms_to_unimod_notation(seq_str)
+
+            peptidoform = pyopenms_to_unimod_notation(seq_str).upper()
 
             # Use pyOpenMS to get unmodified string if possible
             try:
