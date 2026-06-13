@@ -1652,6 +1652,12 @@ class PSM:
         """
         Convert sequence from lowercase modification format to standard (Phospho) format
 
+        Handles all modification types stored in the internal lowercase representation.
+        Known modifications (Phospho, Oxidation, PhosphoDecoy) are mapped by their
+        conventional annotation strings; other non-target modifications (e.g.
+        Carbamidomethyl on C) are looked up from ``self.non_target_mods`` so that
+        no modification is silently dropped.
+
         Args:
             sequence: Sequence with lowercase letters indicating modifications
 
@@ -1681,6 +1687,16 @@ class PSM:
                 ]:
                     # Convert lowercase to uppercase and add (Oxidation)
                     result += sequence[i].upper() + "(Oxidation)"
+                elif sequence[i].islower():
+                    # Non-target modification (e.g. Carbamidomethyl on C) —
+                    # look up the modification name from self.non_target_mods.
+                    aa_upper = sequence[i].upper()
+                    mod_name = self.non_target_mods.get(i)
+                    if mod_name:
+                        result += f"{aa_upper}({mod_name})"
+                    else:
+                        # Fallback: emit the bare upper-case letter.
+                        result += aa_upper
                 else:
                     result += sequence[i]
                 i += 1
