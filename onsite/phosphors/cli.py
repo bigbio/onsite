@@ -253,11 +253,27 @@ def phosphors(
                             f"Error processing identification: {res.get('reason', 'unknown')}"
                         )
 
+        # Count how many PSMs had their modification sites reassigned
+        relocated_count = 0
+        orig_pf_map = {}
+        for _, group_df in grouped:
+            pep_idx = group_df.iloc[0].get("peptide_identification_index")
+            orig_pf = str(group_df.iloc[0].get("peptidoform", ""))
+            if orig_pf:
+                orig_pf_map[pep_idx] = orig_pf
+        for row in result_rows:
+            pep_idx = row.get("peptide_identification_index")
+            orig_pf = orig_pf_map.get(pep_idx, "")
+            out_pf = str(row.get("peptidoform", ""))
+            if orig_pf and orig_pf != out_pf:
+                relocated_count += 1
+
         # Report
         elapsed = time.time() - start_time
         click.echo(f"\nProcessing Complete:")
         click.echo(f"  Total identifications: {stats['total']}")
         click.echo(f"  Successfully processed: {stats['processed']}")
+        click.echo(f"  Modification sites reassigned: {relocated_count}")
         click.echo(f"  Phosphorylated peptides: {stats['phospho']}")
         click.echo(f"  Processing errors: {stats['errors']}")
         click.echo(f"  Time elapsed: {elapsed:.2f} seconds")

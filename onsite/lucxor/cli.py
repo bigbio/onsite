@@ -748,6 +748,7 @@ class PyLuciPHOr2:
 
         result_rows = []
         phospho_count = 0
+        relocated_count = 0
         for pep_idx, psm in enumerate(all_psms):
             # Use metadata stashed during load_input_files
             mz = getattr(psm, "_mz", 0.0)
@@ -775,17 +776,6 @@ class PyLuciPHOr2:
 
             peptidoform = pyopenms_to_unimod_notation(seq_str).upper()
 
-            # Use pyOpenMS to get unmodified string if possible
-            try:
-                seq_obj = AASequence.fromString(seq_str) if seq_str else None
-                if seq_obj:
-                    base_seq = seq_obj.toUnmodifiedString()
-                else:
-                    base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
-            except Exception:
-                # Fallback: strip all (...) modification annotations and uppercase
-                base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
-
             # Build psm_metavalues: preserve original + add Luciphor scores
             _lucxor_df = getattr(self, "_psms_df_template", None)
             if _lucxor_df is not None:
@@ -797,6 +787,24 @@ class PyLuciPHOr2:
                     _orig_list = []
             else:
                 _orig_list = []
+
+            # Track how many peptides had their modification positions changed
+            if _lucxor_df is not None and pep_idx < len(_best):
+                orig_peptidoform = str(_best.iloc[pep_idx].get("peptidoform", ""))
+                if orig_peptidoform and orig_peptidoform != peptidoform:
+                    relocated_count += 1
+
+            # Use pyOpenMS to get unmodified string if possible
+            try:
+                seq_obj = AASequence.fromString(seq_str) if seq_str else None
+                if seq_obj:
+                    base_seq = seq_obj.toUnmodifiedString()
+                else:
+                    base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
+            except Exception:
+                # Fallback: strip all (...) modification annotations and uppercase
+                base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
+
             _lucxor_managed = {"search_engine_sequence", "Luciphor_pep_score", "Luciphor_global_flr",
                                "Luciphor_local_flr", "Luciphor_site_scores"}
             _filtered_orig = [m for m in _orig_list if isinstance(m, dict) and m.get("name") not in _lucxor_managed]
@@ -864,6 +872,7 @@ class PyLuciPHOr2:
         print("\nProcessing Complete:")
         print(f"  Total identifications: {total}")
         print(f"  Successfully processed: {processed}")
+        print(f"  Modification sites reassigned: {relocated_count}")
         print(f"  Phosphorylated peptides: {phospho_count}")
         print(f"  Processing errors: {errors}")
         print(f"  Time elapsed: {elapsed:.2f} seconds")

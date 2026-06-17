@@ -408,8 +408,24 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
 
     out_df = full_df.reset_index()
 
+    # Count how many peptides had their modification sites reassigned by LucXor
+    relocated_count = 0
+    input_psms_df, _, _, _ = load_dataframes(input_idparquet)
+    input_pf_map = {}
+    for _, row in input_psms_df.iterrows():
+        pep_idx = row.get("peptide_identification_index")
+        if pep_idx is not None:
+            input_pf_map[pep_idx] = str(row.get("peptidoform", ""))
+    for _, row in out_df.iterrows():
+        pep_idx = row.get("peptide_identification_index")
+        out_pf = str(row.get("peptidoform", ""))
+        orig_pf = input_pf_map.get(pep_idx, "")
+        if orig_pf and orig_pf != out_pf:
+            relocated_count += 1
+
     save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df, source_idparquet=input_idparquet)
     click.echo(f"Successfully merged {stats['merged']} peptide identifications")
+    click.echo(f"  Modification sites reassigned: {relocated_count}")
     click.echo("Each peptide contains scores from all three algorithms")
 
 

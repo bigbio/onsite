@@ -265,7 +265,7 @@ def _save_psms_parquet(out_dir: str, psms_df: pd.DataFrame, source_idparquet: Op
         return pa.array(values, type=tbl.schema.field(name).type)
 
     updates = {}
-    for col in ("peptidoform", "sequence", "score", "score_type", "higher_score_better"):
+    for col in ("peptidoform",):
         updates[col] = _pa_col(col, psms_df[col].tolist())
 
     updates["psm_metavalues"] = _pa_col("psm_metavalues", psms_df["psm_metavalues"].tolist())
