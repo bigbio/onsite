@@ -21,8 +21,7 @@ from pyopenms import (
     MSExperiment,
     SpectrumLookup,
     AASequence, 
-    PeptideHit, 
-    PeptideIdentification
+    PeptideHit
 )
 
 from onsite.idparquet import pyopenms_to_unimod_notation, save_dataframes, load_dataframes, unimod_to_pyopenms_notation
@@ -245,6 +244,7 @@ def lucxor(
             debug=debug,
             add_decoys=add_decoys,
             fragment_method=fragment_method,
+            modeling_score_threshold=modeling_score_threshold,
         )
     
     try:
@@ -747,7 +747,21 @@ class PyLuciPHOr2:
         # 6. Build output DataFrame (using second round calculation results)
 
         result_rows = []
-        phospho_count = 0
+        relocated_count = 0
+
+        # Pre-filter hit_index == 0 rows once, outside the loop
+        _lucxor_df = getattr(self, "_psms_df_template", None)
+        _input_by_ref = {}
+        if _lucxor_df is not None:
+            _hit0 = _lucxor_df[_lucxor_df["hit_index"] == 0]
+            for _, row in _hit0.iterrows():
+                ref = str(row.get("spectrum_reference", ""))
+                if ref:
+                    _input_by_ref[ref] = {
+                        "peptidoform": str(row.get("peptidoform", "")),
+                        "psm_metavalues": row.get("psm_metavalues"),
+                    }
+
         for pep_idx, psm in enumerate(all_psms):
             # Use metadata stashed during load_input_files
             mz = getattr(psm, "_mz", 0.0)
@@ -775,6 +789,20 @@ class PyLuciPHOr2:
 
             peptidoform = pyopenms_to_unimod_notation(seq_str).upper()
 
+            # Build psm_metavalues: preserve original + add Luciphor scores
+            _in_rec = _input_by_ref.get(spec_ref)
+            if _in_rec is not None:
+                _orig_mv = _in_rec["psm_metavalues"]
+                _orig_list = list(_orig_mv) if isinstance(_orig_mv, np.ndarray) else []
+            else:
+                _orig_list = []
+
+            # Track how many peptides had their modification positions changed
+            if _in_rec is not None:
+                orig_peptidoform = _in_rec["peptidoform"]
+                if orig_peptidoform and orig_peptidoform != peptidoform:
+                    relocated_count += 1
+
             # Use pyOpenMS to get unmodified string if possible
             try:
                 seq_obj = AASequence.fromString(seq_str) if seq_str else None
@@ -786,17 +814,6 @@ class PyLuciPHOr2:
                 # Fallback: strip all (...) modification annotations and uppercase
                 base_seq = re.sub(r"\([^)]*\)", "", seq_str).upper()
 
-            # Build psm_metavalues: preserve original + add Luciphor scores
-            _lucxor_df = getattr(self, "_psms_df_template", None)
-            if _lucxor_df is not None:
-                _best = _lucxor_df[_lucxor_df["hit_index"] == 0]
-                if pep_idx < len(_best):
-                    _orig_mv = _best.iloc[pep_idx].get("psm_metavalues")
-                    _orig_list = list(_orig_mv) if isinstance(_orig_mv, np.ndarray) else []
-                else:
-                    _orig_list = []
-            else:
-                _orig_list = []
             _lucxor_managed = {"search_engine_sequence", "Luciphor_pep_score", "Luciphor_global_flr",
                                "Luciphor_local_flr", "Luciphor_site_scores"}
             _filtered_orig = [m for m in _orig_list if isinstance(m, dict) and m.get("name") not in _lucxor_managed]
@@ -844,12 +861,6 @@ class PyLuciPHOr2:
                 "run_identifier": "",
             })
 
-            try:
-                if "(Phospho)" in seq_str:
-                    phospho_count += 1
-            except Exception:
-                pass
-
         # 7. Save results (idParquet format)
         out_df = pd.DataFrame(result_rows) if result_rows else pd.DataFrame()
         save_dataframes(output, out_df, prot_ids, template_df=self._psms_df_template, source_idparquet=input_id)
@@ -864,7 +875,7 @@ class PyLuciPHOr2:
         print("\nProcessing Complete:")
         print(f"  Total identifications: {total}")
         print(f"  Successfully processed: {processed}")
-        print(f"  Phosphorylated peptides: {phospho_count}")
+        print(f"  Relocated: {relocated_count}")
         print(f"  Processing errors: {errors}")
         print(f"  Time elapsed: {elapsed:.2f} seconds")
         if elapsed > 0:
@@ -875,7 +886,7 @@ class PyLuciPHOr2:
             self.logger.info({
                 "total": total,
                 "processed": processed,
-                "phospho": phospho_count,
+                "reassigned": relocated_count,
                 "errors": errors,
                 "elapsed_sec": round(elapsed, 2),
                 "speed_ids_per_sec": round(processed/elapsed, 2) if elapsed > 0 else None

@@ -20,7 +20,7 @@ import pandas as pd
 from onsite.idparquet import load_dataframes, save_dataframes, unimod_to_pyopenms_notation
 
 @click.group()
-@click.version_option(version="0.0.3")
+@click.version_option(version="0.0.4")
 def cli():
     """
     OnSite: Mass spectrometry post-translational modification localization tool
@@ -108,6 +108,13 @@ cli.add_command(lucxor)
     default=False,
     help="Include A (PhosphoDecoy) as potential phosphorylation site for all algorithms",
 )
+@click.option(
+    "--modeling-score-threshold",
+    "modeling_score_threshold",
+    type=float,
+    default=0.95,
+    help="Score threshold for LucXor model training (default: 0.95, auto-adjusted based on score type)",
+)
 def all(
     in_file,
     id_file,
@@ -118,6 +125,7 @@ def all(
     threads,
     debug,
     add_decoys,
+    modeling_score_threshold,
 ):
     """Run all three algorithms (AScore, PhosphoRS, LucXor) and merge results."""
     try:
@@ -164,17 +172,19 @@ def all(
             click.echo(f"\n{'='*60}")
             click.echo(f"[{time.strftime('%H:%M:%S')}] Running LucXor...")
             click.echo(f"{'='*60}")
-            from onsite.lucxor.cli import lucxor as lucxor_func
+            from onsite.lucxor.cli import PyLuciPHOr2, setup_logging as lucxor_setup_logging
 
             if add_decoys:
                 target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
             else:
                 target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
 
-            ctx = click.Context(lucxor_func)
-            ctx.invoke(
-                lucxor_func,
-                input_spectrum=in_file, input_id=id_file, output=lucxor_out,
+            lucxor_setup_logging(debug, None, lucxor_out)
+            tool = PyLuciPHOr2()
+            tool.run(
+                input_spectrum=in_file,
+                input_id=id_file,
+                output=lucxor_out,
                 fragment_method=fragment_method,
                 fragment_mass_tolerance=fragment_mass_tolerance,
                 fragment_error_units=fragment_mass_unit,
@@ -184,16 +194,18 @@ def all(
                 decoy_mass=79.966331,
                 decoy_neutral_losses=("X -H3PO4 -97.97690",),
                 max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
-                modeling_score_threshold=0.95, scoring_threshold=0.0,
+                modeling_score_threshold=modeling_score_threshold, scoring_threshold=0.0,
                 min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
-                debug=debug, log_file=None, disable_split_by_charge=False,
+                debug=debug, disable_split_by_charge=False,
             )
+
+
 
             # Merge results
             click.echo(f"\n{'='*60}")
             click.echo(f"[{time.strftime('%H:%M:%S')}] Merging results...")
             click.echo(f"{'='*60}")
-            merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
+            merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file, id_file)
 
         elapsed = time.time() - start_time
         click.echo(f"\n{'='*60}")
@@ -408,8 +420,24 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
 
     out_df = full_df.reset_index()
 
+    # Count how many peptides had their modification sites reassigned by LucXor
+    relocated_count = 0
+    input_psms_df, _, _, _ = load_dataframes(input_idparquet)
+    input_pf_map = {}
+    for _, row in input_psms_df.iterrows():
+        pep_idx = row.get("peptide_identification_index")
+        if pep_idx is not None:
+            input_pf_map[pep_idx] = str(row.get("peptidoform", ""))
+    for _, row in out_df.iterrows():
+        pep_idx = row.get("peptide_identification_index")
+        out_pf = str(row.get("peptidoform", ""))
+        orig_pf = input_pf_map.get(pep_idx, "")
+        if orig_pf and orig_pf != out_pf:
+            relocated_count += 1
+
     save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df, source_idparquet=input_idparquet)
     click.echo(f"Successfully merged {stats['merged']} peptide identifications")
+    click.echo(f"  Modification sites reassigned: {relocated_count}")
     click.echo("Each peptide contains scores from all three algorithms")
 
 
@@ -418,6 +446,7 @@ def run_all_algorithms_from_single_cli(
     fragment_mass_tolerance, fragment_mass_unit,
     threads, debug, add_decoys,
     fragment_method="CID",
+    modeling_score_threshold=0.95,
 ):
     """Run all three algorithms when --compute-all-scores is specified."""
     try:
@@ -470,7 +499,7 @@ def run_all_algorithms_from_single_cli(
                 decoy_mass=79.966331,
                 decoy_neutral_losses=("X -H3PO4 -97.97690",),
                 max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
-                modeling_score_threshold=0.95, scoring_threshold=0.0,
+                modeling_score_threshold=modeling_score_threshold, scoring_threshold=0.0,
                 min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
                 debug=debug, disable_split_by_charge=False,
             )

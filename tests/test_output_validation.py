@@ -57,6 +57,7 @@ class TestOutputValidation:
                 "--input-id", idparquet_dir,
                 "--output", out,
                 "--target-modifications", "Phospho(S),Phospho(T),Phospho(Y)",
+                "--modeling-score-threshold", "0.3",
             ])
             if r.exit_code != 0:
                 pytest.skip(f"LucXor required but failed: {r.output[:200]}")
