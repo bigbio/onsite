@@ -446,6 +446,7 @@ def run_all_algorithms_from_single_cli(
     fragment_mass_tolerance, fragment_mass_unit,
     threads, debug, add_decoys,
     fragment_method="CID",
+    modeling_score_threshold=0.95,
 ):
     """Run all three algorithms when --compute-all-scores is specified."""
     try:
@@ -498,7 +499,7 @@ def run_all_algorithms_from_single_cli(
                 decoy_mass=79.966331,
                 decoy_neutral_losses=("X -H3PO4 -97.97690",),
                 max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
-                modeling_score_threshold=0.95, scoring_threshold=0.0,
+                modeling_score_threshold=modeling_score_threshold, scoring_threshold=0.0,
                 min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
                 debug=debug, disable_split_by_charge=False,
             )

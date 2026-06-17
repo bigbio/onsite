@@ -220,7 +220,7 @@ def ascore(
                 relocated_count += 1
 
         elapsed = time.time() - start_time
-        click.echo(f"\nProcessing Complete:")
+        click.echo("\nProcessing Complete:")
         click.echo(f"  Total identifications: {stats['total']}")
         click.echo(f"  Successfully processed: {stats['processed']}")
         click.echo(f"  Modification sites reassigned: {relocated_count}")
