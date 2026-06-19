@@ -203,7 +203,7 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
     try:
         import scipy.stats
 
-        prob = 1.0 - scipy.stats.binom.cdf(k - 1, n, p)
+        prob = scipy.stats.binom.sf(k - 1, n, p)
         # Clamp to [0,1] without enforcing a positive floor
         result = min(1.0, max(0.0, prob))
         # Cache the result for future use
