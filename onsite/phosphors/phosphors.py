@@ -1204,12 +1204,12 @@ def calculate_phospho_localization_compomics_style(
             big_p = binomial_tail_probability(
                 k_matches, n_expected if n_expected > 0 else 1, p_calc
             )
-            p_inv = 1.0 / big_p if big_p > 0 else 0.0
+            log_p_inv = -math.log(max(float(big_p), 1e-323))
 
             isomer_scores.append(
                 {
                     "isomer_seq": seq_profile,
-                    "p_inv": p_inv,
+                    "log_p_inv": log_p_inv,
                     "big_p": big_p,
                     "sites": set(site_indices_set),
                 }
@@ -1220,12 +1220,15 @@ def calculate_phospho_localization_compomics_style(
             print("Warning: No isomers were generated or scored.")
             return None, None
 
-        total_p_inv = sum(item["p_inv"] for item in isomer_scores)
-        if total_p_inv <= 0.0:
-            print("Warning: Total inverse probability is zero. Aborting.")
-            return None, None
+        max_log_p = max(item["log_p_inv"] for item in isomer_scores)
+
+        sum_exp = sum(
+            math.exp(item["log_p_inv"] - max_log_p) for item in isomer_scores
+        )
+        log_total_p_inv = max_log_p + math.log(sum_exp)
+
         for item in isomer_scores:
-            item["probability"] = item["p_inv"] / total_p_inv
+            item["probability"] = math.exp(item["log_p_inv"] - log_total_p_inv)
 
         # Calculate site probabilities
         site_probabilities = {}
