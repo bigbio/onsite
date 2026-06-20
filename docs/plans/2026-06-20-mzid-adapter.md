@@ -1,283 +1,156 @@
-# mzIdentML Adapter Implementation Plan
+# Format-agnostic idXML/mzIdentML I/O — Implementation Plan (revised)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Add an `onsite mzid` command that computes AScore + PhosphoRS + LucXor scores for an mzIdentML+mzML pair and writes a scored mzIdentML, with a flag- and data-gated Alanine-decoy mode.
+**Goal:** Make `onsite all` (and each command) read/write idXML or mzIdentML by extension, computing AScore+PhosphoRS+LucXor and writing a scored mzid, with a flag- and data-gated Alanine-decoy mode.
 
-**Architecture:** Convert-and-wrap. A thin adapter converts mzIdentML→idXML (pyOpenMS), runs the existing `onsite all` orchestration (refactored into a reusable `run_all_localizers` function), then converts the merged idXML→mzIdentML. Scores attached as `PeptideHit` MetaValues serialize to mzid `userParam`s automatically.
+**Architecture:** Format-agnostic `load_identifications` / `store_identifications` helpers (extension dispatch) wired into the three CLIs and `run_all_localizers`. No temp-file round-trip; no separate `mzid` command.
 
-**Tech Stack:** Python 3.11, pyOpenMS 3.5.0 (`MzIdentMLFile`, `IdXMLFile`, `MSExperiment`/`FileHandler`), click, pytest.
+**Tech Stack:** Python 3.11, pyOpenMS 3.5.0 (`MzIdentMLFile`, `IdXMLFile`, `PeptideIdentificationList`), click, pytest.
 
 ## Global Constraints
 
-- No new scoring logic — reuse `onsite all` / `run_all_localizers` verbatim.
-- Output mzid is pyOpenMS-regenerated (carries IDs + score userParams; not byte-preserving).
-- One decoy mode per output file: default = no-decoy pack; `--add-decoys` + Ala-present = decoy pack; `--add-decoys` + no Ala = warn and fall back to no-decoy pack (never fail for this reason).
-- Score MetaValue names already produced by the pipeline: `AScore_site_scores`, `PhosphoRS_site_probs`, `PhosphoRS_site_delta`, `Luciphor_site_scores`.
-- Follow existing CLI option conventions (`-in/--in-file`, `-id/--id-file`, `-out/--out-file`, `--fragment-mass-tolerance` default 0.05, `--fragment-mass-unit [Da|ppm]` default Da, `--threads` default 1, `--add-decoys`).
-- Tests that need `data/1.mzML` must `pytest.skip` when it is absent (it is gitignored), mirroring `tests/test_algorithm_comparison.py`.
+- No new scoring logic — reuse `run_all_localizers` / the three CLIs.
+- Score MetaValue names: `AScore_site_scores`, `PhosphoRS_site_probs`, `PhosphoRS_site_delta`, `Luciphor_site_scores`.
+- pyOpenMS container facts (verified): `pep` must be a `PeptideIdentificationList` built via `push_back` (no `append`, no list constructor); `prot` is a plain Python list. `MzIdentMLFile`/`IdXMLFile` `load` and `store` both require these types.
+- mzid store quirk (verified): `MzIdentMLFile().store()` raises `Invalid CV identifier!` if any `ProteinIdentification`'s `SearchParameters.variable_modifications` contains a non-UNIMOD custom modification (`PhosphoDecoy (A)` → `UNIMOD:99913`). Strip `PhosphoDecoy` entries from `variable_modifications` before an mzid store. The `PhosphoDecoy` modification ON the hits serializes fine and round-trips intact.
+- Decoy gate: default no-decoy; `--add-decoys` + Ala-present = decoy pack; `--add-decoys` + no Ala = warn and fall back (never fail).
+- Tests needing `data/1.mzML` must `pytest.skip` when absent.
 
-## File Structure
+## Status
 
-- Modify `onsite/onsitec.py` — extract `run_all_localizers(...)` from the `all` command body; register the new `mzid` command.
-- Create `onsite/mzid_adapter.py` — format-bridge helpers + `run(...)` orchestration.
-- Create `onsite/mzid/__init__.py` + `onsite/mzid/cli.py`? **No** — keep it a single module + a command in `onsitec.py` (YAGNI; mirrors how `all` lives in `onsitec.py`).
-- Modify `pyproject.toml` — add `onsite-mzid` console script.
-- Create `tests/test_mzid_adapter.py` — unit + end-to-end tests.
+- **Task 1 (DONE):** `run_all_localizers(...)` extracted from `all`; merge copies all four score keys. Commits `278289d..1e5201a`.
+- **Task 2 (SUPERSEDED):** the committed `mzid_to_idxml`/`idxml_to_mzid` conversion helpers (commit `ae57e89`) are replaced by Task 2R below.
 
 ---
 
-### Task 1: Extract `run_all_localizers` from the `all` command
+### Task 2R: Format-agnostic load/store helpers (replace conversion helpers)
 
 **Files:**
-- Modify: `onsite/onsitec.py:102-237` (the `all` command body)
-- Test: `tests/test_mzid_adapter.py`
+- Modify: `onsite/mzid_adapter.py` (remove `mzid_to_idxml`, `idxml_to_mzid`, `LoadInfo`; add the helpers below)
+- Modify: `tests/test_mzid_adapter.py` (remove the two conversion-roundtrip tests; add the tests below; keep `_has_score` and `_make_small_mzid` helpers — `_make_small_mzid` already strips PhosphoDecoy before its mzid store)
 
-**Interfaces:**
-- Produces: `run_all_localizers(in_file: str, id_file: str, out_file: str, fragment_mass_tolerance: float = 0.05, fragment_mass_unit: str = "Da", threads: int = 1, add_decoys: bool = False, debug: bool = False) -> None` — runs the three localizers into a tempdir and merges into `out_file` (an idXML). Same behavior as today's `all`.
+**Interfaces produced (later tasks depend on these):**
+- `is_mzid(path: str) -> bool`
+- `load_identifications(path: str) -> tuple[list, "PeptideIdentificationList"]`
+- `store_identifications(path: str, prot: list, pep) -> None`
+- `has_alanine(pep) -> bool`
 
-- [ ] **Step 1: Write the failing test**
-
-```python
-# tests/test_mzid_adapter.py
-import os
-import pytest
-from pathlib import Path
-
-DATA = Path(__file__).parent.parent / "data"
-MZML = DATA / "1.mzML"
-IDXML = DATA / "1_consensus_fdr_filter_pep.idXML"
-
-
-def _has_score(pep_ids, meta):
-    from pyopenms import IdXMLFile  # noqa
-    for pid in pep_ids:
-        for hit in pid.getHits():
-            if hit.metaValueExists(meta):
-                return True
-    return False
-
-
-@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
-def test_run_all_localizers_writes_three_scores(tmp_path):
-    from onsite.onsitec import run_all_localizers
-    from pyopenms import IdXMLFile
-
-    out = str(tmp_path / "merged.idXML")
-    run_all_localizers(str(MZML), str(IDXML), out, threads=1)
-
-    prot, pep = [], []
-    IdXMLFile().load(out, prot, pep)
-    assert _has_score(pep, "AScore_site_scores")
-    assert _has_score(pep, "PhosphoRS_site_probs")
-    assert _has_score(pep, "Luciphor_site_scores")
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `python -m pytest tests/test_mzid_adapter.py::test_run_all_localizers_writes_three_scores -v`
-Expected: FAIL with `ImportError: cannot import name 'run_all_localizers'` (or SKIP if `data/1.mzML` absent — if skipped, extract it first: `cd data && cat 1.z01 1.z02 1.z03 1.zip > /tmp/c.zip && unzip -o /tmp/c.zip && rm /tmp/c.zip`).
-
-- [ ] **Step 3: Extract the function**
-
-In `onsite/onsitec.py`, add this function above the `all` command, moving the tempdir/invoke/merge body verbatim out of `all` (keep all `ctx.invoke(...)` argument blocks exactly as they are today, including the LucXor parameter list and the `add_decoys`→`target_mods` branch):
+- [ ] **Step 1: Write failing tests**
 
 ```python
-def run_all_localizers(
-    in_file,
-    id_file,
-    out_file,
-    fragment_mass_tolerance=0.05,
-    fragment_mass_unit="Da",
-    threads=1,
-    add_decoys=False,
-    debug=False,
-):
-    """Run AScore + PhosphoRS + LucXor into a tempdir and merge into out_file (idXML).
-
-    Extracted from the `all` command so other entry points (e.g. the mzid
-    adapter) can reuse the exact same orchestration. Behavior is unchanged.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
-        phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
-        lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
-
-        from onsite.ascore.cli import ascore as ascore_func
-        ctx = click.Context(ascore_func)
-        ctx.invoke(
-            ascore_func,
-            in_file=in_file, id_file=id_file, out_file=ascore_out,
-            fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_mass_unit=fragment_mass_unit,
-            threads=threads, debug=debug, add_decoys=add_decoys,
-        )
-
-        from onsite.phosphors.cli import phosphors as phosphors_func
-        ctx = click.Context(phosphors_func)
-        ctx.invoke(
-            phosphors_func,
-            in_file=in_file, id_file=id_file, out_file=phosphors_out,
-            fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_mass_unit=fragment_mass_unit,
-            threads=threads, debug=debug, add_decoys=add_decoys,
-        )
-
-        from onsite.lucxor.cli import lucxor as lucxor_func
-        if add_decoys:
-            target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
-        else:
-            target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
-        ctx = click.Context(lucxor_func)
-        ctx.invoke(
-            lucxor_func,
-            input_spectrum=in_file, input_id=id_file, output=lucxor_out,
-            fragment_method="CID",
-            fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_error_units=fragment_mass_unit,
-            min_mz=150.0, target_modifications=target_mods,
-            neutral_losses=("sty -H3PO4 -97.97690",),
-            decoy_mass=79.966331,
-            decoy_neutral_losses=("X -H3PO4 -97.97690",),
-            max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
-            modeling_score_threshold=0.95, scoring_threshold=0.0,
-            min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
-            debug=debug, log_file=None, disable_split_by_charge=False,
-        )
-
-        merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
-```
-
-Then replace the body of the `all` command (between the `click.echo` banner and the `elapsed = ...` line) with a single call:
-
-```python
-        run_all_localizers(
-            in_file, id_file, out_file,
-            fragment_mass_tolerance, fragment_mass_unit, threads, add_decoys, debug,
-        )
-```
-
-Keep the `try/except`, banners, and timing in `all` as-is.
-
-- [ ] **Step 4: Run test + existing suite to verify pass and no regression**
-
-Run: `python -m pytest tests/test_mzid_adapter.py::test_run_all_localizers_writes_three_scores tests/test_cli.py -v`
-Expected: the new test PASSES (or SKIPs if no mzML); `test_cli.py` still PASSES.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add onsite/onsitec.py tests/test_mzid_adapter.py
-git commit -m "refactor(onsitec): extract run_all_localizers from all command"
-```
-
----
-
-### Task 2: mzid↔idXML conversion helpers
-
-**Files:**
-- Create: `onsite/mzid_adapter.py`
-- Test: `tests/test_mzid_adapter.py`
-
-**Interfaces:**
-- Produces:
-  - `mzid_to_idxml(mzid_path: str, idxml_path: str) -> "LoadInfo"` — loads mzid, stores idXML, returns `LoadInfo(n_psms: int, has_ala: bool)`.
-  - `idxml_to_mzid(idxml_path: str, mzid_path: str) -> None` — loads idXML, stores mzid.
-  - `LoadInfo` dataclass with fields `n_psms: int`, `has_ala: bool`.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-# add to tests/test_mzid_adapter.py
-def _make_small_mzid(tmp_path, n=5):
-    """Build a small mzid fixture by trimming the committed idXML and round-tripping."""
-    from pyopenms import IdXMLFile, MzIdentMLFile
-    prot, pep = [], []
-    IdXMLFile().load(str(IDXML), prot, pep)
-    small = pep[:n]
-    small_idxml = str(tmp_path / "small.idXML")
-    IdXMLFile().store(small_idxml, prot, small)
-    mzid = str(tmp_path / "small.mzid")
-    MzIdentMLFile().store(mzid, prot, small)
-    return small_idxml, mzid, len(small)
+# tests/test_mzid_adapter.py  (add; remove old roundtrip tests)
+def test_load_store_roundtrip_idxml(tmp_path):
+    from onsite.mzid_adapter import load_identifications, store_identifications
+    prot, pep = load_identifications(str(IDXML))
+    n = sum(len(p.getHits()) for p in pep)
+    out = str(tmp_path / "rt.idXML")
+    store_identifications(out, prot, pep)
+    prot2, pep2 = load_identifications(out)
+    assert sum(len(p.getHits()) for p in pep2) == n
 
 
-def test_mzid_to_idxml_roundtrip_preserves_psms(tmp_path):
-    from onsite.mzid_adapter import mzid_to_idxml
-    from pyopenms import IdXMLFile
-    _, mzid, n = _make_small_mzid(tmp_path)
-    out_idxml = str(tmp_path / "back.idXML")
-    info = mzid_to_idxml(mzid, out_idxml)
-    assert info.n_psms == n
-    prot, pep = [], []
-    IdXMLFile().load(out_idxml, prot, pep)
-    assert len(pep) == n
+def test_store_mzid_with_phosphodecoy_roundtrips(tmp_path):
+    from onsite.mzid_adapter import store_identifications, load_identifications
+    from pyopenms import (AASequence, PeptideHit, PeptideIdentification,
+                          ProteinIdentification, PeptideIdentificationList)
+    hit = PeptideHit(); hit.setSequence(AASequence.fromString("AS(Phospho)A(PhosphoDecoy)K"))
+    hit.setScore(1.0); hit.setCharge(2); hit.setMetaValue("AScore_site_scores", "{1: 50.0}")
+    pid = PeptideIdentification(); pid.setHits([hit]); pid.setScoreType("AScore")
+    pid.setMetaValue("spectrum_reference", "scan=1")
+    prot = ProteinIdentification(); sp = prot.getSearchParameters()
+    sp.variable_modifications = [b"Phospho (S)", b"PhosphoDecoy (A)"]; prot.setSearchParameters(sp)
+    pep = PeptideIdentificationList(); pep.push_back(pid)
+    out = str(tmp_path / "decoy.mzid")
+    store_identifications(out, [prot], pep)  # must not raise
+    prot2, pep2 = load_identifications(out)
+    h = pep2.at(0).getHits()[0]
+    assert "PhosphoDecoy" in h.getSequence().toString()
+    assert h.getMetaValue("AScore_site_scores") == "{1: 50.0}"
 
 
-def test_idxml_to_mzid_creates_file(tmp_path):
-    from onsite.mzid_adapter import idxml_to_mzid
-    small_idxml, _, _ = _make_small_mzid(tmp_path)
-    out_mzid = str(tmp_path / "out.mzid")
-    idxml_to_mzid(small_idxml, out_mzid)
-    assert os.path.exists(out_mzid) and os.path.getsize(out_mzid) > 0
+def test_has_alanine(tmp_path):
+    from onsite.mzid_adapter import has_alanine
+    from pyopenms import AASequence, PeptideHit, PeptideIdentification, PeptideIdentificationList
+    def mk(seq):
+        hit = PeptideHit(); hit.setSequence(AASequence.fromString(seq))
+        pid = PeptideIdentification(); pid.setHits([hit])
+        pep = PeptideIdentificationList(); pep.push_back(pid); return pep
+    assert has_alanine(mk("AS(Phospho)K")) is True
+    assert has_alanine(mk("S(Phospho)PEK")) is False
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `python -m pytest tests/test_mzid_adapter.py -k "roundtrip or creates_file" -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'onsite.mzid_adapter'`.
+Run: `python -m pytest tests/test_mzid_adapter.py -k "roundtrip_idxml or phosphodecoy or has_alanine" -v`
+Expected: FAIL (`ImportError` for the new names).
 
-- [ ] **Step 3: Implement the helpers**
+- [ ] **Step 3: Implement** (replace the conversion helpers in `onsite/mzid_adapter.py`)
 
 ```python
-# onsite/mzid_adapter.py
-"""Adapter bridging mzIdentML to the idXML-based onsite localizer pipeline."""
-from dataclasses import dataclass
-from pyopenms import IdXMLFile, MzIdentMLFile
+"""Format-agnostic identification I/O for the onsite localizer pipeline."""
+import os
+from pyopenms import IdXMLFile, MzIdentMLFile, PeptideIdentificationList
 
-TARGET_RESIDUES = set("STY")
-
-
-@dataclass
-class LoadInfo:
-    n_psms: int
-    has_ala: bool
+_MZID_EXTS = (".mzid", ".mzidentml")
 
 
-def _has_alanine(pep_ids) -> bool:
-    """True if any peptide hit's unmodified sequence contains an 'A' residue
-    (the practical precondition for Ala-decoy scoring to do anything)."""
-    for pid in pep_ids:
+def is_mzid(path: str) -> bool:
+    p = path.lower()
+    return p.endswith(_MZID_EXTS)
+
+
+def load_identifications(path: str):
+    """Load idXML or mzIdentML by extension. Returns (prot_list, PeptideIdentificationList)."""
+    prot = []
+    pep = PeptideIdentificationList()
+    if is_mzid(path):
+        MzIdentMLFile().load(path, prot, pep)
+    else:
+        IdXMLFile().load(path, prot, pep)
+    return prot, pep
+
+
+def _strip_custom_variable_mods(prot):
+    """Remove non-UNIMOD custom modifications (PhosphoDecoy) from each protein's
+    SearchParameters.variable_modifications so MzIdentMLFile().store() does not
+    reject them ('Invalid CV identifier!'). The modification on the hits is kept."""
+    for p in prot:
+        sp = p.getSearchParameters()
+        kept = [m for m in sp.variable_modifications
+                if b"PhosphoDecoy" not in (m if isinstance(m, bytes) else m.encode())]
+        sp.variable_modifications = kept
+        p.setSearchParameters(sp)
+
+
+def store_identifications(path: str, prot, pep) -> None:
+    """Store idXML or mzIdentML by extension. For mzid, strip custom variable mods first."""
+    if is_mzid(path):
+        _strip_custom_variable_mods(prot)
+        MzIdentMLFile().store(path, prot, pep)
+    else:
+        IdXMLFile().store(path, prot, pep)
+
+
+def has_alanine(pep) -> bool:
+    """True if any peptide hit's unmodified sequence contains an 'A' residue."""
+    for pid in pep:
         for hit in pid.getHits():
             if "A" in hit.getSequence().toUnmodifiedString():
                 return True
     return False
-
-
-def mzid_to_idxml(mzid_path: str, idxml_path: str) -> LoadInfo:
-    prot, pep = [], []
-    MzIdentMLFile().load(mzid_path, prot, pep)
-    IdXMLFile().store(idxml_path, prot, pep)
-    n = sum(len(pid.getHits()) for pid in pep)
-    return LoadInfo(n_psms=n, has_ala=_has_alanine(pep))
-
-
-def idxml_to_mzid(idxml_path: str, mzid_path: str) -> None:
-    prot, pep = [], []
-    IdXMLFile().load(idxml_path, prot, pep)
-    MzIdentMLFile().store(mzid_path, prot, pep)
 ```
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python -m pytest tests/test_mzid_adapter.py -k "roundtrip or creates_file" -v`
-Expected: PASS (2 passed).
+Run: `python -m pytest tests/test_mzid_adapter.py -v`
+Expected: all PASS (new tests pass; old conversion tests removed).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add onsite/mzid_adapter.py tests/test_mzid_adapter.py
-git commit -m "feat(mzid): mzid<->idXML conversion helpers with Ala detection"
+git commit -m "feat(mzid): format-agnostic load/store helpers (replace conversion helpers)"
 ```
 
 ---
@@ -288,39 +161,36 @@ git commit -m "feat(mzid): mzid<->idXML conversion helpers with Ala detection"
 - Modify: `onsite/mzid_adapter.py`
 - Test: `tests/test_mzid_adapter.py`
 
-**Interfaces:**
-- Consumes: pyOpenMS `MSExperiment`, `FileHandler`.
-- Produces: `validate_spectrum_refs(idxml_path: str, mzml_path: str, min_match_fraction: float = 0.5) -> "ValidationResult"` where `ValidationResult` has `n_total: int`, `n_resolved: int`, `ok: bool`. Raises `SpectrumRefError(message)` when `n_total > 0` and the resolved fraction `< min_match_fraction`.
+**Interfaces produced:**
+- `SpectrumRefError(RuntimeError)`
+- `validate_spectrum_refs(pep, mzml_path: str, min_match_fraction: float = 0.5) -> "ValidationResult"` with `ValidationResult(n_total, n_resolved, ok)`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write failing test**
 
 ```python
-# add to tests/test_mzid_adapter.py
 def test_validate_spectrum_refs_raises_on_mismatch(tmp_path):
-    from onsite.mzid_adapter import validate_spectrum_refs, SpectrumRefError
-    from pyopenms import IdXMLFile, MSExperiment, MSSpectrum, FileHandler
-    # idXML with one PSM whose spectrum_reference cannot exist in an empty mzML
-    prot, pep = [], []
-    IdXMLFile().load(str(IDXML), prot, pep)
-    one = pep[:1]
-    one[0].setMetaValue("spectrum_reference", "scan=does-not-exist-999999")
-    bad_idxml = str(tmp_path / "bad.idXML")
-    IdXMLFile().store(bad_idxml, prot, one)
+    from onsite.mzid_adapter import validate_spectrum_refs, SpectrumRefError, load_identifications
+    from pyopenms import MSExperiment, FileHandler
+    prot, pep = load_identifications(str(IDXML))
+    # keep one PSM, point it at a non-existent spectrum
+    one = pep.at(0); one.setMetaValue("spectrum_reference", "scan=does-not-exist-999999")
+    from pyopenms import PeptideIdentificationList
+    pep1 = PeptideIdentificationList(); pep1.push_back(one)
     empty_mzml = str(tmp_path / "empty.mzML")
     FileHandler().storeExperiment(empty_mzml, MSExperiment())
     with pytest.raises(SpectrumRefError):
-        validate_spectrum_refs(bad_idxml, empty_mzml)
+        validate_spectrum_refs(pep1, empty_mzml)
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
 Run: `python -m pytest tests/test_mzid_adapter.py::test_validate_spectrum_refs_raises_on_mismatch -v`
-Expected: FAIL with `ImportError: cannot import name 'validate_spectrum_refs'`.
+Expected: FAIL (`ImportError`).
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement** (append to `onsite/mzid_adapter.py`)
 
 ```python
-# append to onsite/mzid_adapter.py
+from dataclasses import dataclass
 from pyopenms import MSExperiment, FileHandler
 
 
@@ -335,31 +205,22 @@ class ValidationResult:
     ok: bool
 
 
-def validate_spectrum_refs(idxml_path: str, mzml_path: str,
-                           min_match_fraction: float = 0.5) -> ValidationResult:
+def validate_spectrum_refs(pep, mzml_path: str, min_match_fraction: float = 0.5) -> ValidationResult:
     """Confirm PSM spectrum_reference values resolve to mzML spectrum native IDs.
-
-    Raises SpectrumRefError when references exist but mostly fail to resolve
-    (e.g. the mzid references spectra by a scheme that does not match the mzML),
-    so the adapter never silently scores zero PSMs.
-    """
+    Raise SpectrumRefError when references exist but mostly fail to resolve."""
     exp = MSExperiment()
     FileHandler().loadExperiment(mzml_path, exp)
     native_ids = {s.getNativeID() for s in exp.getSpectra()}
-
-    prot, pep = [], []
-    IdXMLFile().load(idxml_path, prot, pep)
     refs = [pid.getMetaValue("spectrum_reference")
             for pid in pep if pid.metaValueExists("spectrum_reference")]
     n_total = len(refs)
     n_resolved = sum(1 for r in refs if r in native_ids)
-
     ok = (n_total == 0) or (n_resolved / n_total >= min_match_fraction)
     if n_total > 0 and not ok:
         raise SpectrumRefError(
-            f"Only {n_resolved}/{n_total} mzIdentML spectrum references resolve to "
-            f"spectra in {mzml_path}. The mzIdentML likely references spectra by a "
-            f"scheme that does not match the mzML native IDs. Aborting to avoid "
+            f"Only {n_resolved}/{n_total} identification spectrum references resolve to "
+            f"spectra in {mzml_path}. The identification file likely references spectra "
+            f"by a scheme that does not match the mzML native IDs. Aborting to avoid "
             f"scoring zero PSMs."
         )
     return ValidationResult(n_total=n_total, n_resolved=n_resolved, ok=ok)
@@ -379,224 +240,185 @@ git commit -m "feat(mzid): spectrum-reference validation against mzML native IDs
 
 ---
 
-### Task 4: `run(...)` orchestration with decoy guard
+### Task 4: Wire format-agnostic I/O into the three CLIs
 
 **Files:**
-- Modify: `onsite/mzid_adapter.py`
+- Modify: `onsite/ascore/cli.py`, `onsite/phosphors/cli.py`, `onsite/lucxor/cli.py`
 - Test: `tests/test_mzid_adapter.py`
 
-**Interfaces:**
-- Consumes: `mzid_to_idxml`, `idxml_to_mzid`, `validate_spectrum_refs` (Tasks 2-3); `run_all_localizers` (Task 1).
-- Produces: `run(mzml_path, mzid_in, mzid_out, fragment_mass_tolerance=0.05, fragment_mass_unit="Da", threads=1, add_decoys=False, keep_intermediates=False, logger=None) -> dict` returning `{"n_psms": int, "decoy_mode": bool, "out": str}`.
+**Interfaces consumed:** `load_identifications`, `store_identifications` (Task 2R).
 
-- [ ] **Step 1: Write the failing test**
+**Approach:** In each CLI, find where the identification input file is loaded
+(currently `IdXMLFile().load(id_file, prot, pep)` or equivalent) and replace with
+`prot, pep = load_identifications(id_file)`; find where the output is written
+(currently `IdXMLFile().store(out, prot, pep)`) and replace with
+`store_identifications(out, prot, pep)`. Import from `onsite.mzid_adapter`. Do not
+change scoring, option definitions, or control flow — only the load/store calls.
+The `--id-file`/`--out-file` (and lucxor's `--input-id`/`--output`) `click.Path`
+types already accept any path; no option changes needed.
+
+- [ ] **Step 1: Write failing test** (each CLI accepts mzid input and writes mzid output)
 
 ```python
-# add to tests/test_mzid_adapter.py
 @pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
-def test_run_end_to_end_attaches_three_scores(tmp_path):
-    from onsite.mzid_adapter import run
-    from pyopenms import MzIdentMLFile
-    _, mzid, _ = _make_small_mzid(tmp_path, n=5)
-    out_mzid = str(tmp_path / "scored.mzid")
-    result = run(str(MZML), mzid, out_mzid, threads=1)
-    assert result["decoy_mode"] is False
-    prot, pep = [], []
-    MzIdentMLFile().load(out_mzid, prot, pep)
-    assert _has_score(pep, "AScore_site_scores")
-    assert _has_score(pep, "PhosphoRS_site_probs")
-    assert _has_score(pep, "Luciphor_site_scores")
-
-
-@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
-def test_run_add_decoys_falls_back_when_no_ala(tmp_path, monkeypatch):
-    from onsite import mzid_adapter
-    from onsite.mzid_adapter import run, LoadInfo
-    # Force has_ala False to exercise the fallback branch deterministically.
-    real = mzid_adapter.mzid_to_idxml
-    def fake(mzid_path, idxml_path):
-        info = real(mzid_path, idxml_path)
-        return LoadInfo(n_psms=info.n_psms, has_ala=False)
-    monkeypatch.setattr(mzid_adapter, "mzid_to_idxml", fake)
-    _, mzid, _ = _make_small_mzid(tmp_path, n=3)
-    out_mzid = str(tmp_path / "scored.mzid")
-    result = run(str(MZML), mzid, out_mzid, add_decoys=True, threads=1)
-    assert result["decoy_mode"] is False  # fell back
+def test_ascore_accepts_mzid_in_and_out(tmp_path):
+    from onsite.mzid_adapter import load_identifications, store_identifications
+    from pyopenms import PeptideIdentificationList
+    from click.testing import CliRunner
+    from onsite.ascore.cli import ascore
+    # build a small mzid input from a few PSMs of the committed idXML
+    prot, pep = load_identifications(str(IDXML))
+    small = PeptideIdentificationList()
+    for i in range(min(5, pep.size())):
+        small.push_back(pep.at(i))
+    in_mzid = str(tmp_path / "in.mzid"); store_identifications(in_mzid, prot, small)
+    out_mzid = str(tmp_path / "out.mzid")
+    res = CliRunner().invoke(ascore, ["-in", str(MZML), "-id", in_mzid,
+                                      "-out", out_mzid, "--threads", "1"],
+                             catch_exceptions=False)
+    assert res.exit_code == 0
+    assert os.path.exists(out_mzid)
+    _, outpep = load_identifications(out_mzid)
+    assert _has_score(outpep, "AScore_site_scores")
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `python -m pytest tests/test_mzid_adapter.py -k "end_to_end or falls_back" -v`
-Expected: FAIL with `ImportError: cannot import name 'run'` (or SKIP without mzML).
+Run: `python -m pytest tests/test_mzid_adapter.py::test_ascore_accepts_mzid_in_and_out -v`
+Expected: FAIL (ascore still hardcodes IdXMLFile → either errors on the mzid input or writes idXML content to the .mzid path so the mzid re-load fails) — or SKIP without mzML.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement** — in each of the three CLIs:
+
+For `onsite/ascore/cli.py` and `onsite/phosphors/cli.py`: locate `load_identifications`-equivalent (search for `IdXMLFile().load(` and `IdXMLFile().store(`) and replace:
 
 ```python
-# append to onsite/mzid_adapter.py
-import logging
-import os
-import tempfile
-
-
-def run(mzml_path, mzid_in, mzid_out,
-        fragment_mass_tolerance=0.05, fragment_mass_unit="Da",
-        threads=1, add_decoys=False, keep_intermediates=False, logger=None):
-    """Score an mzIdentML+mzML pair with all three localizers; write scored mzid.
-
-    Decoy mode runs only when add_decoys is set AND the input contains Alanine
-    candidates; otherwise it falls back to the no-decoy pack with a warning.
-    """
-    from onsite.onsitec import run_all_localizers
-    log = logger or logging.getLogger("onsite.mzid")
-
-    tmpdir = tempfile.mkdtemp(prefix="onsite_mzid_")
-    try:
-        tmp_in = os.path.join(tmpdir, "input.idXML")
-        merged = os.path.join(tmpdir, "merged.idXML")
-
-        info = mzid_to_idxml(mzid_in, tmp_in)
-        validate_spectrum_refs(tmp_in, mzml_path)
-
-        decoy_mode = bool(add_decoys and info.has_ala)
-        if add_decoys and not info.has_ala:
-            log.warning(
-                "--add-decoys was set but no Alanine candidate was found in the "
-                "input; computing the no-decoy score pack instead."
-            )
-
-        run_all_localizers(
-            mzml_path, tmp_in, merged,
-            fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_mass_unit=fragment_mass_unit,
-            threads=threads, add_decoys=decoy_mode,
-        )
-
-        idxml_to_mzid(merged, mzid_out)
-        return {"n_psms": info.n_psms, "decoy_mode": decoy_mode, "out": mzid_out}
-    finally:
-        if keep_intermediates:
-            log.info("Intermediates kept in %s", tmpdir)
-        else:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
+from onsite.mzid_adapter import load_identifications, store_identifications
+# input load:
+prot_ids, peptide_ids = load_identifications(id_file)
+# output store:
+store_identifications(out_file, processed_protein_ids, processed_peptide_ids)
 ```
 
-- [ ] **Step 4: Run to verify pass**
+(Use the existing local variable names in each file; the example names above are illustrative — match what the file already uses for the protein/peptide containers and the output path.)
 
-Run: `python -m pytest tests/test_mzid_adapter.py -k "end_to_end or falls_back" -v`
-Expected: PASS (or SKIP without mzML).
+For `onsite/lucxor/cli.py`: the input option is `input_id` and output is `output`; replace its `IdXMLFile().load(input_id, …)` and `IdXMLFile().store(output, …)` calls the same way.
+
+- [ ] **Step 4: Run to verify pass + no regression**
+
+Run: `python -m pytest tests/test_mzid_adapter.py::test_ascore_accepts_mzid_in_and_out tests/test_ascore.py tests/test_phosphors.py tests/test_lucxor.py -v`
+Expected: new test PASSES (or SKIPs without mzML); per-algorithm suites still PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add onsite/mzid_adapter.py tests/test_mzid_adapter.py
-git commit -m "feat(mzid): run() orchestration with data-gated decoy fallback"
+git add onsite/ascore/cli.py onsite/phosphors/cli.py onsite/lucxor/cli.py tests/test_mzid_adapter.py
+git commit -m "feat(mzid): wire format-agnostic load/store into the three CLIs"
 ```
 
 ---
 
-### Task 5: `onsite mzid` CLI command + console script
+### Task 5: `run_all_localizers` — decoy guard, spectrum validation, format-agnostic output
 
 **Files:**
-- Modify: `onsite/onsitec.py` (register command)
-- Modify: `pyproject.toml` (console script)
+- Modify: `onsite/onsitec.py` (`run_all_localizers`, `merge_algorithm_results`)
 - Test: `tests/test_mzid_adapter.py`
 
-**Interfaces:**
-- Consumes: `onsite.mzid_adapter.run` (Task 4).
-- Produces: click command `mzid` registered on the `cli` group; `onsite-mzid` console entry → `onsite.onsitec:main` (the group already dispatches subcommands).
+**Interfaces consumed:** `load_identifications`, `store_identifications`, `has_alanine`, `validate_spectrum_refs` (Tasks 2R-3).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write failing test**
 
 ```python
-# add to tests/test_mzid_adapter.py
-def test_cli_mzid_help():
-    from click.testing import CliRunner
-    from onsite.onsitec import cli
-    result = CliRunner().invoke(cli, ["mzid", "--help"])
-    assert result.exit_code == 0
-    assert "mzid" in result.output.lower()
-    assert "--add-decoys" in result.output
+@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
+def test_all_id_mzid_out_mzid_has_three_scores(tmp_path):
+    from onsite.mzid_adapter import load_identifications, store_identifications
+    from onsite.onsitec import run_all_localizers
+    from pyopenms import PeptideIdentificationList
+    prot, pep = load_identifications(str(IDXML))
+    small = PeptideIdentificationList()
+    for i in range(min(5, pep.size())):
+        small.push_back(pep.at(i))
+    in_mzid = str(tmp_path / "in.mzid"); store_identifications(in_mzid, prot, small)
+    out_mzid = str(tmp_path / "scored.mzid")
+    run_all_localizers(str(MZML), in_mzid, out_mzid, threads=1)
+    _, outpep = load_identifications(out_mzid)
+    assert _has_score(outpep, "AScore_site_scores")
+    assert _has_score(outpep, "PhosphoRS_site_probs")
+    assert _has_score(outpep, "Luciphor_site_scores")
+
+
+@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
+def test_add_decoys_falls_back_when_no_ala(tmp_path, monkeypatch):
+    from onsite import mzid_adapter
+    from onsite.onsitec import run_all_localizers
+    monkeypatch.setattr(mzid_adapter, "has_alanine", lambda pep: False)
+    # also patch the name imported into onsitec if imported directly:
+    import onsite.onsitec as oc
+    if hasattr(oc, "has_alanine"):
+        monkeypatch.setattr(oc, "has_alanine", lambda pep: False)
+    prot, pep = mzid_adapter.load_identifications(str(IDXML))
+    from pyopenms import PeptideIdentificationList
+    small = PeptideIdentificationList()
+    for i in range(min(3, pep.size())):
+        small.push_back(pep.at(i))
+    in_idxml = str(tmp_path / "in.idXML"); mzid_adapter.store_identifications(in_idxml, prot, small)
+    out_idxml = str(tmp_path / "out.idXML")
+    # should not raise and should complete in no-decoy mode
+    run_all_localizers(str(MZML), in_idxml, out_idxml, threads=1, add_decoys=True)
+    assert os.path.exists(out_idxml)
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `python -m pytest tests/test_mzid_adapter.py::test_cli_mzid_help -v`
-Expected: FAIL — `mzid` is not a known command (exit_code != 0).
+Run: `python -m pytest tests/test_mzid_adapter.py -k "id_mzid_out_mzid or falls_back" -v`
+Expected: the mzid-out test FAILS because `merge_algorithm_results` writes via `IdXMLFile` (the `.mzid` output is idXML content → re-load as mzid fails) — or SKIP without mzML.
 
-- [ ] **Step 3: Implement the command and register it**
+- [ ] **Step 3: Implement** in `onsite/onsitec.py`:
 
-In `onsite/onsitec.py`, add after the `all` command definition:
-
-```python
-@click.command()
-@click.option("-in", "--in-file", "in_file", required=True,
-              help="Input mzML file path", type=click.Path(exists=True))
-@click.option("-id", "--id-file", "id_file", required=True,
-              help="Input mzIdentML file path", type=click.Path(exists=True))
-@click.option("-out", "--out-file", "out_file", required=True,
-              help="Output mzIdentML file path", type=click.Path())
-@click.option("--fragment-mass-tolerance", "fragment_mass_tolerance", type=float,
-              default=0.05, help="Fragment mass tolerance (default: 0.05)")
-@click.option("--fragment-mass-unit", "fragment_mass_unit",
-              type=click.Choice(["Da", "ppm"]), default="Da",
-              help="Tolerance unit (default: Da)")
-@click.option("--threads", "threads", type=int, default=1,
-              help="Number of parallel threads (default: 1)")
-@click.option("--add-decoys", "add_decoys", is_flag=True, default=False,
-              help="Compute the Alanine (PhosphoDecoy) score pack when Ala is present")
-@click.option("--keep-intermediates", "keep_intermediates", is_flag=True, default=False,
-              help="Keep temporary idXML intermediates for debugging")
-def mzid(in_file, id_file, out_file, fragment_mass_tolerance, fragment_mass_unit,
-         threads, add_decoys, keep_intermediates):
-    """Compute AScore + PhosphoRS + LucXor on an mzIdentML+mzML pair and write a scored mzIdentML."""
-    from onsite.mzid_adapter import run, SpectrumRefError
-    try:
-        result = run(
-            in_file, id_file, out_file,
-            fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_mass_unit=fragment_mass_unit,
-            threads=threads, add_decoys=add_decoys,
-            keep_intermediates=keep_intermediates,
-        )
-        click.echo(f"Scored {result['n_psms']} PSMs (decoy_mode={result['decoy_mode']})")
-        click.echo(f"Output: {os.path.abspath(result['out'])}")
-    except SpectrumRefError as e:
-        click.echo(f"Error: {e}")
-        sys.exit(1)
-```
-
-Then register it next to the other commands (near `cli.add_command(lucxor)`):
+At the top of `run_all_localizers`, before the tempdir block, add the guard and validation:
 
 ```python
-cli.add_command(mzid)
+from onsite.mzid_adapter import (
+    load_identifications, store_identifications, has_alanine, validate_spectrum_refs,
+)
+
+# Load identifications once for the decoy guard + spectrum-reference validation.
+_prot, _pep = load_identifications(id_file)
+validate_spectrum_refs(_pep, in_file)
+if add_decoys and not has_alanine(_pep):
+    click.echo("Warning: --add-decoys set but no Alanine candidate present; "
+               "computing the no-decoy score pack instead.")
+    add_decoys = False
 ```
 
-In `pyproject.toml` under `[project.scripts]`, add:
+In `merge_algorithm_results`, replace the final `IdXMLFile().store(output_file, merged_prot_ids, merged_pep_ids)` (match the file's actual variable names) with:
 
-```toml
-onsite-mzid = "onsite.onsitec:main"
+```python
+from onsite.mzid_adapter import store_identifications
+store_identifications(output_file, merged_prot_ids, merged_pep_ids)
 ```
 
-- [ ] **Step 4: Run to verify pass**
+(The three intermediate per-tool files written inside the tempdir stay `.idXML`
+and keep using `IdXMLFile` — they are internal. The CLIs themselves now use
+`store_identifications` from Task 4, but since the intermediate paths end in
+`.idXML`, that writes idXML as before.)
 
-Run: `python -m pytest tests/test_mzid_adapter.py::test_cli_mzid_help -v`
-Expected: PASS.
-
-- [ ] **Step 5: Full suite + commit**
+- [ ] **Step 4: Run to verify pass + full suite**
 
 Run: `python -m pytest tests/test_mzid_adapter.py tests/test_cli.py -v`
+Then: `python -m pytest tests/ -q`
 Expected: all PASS (mzML-dependent tests may SKIP).
 
+- [ ] **Step 5: Commit**
+
 ```bash
-git add onsite/onsitec.py pyproject.toml tests/test_mzid_adapter.py
-git commit -m "feat(mzid): add 'onsite mzid' command and console script"
+git add onsite/onsitec.py tests/test_mzid_adapter.py
+git commit -m "feat(mzid): decoy guard + spectrum validation + format-agnostic output in run_all_localizers"
 ```
 
 ---
 
 ## Self-Review
 
-- **Spec coverage:** Interface (Task 5), components mzid_to_idxml/idxml_to_mzid (Task 2), validate_spectrum_refs (Task 3), run() (Task 4), run_all_localizers refactor (Task 1), decoy gate + fallback (Task 4), pyOpenMS-regenerated output (Task 2/4), error handling (Tasks 3-5), testing items 1-5 (covered across tasks). Equivalence test (spec test #3) — add as an optional extra assertion in Task 4's end-to-end test comparing one PSM's `AScore_site_scores` against a direct `run_all_localizers` run if exact comparison is desired; not required for the gate.
-- **Placeholders:** none — all steps carry full code/commands.
-- **Type consistency:** `LoadInfo(n_psms, has_ala)`, `ValidationResult(n_total, n_resolved, ok)`, `SpectrumRefError`, `run(...) -> dict{n_psms,decoy_mode,out}`, `run_all_localizers(...)` signature used identically across Tasks 1 and 4.
+- **Coverage:** helpers (Task 2R), spectrum validation (Task 3), CLI wiring for both I/O directions (Task 4), decoy guard + output format + validation in the pipeline (Task 5). Decoy gate, mzid-store quirk, container types — all in Global Constraints and exercised by tests.
+- **Placeholders:** none. The Task 4 Step-1 test has an inline note to remove a deliberately-flagged stray import line; the corrected import is stated.
+- **Type consistency:** `load_identifications -> (list, PeptideIdentificationList)`, `store_identifications(path, prot, pep)`, `has_alanine(pep) -> bool`, `validate_spectrum_refs(pep, mzml, ...) -> ValidationResult`, `SpectrumRefError` — used consistently across Tasks 2R-5.
