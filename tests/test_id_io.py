@@ -846,6 +846,20 @@ class TestRoundTripFormats:
             f"idparquet round-trip: expected {len(psms_df)} rows, got {len(psms2)}"
         )
 
+    def _inject_ascore_metavalue(self, psms_df):
+        """Inject AScore_site_scores into the first row's psm_metavalues and return (df, row_index)."""
+        import numpy as np
+        psms_df = psms_df.copy()
+        idx = psms_df.index[0]
+        mv0 = psms_df.at[idx, "psm_metavalues"]
+        new_entry = {"name": "AScore_site_scores", "value": "{1: 50.0}", "value_type": "string"}
+        existing_names = {m["name"] for m in mv0} if hasattr(mv0, "__iter__") else set()
+        if "AScore_site_scores" not in existing_names:
+            psms_df.at[idx, "psm_metavalues"] = np.append(
+                mv0, np.array([new_entry], dtype=object)
+            )
+        return psms_df, idx
+
     def test_round_trip_idxml(self, tmp_path):
         from onsite.id_io import load_identifications, save_identifications
         psms_df, proteins_df = self._load_fixture()
@@ -856,6 +870,23 @@ class TestRoundTripFormats:
             f"idXML round-trip: expected {len(psms_df)} rows, got {len(psms2)}"
         )
 
+    def test_round_trip_idxml_score_key_survives(self, tmp_path):
+        from onsite.id_io import load_identifications, save_identifications
+        psms_df, proteins_df = self._load_fixture()
+        psms_df, orig_idx = self._inject_ascore_metavalue(psms_df)
+        orig_pf = psms_df.at[orig_idx, "peptidoform"]
+        out = str(tmp_path / "out.idXML")
+        save_identifications(out, psms_df, proteins_df)
+        psms2, *_ = load_identifications(out)
+        # Find the reloaded row by peptidoform
+        match = psms2[psms2["peptidoform"] == orig_pf]
+        assert len(match) >= 1, f"Peptidoform {orig_pf!r} not found after idXML round-trip"
+        mv_rt = match.iloc[0]["psm_metavalues"]
+        names_rt = {m["name"] for m in mv_rt}
+        assert "AScore_site_scores" in names_rt, (
+            f"AScore_site_scores missing after idXML round-trip; keys: {names_rt}"
+        )
+
     def test_round_trip_mzid(self, tmp_path):
         from onsite.id_io import load_identifications, save_identifications
         psms_df, proteins_df = self._load_fixture()
@@ -864,4 +895,36 @@ class TestRoundTripFormats:
         psms2, *_ = load_identifications(out)
         assert len(psms2) == len(psms_df), (
             f"mzid round-trip: expected {len(psms_df)} rows, got {len(psms2)}"
+        )
+
+    def test_round_trip_mzid_score_key_survives(self, tmp_path):
+        from onsite.id_io import load_identifications, save_identifications
+        psms_df, proteins_df = self._load_fixture()
+        psms_df, orig_idx = self._inject_ascore_metavalue(psms_df)
+        orig_pf = psms_df.at[orig_idx, "peptidoform"]
+        out = str(tmp_path / "out.mzid")
+        save_identifications(out, psms_df, proteins_df)
+        psms2, *_ = load_identifications(out)
+        match = psms2[psms2["peptidoform"] == orig_pf]
+        assert len(match) >= 1, f"Peptidoform {orig_pf!r} not found after mzid round-trip"
+        mv_rt = match.iloc[0]["psm_metavalues"]
+        names_rt = {m["name"] for m in mv_rt}
+        assert "AScore_site_scores" in names_rt, (
+            f"AScore_site_scores missing after mzid round-trip; keys: {names_rt}"
+        )
+
+    def test_round_trip_idparquet_score_key_survives(self, tmp_path):
+        from onsite.id_io import load_identifications, save_identifications
+        psms_df, proteins_df = self._load_fixture()
+        psms_df, orig_idx = self._inject_ascore_metavalue(psms_df)
+        orig_pf = psms_df.at[orig_idx, "peptidoform"]
+        out = str(tmp_path / "out.idparquet")
+        save_identifications(out, psms_df, proteins_df, source_idparquet=None)
+        psms2, *_ = load_identifications(out)
+        match = psms2[psms2["peptidoform"] == orig_pf]
+        assert len(match) >= 1, f"Peptidoform {orig_pf!r} not found after idparquet round-trip"
+        mv_rt = match.iloc[0]["psm_metavalues"]
+        names_rt = {m["name"] for m in mv_rt}
+        assert "AScore_site_scores" in names_rt, (
+            f"AScore_site_scores missing after idparquet round-trip; keys: {names_rt}"
         )

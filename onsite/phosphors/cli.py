@@ -14,7 +14,6 @@ import click
 import pandas as pd
 from pyopenms import AASequence, MSExperiment, FileHandler, PeptideHit, SpectrumLookup
 from onsite.idparquet import unimod_to_pyopenms_notation, pyopenms_to_unimod_notation
-from onsite.idparquet import save_dataframes as _save_df
 from onsite.id_io import load_identifications as _io_load, save_identifications as _io_save
 
 from .phosphors import (
