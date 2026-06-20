@@ -77,6 +77,20 @@ def test_has_alanine(tmp_path):
     assert has_alanine(mk("S(Phospho)PEK")) is False
 
 
+def test_validate_spectrum_refs_raises_on_mismatch(tmp_path):
+    from onsite.mzid_adapter import validate_spectrum_refs, SpectrumRefError, load_identifications
+    from pyopenms import MSExperiment, FileHandler
+    prot, pep = load_identifications(str(IDXML))
+    # keep one PSM, point it at a non-existent spectrum
+    one = pep.at(0); one.setMetaValue("spectrum_reference", "scan=does-not-exist-999999")
+    from pyopenms import PeptideIdentificationList
+    pep1 = PeptideIdentificationList(); pep1.push_back(one)
+    empty_mzml = str(tmp_path / "empty.mzML")
+    FileHandler().storeExperiment(empty_mzml, MSExperiment())
+    with pytest.raises(SpectrumRefError):
+        validate_spectrum_refs(pep1, empty_mzml)
+
+
 @pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
 def test_run_all_localizers_writes_three_scores(tmp_path):
     from onsite.onsitec import run_all_localizers
