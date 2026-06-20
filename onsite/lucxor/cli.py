@@ -25,6 +25,7 @@ from pyopenms import (
 )
 
 from onsite.idparquet import pyopenms_to_unimod_notation, save_dataframes, load_dataframes, unimod_to_pyopenms_notation
+from onsite.id_io import load_identifications, save_identifications
 from .psm import PSM
 from .peptide import Peptide
 from .models import CIDModel, HCDModel
@@ -393,7 +394,7 @@ class PyLuciPHOr2:
 
         Returns (all_psms, prot_ids, exp).
         """
-        psms_df, proteins_df, _, _ = load_dataframes(input_id)
+        psms_df, proteins_df, _, _ = load_identifications(input_id)
         self._psms_df_template = psms_df  # preserved for output schema
         if psms_df.empty:
             self.logger.warning("No peptide identifications found in input file")
@@ -863,7 +864,7 @@ class PyLuciPHOr2:
 
         # 7. Save results (idParquet format)
         out_df = pd.DataFrame(result_rows) if result_rows else pd.DataFrame()
-        save_dataframes(output, out_df, prot_ids, template_df=self._psms_df_template, source_idparquet=input_id)
+        save_identifications(output, out_df, prot_ids, template_df=self._psms_df_template, source_idparquet=input_id)
         self.logger.info(f"Results saved to: {output}")
 
         # 8. Processing completed - print run summary similar to Ascore

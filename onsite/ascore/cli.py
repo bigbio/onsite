@@ -20,6 +20,7 @@ from onsite.idparquet import (
     pyopenms_to_unimod_notation,
     unimod_to_pyopenms_notation,
 )
+from onsite.id_io import load_identifications, save_identifications
 
 from .ascore import AScore
 
@@ -114,7 +115,7 @@ def ascore(
 
     try:
         exp = load_spectra(in_file)
-        psms_df, proteins_df, _, _ = load_dataframes(id_file)
+        psms_df, proteins_df, _, _ = load_identifications(id_file)
 
         log_file = f"{out_file}.debug.log"
         logger = log_debug(log_file, debug)
@@ -232,7 +233,7 @@ def ascore(
         if result_rows:
             out_df = pd.DataFrame(result_rows)
             click.echo(f"[{time.strftime('%H:%M:%S')}] Saving results to {out_file}")
-            save_dataframes(out_file, out_df, proteins_df, template_df=psms_df, source_idparquet=id_file)
+            save_identifications(out_file, out_df, proteins_df, template_df=psms_df, source_idparquet=id_file)
         else:
             click.echo("Warning: No results to save")
 

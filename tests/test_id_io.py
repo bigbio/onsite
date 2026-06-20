@@ -816,3 +816,52 @@ class TestSaveIdparquetFromScratch:
             assert psms2[col].dtype == np.int32, (
                 f"{col} must be int32 after from-scratch save, got {psms2[col].dtype}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: round-trip across all supported formats
+# ---------------------------------------------------------------------------
+
+
+class TestRoundTripFormats:
+    """Load fixture idParquet, save to each format, reload, check row count."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing(self):
+        if not os.path.isdir(_FIXTURE_IDPARQUET):
+            pytest.skip(f"Fixture not found: {_FIXTURE_IDPARQUET}")
+
+    def _load_fixture(self):
+        from onsite.id_io import load_identifications
+        psms_df, proteins_df, _, _ = load_identifications(_FIXTURE_IDPARQUET)
+        return psms_df, proteins_df
+
+    def test_round_trip_idparquet(self, tmp_path):
+        from onsite.id_io import load_identifications, save_identifications
+        psms_df, proteins_df = self._load_fixture()
+        out = str(tmp_path / "out.idparquet")
+        save_identifications(out, psms_df, proteins_df, source_idparquet=None)
+        psms2, *_ = load_identifications(out)
+        assert len(psms2) == len(psms_df), (
+            f"idparquet round-trip: expected {len(psms_df)} rows, got {len(psms2)}"
+        )
+
+    def test_round_trip_idxml(self, tmp_path):
+        from onsite.id_io import load_identifications, save_identifications
+        psms_df, proteins_df = self._load_fixture()
+        out = str(tmp_path / "out.idXML")
+        save_identifications(out, psms_df, proteins_df)
+        psms2, *_ = load_identifications(out)
+        assert len(psms2) == len(psms_df), (
+            f"idXML round-trip: expected {len(psms_df)} rows, got {len(psms2)}"
+        )
+
+    def test_round_trip_mzid(self, tmp_path):
+        from onsite.id_io import load_identifications, save_identifications
+        psms_df, proteins_df = self._load_fixture()
+        out = str(tmp_path / "out.mzid")
+        save_identifications(out, psms_df, proteins_df)
+        psms2, *_ = load_identifications(out)
+        assert len(psms2) == len(psms_df), (
+            f"mzid round-trip: expected {len(psms_df)} rows, got {len(psms2)}"
+        )

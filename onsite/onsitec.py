@@ -18,6 +18,7 @@ from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
 import pandas as pd
 from onsite.idparquet import load_dataframes, save_dataframes, unimod_to_pyopenms_notation
+from onsite.id_io import load_identifications, save_identifications
 
 @click.group()
 @click.version_option(version="0.0.4")
@@ -422,7 +423,7 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
 
     # Count how many peptides had their modification sites reassigned by LucXor
     relocated_count = 0
-    input_psms_df, _, _, _ = load_dataframes(input_idparquet)
+    input_psms_df, _, _, _ = load_identifications(input_idparquet)
     input_pf_map = {}
     for _, row in input_psms_df.iterrows():
         pep_idx = row.get("peptide_identification_index")
@@ -435,7 +436,7 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
         if orig_pf and orig_pf != out_pf:
             relocated_count += 1
 
-    save_dataframes(output_file, out_df, proteins_df, template_df=lucxor_df, source_idparquet=input_idparquet)
+    save_identifications(output_file, out_df, proteins_df, template_df=lucxor_df, source_idparquet=input_idparquet)
     click.echo(f"Successfully merged {stats['merged']} peptide identifications")
     click.echo(f"  Modification sites reassigned: {relocated_count}")
     click.echo("Each peptide contains scores from all three algorithms")
