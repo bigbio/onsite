@@ -173,3 +173,10 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 *.lock
+
+
+#Ignore cursor AI rules
+.cursor/rules/codacy.mdc
+
+# Benchmark data, results, and harness (large mzML/idXML, zips, reproduction scripts)
+benchmarks/
