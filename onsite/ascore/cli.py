@@ -145,6 +145,16 @@ def ascore(
         start_time = time.time()
         processed_peptide_ids = PeptideIdentificationList()
 
+        # Reuse a single AScore instance across PSMs. AScore holds only config
+        # (tolerance/ppm/decoys) plus a stateless TheoreticalSpectrumGenerator;
+        # base_match_probability_ is (re)set inside every compute() call, so the
+        # instance carries no cross-PSM state. Rebuilding it per PSM previously
+        # reconstructed a TheoreticalSpectrumGenerator thousands of times.
+        shared_ascore = AScore()
+        shared_ascore.fragment_mass_tolerance_ = fragment_mass_tolerance
+        shared_ascore.fragment_tolerance_ppm_ = (fragment_mass_unit == "ppm")
+        shared_ascore.setAddDecoys(add_decoys)
+
         # Process each PeptideIdentification (optionally in parallel)
         if max(1, int(threads)) == 1:
             if debug:
@@ -161,7 +171,8 @@ def ascore(
                     
                     # Process using the original function signature
                     result = process_peptide_identification(
-                        pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger
+                        pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger,
+                        ascore_instance=shared_ascore,
                     )
                     
                     if result["status"] == "success":
@@ -515,7 +526,7 @@ def _worker_process_pid_threaded(task):
         return {"status": "error", "reason": str(e)}
 
 
-def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger):
+def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_mass_unit, add_decoys, logger, ascore_instance=None):
     """Process a single peptide identification with error handling"""
     try:
         # Create new PeptideIdentification
@@ -538,12 +549,16 @@ def process_peptide_identification(pid, exp, fragment_mass_tolerance, fragment_m
         if logger and logger.isEnabledFor(logging.INFO):
             logger.info(f"Found spectrum: {spectrum.getNativeID()}")
         
-        # Configure AScore instance
-        ascore = AScore()
-        ascore.fragment_mass_tolerance_ = fragment_mass_tolerance
-        ascore.fragment_tolerance_ppm_ = (fragment_mass_unit == "ppm")
-        ascore.setAddDecoys(add_decoys)
-        
+        # Configure AScore instance (reuse a shared one when provided to avoid
+        # reconstructing the TheoreticalSpectrumGenerator per PSM).
+        if ascore_instance is not None:
+            ascore = ascore_instance
+        else:
+            ascore = AScore()
+            ascore.fragment_mass_tolerance_ = fragment_mass_tolerance
+            ascore.fragment_tolerance_ppm_ = (fragment_mass_unit == "ppm")
+            ascore.setAddDecoys(add_decoys)
+
         # Process peptide hits
         scored_peptides = []
         for hit in pid.getHits():
