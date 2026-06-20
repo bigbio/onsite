@@ -43,6 +43,75 @@ cli.add_command(phosphors)
 cli.add_command(lucxor)
 
 
+def run_all_localizers(
+    in_file,
+    id_file,
+    out_file,
+    fragment_mass_tolerance=0.05,
+    fragment_mass_unit="Da",
+    threads=1,
+    add_decoys=False,
+    debug=False,
+):
+    """Run AScore + PhosphoRS + LucXor into a tempdir and merge into out_file (idXML).
+
+    Extracted from the `all` command so other entry points (e.g. the mzid
+    adapter) can reuse the exact same orchestration. Behavior is unchanged.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
+        phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
+        lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
+
+        from onsite.ascore.cli import ascore as ascore_func
+        ctx = click.Context(ascore_func)
+        ctx.invoke(
+            ascore_func,
+            in_file=in_file, id_file=id_file, out_file=ascore_out,
+            fragment_mass_tolerance=fragment_mass_tolerance,
+            fragment_mass_unit=fragment_mass_unit,
+            threads=threads, debug=debug, add_decoys=add_decoys,
+        )
+
+        from onsite.phosphors.cli import phosphors as phosphors_func
+        ctx = click.Context(phosphors_func)
+        ctx.invoke(
+            phosphors_func,
+            in_file=in_file, id_file=id_file, out_file=phosphors_out,
+            fragment_mass_tolerance=fragment_mass_tolerance,
+            fragment_mass_unit=fragment_mass_unit,
+            threads=threads, debug=debug, add_decoys=add_decoys,
+        )
+
+        from onsite.lucxor.cli import lucxor as lucxor_func
+        if add_decoys:
+            target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
+        else:
+            target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
+        ctx = click.Context(lucxor_func)
+        try:
+            ctx.invoke(
+                lucxor_func,
+                input_spectrum=in_file, input_id=id_file, output=lucxor_out,
+                fragment_method="CID",
+                fragment_mass_tolerance=fragment_mass_tolerance,
+                fragment_error_units=fragment_mass_unit,
+                min_mz=150.0, target_modifications=target_mods,
+                neutral_losses=("sty -H3PO4 -97.97690",),
+                decoy_mass=79.966331,
+                decoy_neutral_losses=("X -H3PO4 -97.97690",),
+                max_charge_state=5, max_peptide_length=40, max_num_perm=16384,
+                modeling_score_threshold=0.95, scoring_threshold=0.0,
+                min_num_psms_model=50, threads=threads, rt_tolerance=0.01,
+                debug=debug, log_file=None, disable_split_by_charge=False,
+            )
+        except SystemExit as exc:
+            if exc.code != 0:
+                raise RuntimeError(f"LucXor failed with exit code {exc.code}") from exc
+
+        merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
+
+
 @click.command()
 @click.option(
     "-in",
@@ -131,94 +200,11 @@ def all(
         click.echo(f"  Add decoys: {add_decoys}")
         click.echo(f"  Debug: {debug}")
         
-        # Create temporary directory for intermediate results
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
-            phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
-            lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
-            
-            # Run AScore
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Running AScore...")
-            click.echo(f"{'='*60}")
-            from onsite.ascore.cli import ascore as ascore_func
-            ctx = click.Context(ascore_func)
-            ctx.invoke(
-                ascore_func,
-                in_file=in_file,
-                id_file=id_file,
-                out_file=ascore_out,
-                fragment_mass_tolerance=fragment_mass_tolerance,
-                fragment_mass_unit=fragment_mass_unit,
-                threads=threads,
-                debug=debug,
-                add_decoys=add_decoys,
-            )
-            
-            # Run PhosphoRS
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Running PhosphoRS...")
-            click.echo(f"{'='*60}")
-            from onsite.phosphors.cli import phosphors as phosphors_func
-            ctx = click.Context(phosphors_func)
-            ctx.invoke(
-                phosphors_func,
-                in_file=in_file,
-                id_file=id_file,
-                out_file=phosphors_out,
-                fragment_mass_tolerance=fragment_mass_tolerance,
-                fragment_mass_unit=fragment_mass_unit,
-                threads=threads,
-                debug=debug,
-                add_decoys=add_decoys,
-            )
-            
-            # Run LucXor with appropriate target modifications
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Running LucXor...")
-            click.echo(f"{'='*60}")
-            from onsite.lucxor.cli import lucxor as lucxor_func
-            
-            # Configure target modifications based on add_decoys flag
-            if add_decoys:
-                target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
-                click.echo("  Using target modifications with decoys: Phospho(S), Phospho(T), Phospho(Y), PhosphoDecoy(A)")
-            else:
-                target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
-            
-            ctx = click.Context(lucxor_func)
-            ctx.invoke(
-                lucxor_func,
-                input_spectrum=in_file,
-                input_id=id_file,
-                output=lucxor_out,
-                fragment_method="CID",
-                fragment_mass_tolerance=fragment_mass_tolerance,
-                fragment_error_units=fragment_mass_unit,
-                min_mz=150.0,
-                target_modifications=target_mods,
-                neutral_losses=("sty -H3PO4 -97.97690",),
-                decoy_mass=79.966331,
-                decoy_neutral_losses=("X -H3PO4 -97.97690",),
-                max_charge_state=5,
-                max_peptide_length=40,
-                max_num_perm=16384,
-                modeling_score_threshold=0.95,
-                scoring_threshold=0.0,
-                min_num_psms_model=50,
-                threads=threads,
-                rt_tolerance=0.01,
-                debug=debug,
-                log_file=None,
-                disable_split_by_charge=False,
-            )
-            
-            # Merge results
-            click.echo(f"\n{'='*60}")
-            click.echo(f"[{time.strftime('%H:%M:%S')}] Merging results from all algorithms...")
-            click.echo(f"{'='*60}")
-            merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
-            
+        run_all_localizers(
+            in_file, id_file, out_file,
+            fragment_mass_tolerance, fragment_mass_unit, threads, add_decoys, debug,
+        )
+
         elapsed = time.time() - start_time
         abs_out_file = os.path.abspath(out_file)
         click.echo(f"\n{'='*60}")
@@ -374,6 +360,8 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
                 merged_hit.setMetaValue("AScore_pep_score", float(ascore_hit.getMetaValue("AScore_pep_score")))
             
             # Copy all AScore site scores
+            if ascore_hit.metaValueExists("AScore_site_scores"):
+                merged_hit.setMetaValue("AScore_site_scores", ascore_hit.getMetaValue("AScore_site_scores"))
             rank = 1
             while ascore_hit.metaValueExists(f"AScore_{rank}"):
                 merged_hit.setMetaValue(f"AScore_{rank}", float(ascore_hit.getMetaValue(f"AScore_{rank}")))
@@ -396,6 +384,8 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
                 merged_hit.setMetaValue("Luciphor_global_flr", float(lucxor_hit.getMetaValue("Luciphor_global_flr")))
             if lucxor_hit.metaValueExists("Luciphor_local_flr"):
                 merged_hit.setMetaValue("Luciphor_local_flr", float(lucxor_hit.getMetaValue("Luciphor_local_flr")))
+            if lucxor_hit.metaValueExists("Luciphor_site_scores"):
+                merged_hit.setMetaValue("Luciphor_site_scores", lucxor_hit.getMetaValue("Luciphor_site_scores"))
             
             # Set combined score (use LucXor delta score as primary)
             combined_score = float(lucxor_hit.getScore())
