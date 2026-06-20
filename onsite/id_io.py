@@ -25,8 +25,12 @@ logger = logging.getLogger(__name__)
 # Format detection
 # ---------------------------------------------------------------------------
 
-def detect_format(path: str) -> str:
+def detect_format(path) -> str:
     """Return the file format tag for *path*.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
 
     Returns
     -------
@@ -38,6 +42,7 @@ def detect_format(path: str) -> str:
     ------
     ValueError   – when no pattern matches.
     """
+    path = str(path)  # coerce pathlib.Path → str
     lpath = path.lower()
     if os.path.isdir(path) or lpath.endswith(".idparquet"):
         return "idparquet"
@@ -117,7 +122,23 @@ def _load_mzid(path: str) -> tuple:
 # _peptide_ids_to_psms_df
 # ---------------------------------------------------------------------------
 
-_SCAN_RE = re.compile(r"scan=(\d+)")
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+# Keys that are never used as a fallback score candidate.
+_NON_SCORE_KEYS = {
+    "calcMZ",
+    "pass_threshold",
+    "target_decoy",
+    "AScore_site_scores",
+    "num_matched_peptides",
+    "protein_references",
+    "isotope_error",
+}
+
+# Scan regex — require a word boundary so "basescan=123" does not match
+_SCAN_RE = re.compile(r"\bscan=(\d+)")
 
 
 def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
@@ -137,7 +158,7 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
     pd.DataFrame
         Schema-compatible with the psms.parquet fixture (29 columns).
     """
-    from onsite.idparquet import pyopenms_to_unimod_notation
+    from onsite.idparquet import pyopenms_to_unimod_notation, peptidoform_to_modifications
 
     reference_file_name = os.path.basename(source_path)
     rows: List[dict] = []
@@ -175,7 +196,21 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
                 td = str(hit.getMetaValue("target_decoy"))
                 is_decoy = td.strip().lower() == "decoy"
 
-            # psm_metavalues: numpy object array of dicts
+            # protein_accessions: numpy object array of dicts matching fixture schema
+            # fixture element: {'accession': ..., 'aa_before': ..., 'aa_after': ...,
+            #                   'start': ..., 'end': ...}
+            pa_list = []
+            for ev in hit.getPeptideEvidences():
+                pa_list.append({
+                    "accession": ev.getProteinAccession(),
+                    "aa_before": str(ev.getAABefore()),
+                    "aa_after": str(ev.getAAAfter()),
+                    "start": ev.getStart(),
+                    "end": ev.getEnd(),
+                })
+            protein_accessions = np.array(pa_list, dtype=object)
+
+            # psm_metavalues: numpy object array of dicts with correct value_type
             keys: List = []
             hit.getKeys(keys)
             meta_list = []
@@ -183,10 +218,14 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
             for k in keys:
                 k_str = k.decode() if isinstance(k, bytes) else str(k)
                 try:
-                    v_str = str(hit.getMetaValue(k))
+                    raw_val = hit.getMetaValue(k)
+                    v_type = _metavalue_type_str(raw_val)
+                    v_str = str(raw_val)
                 except Exception:
+                    raw_val = None
+                    v_type = "string"
                     v_str = ""
-                meta_list.append({"name": k_str, "value": v_str, "value_type": "string"})
+                meta_list.append({"name": k_str, "value": v_str, "value_type": v_type})
                 meta_by_name[k_str] = v_str
             psm_metavalues = np.array(meta_list, dtype=object)
 
@@ -196,7 +235,6 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
             # is 0.0, try to recover the score from:
             #  1. A metavalue whose name matches score_type (idXML round-trip)
             #  2. Any numeric metavalue that is not a known non-score field
-            _NON_SCORE_KEYS = {"calcMZ", "pass_threshold", "target_decoy"}
             if score == 0.0:
                 if score_type in meta_by_name:
                     try:
@@ -215,18 +253,21 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
                             score = candidate
                             break
 
+            # modifications: populated from the peptidoform
+            modifications = peptidoform_to_modifications(peptidoform)
+
             rows.append({
                 # --- core columns ---
                 "sequence": sequence,
                 "peptidoform": peptidoform,
-                "modifications": np.array([], dtype=object),
+                "modifications": modifications,
                 "precursor_charge": precursor_charge,
                 "posterior_error_probability": float("nan"),
                 "is_decoy": is_decoy,
                 "calculated_mz": float("nan"),
                 "observed_mz": observed_mz,
                 "additional_scores": np.array([], dtype=object),
-                "protein_accessions": np.array([], dtype=object),
+                "protein_accessions": protein_accessions,
                 "predicted_rt": float("nan"),
                 "reference_file_name": reference_file_name,
                 "cv_params": None,
@@ -270,6 +311,21 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
     return df
 
 
+def _metavalue_type_str(value) -> str:
+    """Map a Python value returned by getMetaValue() to the fixture value_type string.
+
+    Mapping:
+        float  -> "double"   (matches fixture convention)
+        int    -> "int"
+        other  -> "string"
+    """
+    if isinstance(value, float):
+        return "double"
+    if isinstance(value, int):
+        return "int"
+    return "string"
+
+
 def _is_sentinel(value: float) -> bool:
     """Return True if *value* is the pyOpenMS unset-RT/MZ sentinel (-1e38 range)."""
     return value < -1e30
@@ -307,6 +363,27 @@ _PSM_COLUMNS = [
 ]
 
 
+# dtype map for the empty DataFrame — matches the populated path and fixture schema
+_PSM_DTYPE_MAP = {
+    "precursor_charge": "int32",
+    "scan": "int32",
+    "hit_index": "int32",
+    "peptide_identification_index": "int32",
+    "score": "float64",
+    "rt": "float64",
+    "observed_mz": "float64",
+    "posterior_error_probability": "float64",
+    "calculated_mz": "float64",
+    "predicted_rt": "float64",
+    "ion_mobility": "float64",
+    "is_decoy": "bool",
+    "higher_score_better": "bool",
+}
+
+
 def _empty_psms_df() -> pd.DataFrame:
-    """Return an empty DataFrame with the full psms schema."""
-    return pd.DataFrame(columns=_PSM_COLUMNS)
+    """Return an empty DataFrame with the full psms schema and correct dtypes."""
+    df = pd.DataFrame(columns=_PSM_COLUMNS)
+    for col, dtype in _PSM_DTYPE_MAP.items():
+        df[col] = df[col].astype(dtype)
+    return df

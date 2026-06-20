@@ -321,3 +321,218 @@ class TestLoadMzidBuildsPsmsDf:
         mv0 = psms_df.loc[psms_df["hit_index"] == 0, "psm_metavalues"].iloc[0]
         names = [m["name"] for m in mv0]
         assert "AScore_site_scores" in names, f"AScore_site_scores missing; keys: {names}"
+
+
+# ---------------------------------------------------------------------------
+# Helper — build pep list with a known protein accession
+# ---------------------------------------------------------------------------
+
+
+def _build_pep_list_with_protein():
+    """Return (prot_list, PeptideIdentificationList) with 1 hit linked to PROT_A."""
+    import pyopenms as oms
+
+    pi = oms.ProteinIdentification()
+    pi.setIdentifier("run1")
+    pi.setScoreType("Percolator_qvalue")
+    pi.setHigherScoreBetter(False)
+    ph = oms.ProteinHit()
+    ph.setAccession("PROT_A")
+    pi.setHits([ph])
+    prot = [pi]
+
+    pep_list = oms.PeptideIdentificationList()
+    pid = oms.PeptideIdentification()
+    pid.setScoreType("Percolator_qvalue")
+    pid.setHigherScoreBetter(False)
+    pid.setRT(100.5)
+    pid.setMZ(500.0)
+    pid.setIdentifier("run1")
+    pid.setMetaValue("spectrum_reference", "controllerType=0 scan=7")
+
+    hit = oms.PeptideHit()
+    hit.setSequence(oms.AASequence.fromString("S(Phospho)PEK"))
+    hit.setCharge(2)
+    hit.setScore(0.01)
+    hit.setMetaValue("target_decoy", "target")
+
+    ev = oms.PeptideEvidence()
+    ev.setProteinAccession("PROT_A")
+    ev.setAABefore(b"K")
+    ev.setAAAfter(b"L")
+    ev.setStart(10)
+    ev.setEnd(13)
+    hit.setPeptideEvidences([ev])
+
+    pid.setHits([hit])
+    pep_list.push_back(pid)
+    return prot, pep_list
+
+
+def _build_pep_list_with_numeric_metavalues():
+    """Return (prot_list, PeptideIdentificationList) with 1 hit that has numeric metavalues."""
+    import pyopenms as oms
+
+    pi = oms.ProteinIdentification()
+    pi.setIdentifier("run1")
+    pi.setScoreType("Percolator_qvalue")
+    pi.setHigherScoreBetter(False)
+    prot = [pi]
+
+    pep_list = oms.PeptideIdentificationList()
+    pid = oms.PeptideIdentification()
+    pid.setScoreType("Percolator_qvalue")
+    pid.setHigherScoreBetter(False)
+    pid.setRT(200.0)
+    pid.setMZ(600.0)
+    pid.setIdentifier("run1")
+    pid.setMetaValue("spectrum_reference", "scan=3")
+
+    hit = oms.PeptideHit()
+    hit.setSequence(oms.AASequence.fromString("PEK"))
+    hit.setCharge(2)
+    hit.setScore(0.02)
+    hit.setMetaValue("target_decoy", "target")
+    hit.setMetaValue("xcorr_score", 4.567)   # float metavalue
+    hit.setMetaValue("num_matched_ions", 6)    # int metavalue
+
+    pid.setHits([hit])
+    pep_list.push_back(pid)
+    return prot, pep_list
+
+
+# ---------------------------------------------------------------------------
+# New assertions: protein_accessions, metavalue value_type, modifications,
+# detect_format(Path)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectFormatPathlib:
+    """detect_format must accept pathlib.Path objects."""
+
+    def test_directory_pathlib(self, tmp_path):
+        d = tmp_path / "foo"
+        d.mkdir()
+        assert detect_format(d) == "idparquet"
+
+    def test_idparquet_extension_pathlib(self, tmp_path):
+        p = tmp_path / "foo.idparquet"
+        assert detect_format(p) == "idparquet"
+
+    def test_idxml_pathlib(self, tmp_path):
+        p = tmp_path / "foo.idXML"
+        assert detect_format(p) == "idxml"
+
+    def test_mzid_pathlib(self, tmp_path):
+        p = tmp_path / "foo.mzid"
+        assert detect_format(p) == "mzid"
+
+
+class TestProteinAccessions:
+    """protein_accessions must be populated from PeptideEvidences."""
+
+    def test_protein_accessions_populated(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_protein()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        pa = psms_df["protein_accessions"].iloc[0]
+        assert isinstance(pa, np.ndarray), f"Expected ndarray, got {type(pa)}"
+        assert len(pa) >= 1, "Expected at least one protein accession entry"
+        accessions = [d["accession"] for d in pa]
+        assert "PROT_A" in accessions, f"PROT_A not in {accessions}"
+
+    def test_protein_accessions_entry_has_required_keys(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_protein()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        pa = psms_df["protein_accessions"].iloc[0]
+        entry = pa[0]
+        for key in ("accession", "aa_before", "aa_after", "start", "end"):
+            assert key in entry, f"Missing key {key!r} in protein_accessions entry"
+
+
+class TestMetavalueType:
+    """Numeric metavalues must have value_type 'double' or 'int', not 'string'."""
+
+    def test_float_metavalue_has_double_type(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_numeric_metavalues()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        mv = psms_df["psm_metavalues"].iloc[0]
+        by_name = {m["name"]: m for m in mv}
+        assert "xcorr_score" in by_name, f"xcorr_score not in metavalues: {list(by_name)}"
+        assert by_name["xcorr_score"]["value_type"] == "double", (
+            f"Expected 'double', got {by_name['xcorr_score']['value_type']!r}"
+        )
+
+    def test_int_metavalue_has_int_type(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_numeric_metavalues()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        mv = psms_df["psm_metavalues"].iloc[0]
+        by_name = {m["name"]: m for m in mv}
+        assert "num_matched_ions" in by_name, f"num_matched_ions not in metavalues: {list(by_name)}"
+        assert by_name["num_matched_ions"]["value_type"] == "int", (
+            f"Expected 'int', got {by_name['num_matched_ions']['value_type']!r}"
+        )
+
+    def test_string_metavalue_remains_string(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_numeric_metavalues()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        mv = psms_df["psm_metavalues"].iloc[0]
+        by_name = {m["name"]: m for m in mv}
+        assert "target_decoy" in by_name, f"target_decoy not in metavalues: {list(by_name)}"
+        assert by_name["target_decoy"]["value_type"] == "string", (
+            f"Expected 'string', got {by_name['target_decoy']['value_type']!r}"
+        )
+
+
+class TestModificationsPopulated:
+    """modifications must be non-empty for a modified peptidoform."""
+
+    def test_phospho_modifications_non_empty(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_protein()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        # hit 0 has S(Phospho)PEK — modifications should be non-empty
+        mods = psms_df["modifications"].iloc[0]
+        assert isinstance(mods, np.ndarray), f"Expected ndarray, got {type(mods)}"
+        assert len(mods) > 0, "modifications must be non-empty for S(Phospho)PEK"
+
+    def test_unmodified_peptide_modifications_empty(self, tmp_path):
+        import pyopenms as oms
+
+        prot, pep_list = _build_pep_list_with_numeric_metavalues()
+        path = str(tmp_path / "test.idXML")
+        oms.IdXMLFile().store(path, prot, pep_list)
+
+        psms_df, *_ = load_identifications(path)
+        # PEK has no modifications
+        mods = psms_df["modifications"].iloc[0]
+        assert isinstance(mods, np.ndarray), f"Expected ndarray, got {type(mods)}"
+        assert len(mods) == 0, f"Unmodified PEK should have empty modifications, got {mods}"
