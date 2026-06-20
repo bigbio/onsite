@@ -127,3 +127,36 @@ def test_run_all_localizers_writes_three_scores(tmp_path):
     assert _has_score(pep, "AScore_site_scores")
     assert _has_score(pep, "PhosphoRS_site_probs")
     assert _has_score(pep, "Luciphor_site_scores")
+
+
+@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
+def test_all_id_mzid_out_mzid_has_three_scores(tmp_path):
+    from onsite.mzid_adapter import load_identifications, store_identifications
+    from onsite.onsitec import run_all_localizers
+    from pyopenms import PeptideIdentificationList
+    prot, pep = load_identifications(str(IDXML))
+    # use all PSMs so LucXor has enough for model training (needs >= 50 high-scorers)
+    in_mzid = str(tmp_path / "in.mzid"); store_identifications(in_mzid, prot, pep)
+    out_mzid = str(tmp_path / "scored.mzid")
+    run_all_localizers(str(MZML), in_mzid, out_mzid, threads=1)
+    _, outpep = load_identifications(out_mzid)
+    assert _has_score(outpep, "AScore_site_scores")
+    assert _has_score(outpep, "PhosphoRS_site_probs")
+    assert _has_score(outpep, "Luciphor_site_scores")
+
+
+@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
+def test_add_decoys_falls_back_when_no_ala(tmp_path, monkeypatch):
+    from onsite import mzid_adapter
+    from onsite.onsitec import run_all_localizers
+    monkeypatch.setattr(mzid_adapter, "has_alanine", lambda pep: False)
+    # also patch the name imported into onsitec if imported directly:
+    import onsite.onsitec as oc
+    if hasattr(oc, "has_alanine"):
+        monkeypatch.setattr(oc, "has_alanine", lambda pep: False)
+    prot, pep = mzid_adapter.load_identifications(str(IDXML))
+    in_idxml = str(tmp_path / "in.idXML"); mzid_adapter.store_identifications(in_idxml, prot, pep)
+    out_idxml = str(tmp_path / "out.idXML")
+    # should not raise and should complete in no-decoy mode
+    run_all_localizers(str(MZML), in_idxml, out_idxml, threads=1, add_decoys=True)
+    assert os.path.exists(out_idxml)

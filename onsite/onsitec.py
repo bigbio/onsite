@@ -14,6 +14,9 @@ from pyopenms import IdXMLFile, PeptideIdentification, PeptideHit, PeptideIdenti
 from onsite.lucxor.cli import lucxor
 from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
+from onsite.mzid_adapter import (
+    load_identifications, store_identifications, has_alanine, validate_spectrum_refs,
+)
 
 
 @click.group()
@@ -58,6 +61,14 @@ def run_all_localizers(
     Extracted from the `all` command so other entry points (e.g. the mzid
     adapter) can reuse the exact same orchestration. Behavior is unchanged.
     """
+    # Load identifications once for the decoy guard + spectrum-reference validation.
+    _prot, _pep = load_identifications(id_file)
+    validate_spectrum_refs(_pep, in_file)
+    if add_decoys and not has_alanine(_pep):
+        click.echo("Warning: --add-decoys set but no Alanine candidate present; "
+                   "computing the no-decoy score pack instead.")
+        add_decoys = False
+
     with tempfile.TemporaryDirectory() as tmpdir:
         ascore_out = os.path.join(tmpdir, "ascore_result.idXML")
         phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
@@ -415,8 +426,8 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
         merged_pid.setHits(merged_hits)
         merged_pep_ids.push_back(merged_pid)
     
-    # Save merged results
-    IdXMLFile().store(output_file, lucxor_prot_ids, merged_pep_ids)
+    # Save merged results (format-agnostic: idXML or mzIdentML by extension)
+    store_identifications(output_file, lucxor_prot_ids, merged_pep_ids)
     click.echo(f"Successfully merged {len(merged_pep_ids)} peptide identifications")
     click.echo(f"  Each peptide contains scores from all three algorithms:")
     click.echo(f"    - AScore: site-specific scores")
