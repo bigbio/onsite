@@ -63,6 +63,10 @@ def run_all_localizers(
         phosphors_out = os.path.join(tmpdir, "phosphors_result.idXML")
         lucxor_out = os.path.join(tmpdir, "lucxor_result.idXML")
 
+        # Run AScore
+        click.echo(f"\n{'='*60}")
+        click.echo(f"[{time.strftime('%H:%M:%S')}] Running AScore...")
+        click.echo(f"{'='*60}")
         from onsite.ascore.cli import ascore as ascore_func
         ctx = click.Context(ascore_func)
         ctx.invoke(
@@ -73,6 +77,10 @@ def run_all_localizers(
             threads=threads, debug=debug, add_decoys=add_decoys,
         )
 
+        # Run PhosphoRS
+        click.echo(f"\n{'='*60}")
+        click.echo(f"[{time.strftime('%H:%M:%S')}] Running PhosphoRS...")
+        click.echo(f"{'='*60}")
         from onsite.phosphors.cli import phosphors as phosphors_func
         ctx = click.Context(phosphors_func)
         ctx.invoke(
@@ -83,9 +91,14 @@ def run_all_localizers(
             threads=threads, debug=debug, add_decoys=add_decoys,
         )
 
+        # Run LucXor
+        click.echo(f"\n{'='*60}")
+        click.echo(f"[{time.strftime('%H:%M:%S')}] Running LucXor...")
+        click.echo(f"{'='*60}")
         from onsite.lucxor.cli import lucxor as lucxor_func
         if add_decoys:
             target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
+            click.echo("  Using target modifications with decoys: Phospho(S), Phospho(T), Phospho(Y), PhosphoDecoy(A)")
         else:
             target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
         ctx = click.Context(lucxor_func)
@@ -109,6 +122,10 @@ def run_all_localizers(
             if exc.code != 0:
                 raise RuntimeError(f"LucXor failed with exit code {exc.code}") from exc
 
+        # Merge results
+        click.echo(f"\n{'='*60}")
+        click.echo(f"[{time.strftime('%H:%M:%S')}] Merging results from all algorithms...")
+        click.echo(f"{'='*60}")
         merge_algorithm_results(ascore_out, phosphors_out, lucxor_out, out_file)
 
 
@@ -374,6 +391,8 @@ def merge_algorithm_results(ascore_file, phosphors_file, lucxor_file, output_fil
                 merged_hit.setMetaValue("PhosphoRS_pep_score", float(phosphors_hit.getMetaValue("PhosphoRS_pep_score")))
             if phosphors_hit.metaValueExists("PhosphoRS_site_probs"):
                 merged_hit.setMetaValue("PhosphoRS_site_probs", phosphors_hit.getMetaValue("PhosphoRS_site_probs"))
+            if phosphors_hit.metaValueExists("PhosphoRS_site_delta"):
+                merged_hit.setMetaValue("PhosphoRS_site_delta", phosphors_hit.getMetaValue("PhosphoRS_site_delta"))
             
             # Add Luciphor metadata (in order)
             merged_hit.setMetaValue("Luciphor_sequence", lucxor_hit.getSequence().toString())

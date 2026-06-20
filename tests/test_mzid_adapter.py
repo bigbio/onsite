@@ -8,7 +8,6 @@ IDXML = DATA / "1_consensus_fdr_filter_pep.idXML"
 
 
 def _has_score(pep_ids, meta):
-    from pyopenms import IdXMLFile  # noqa
     for pid in pep_ids:
         for hit in pid.getHits():
             if hit.metaValueExists(meta):
