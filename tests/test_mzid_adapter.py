@@ -29,32 +29,52 @@ def _make_small_mzid(tmp_path, n=5):
     return small_idxml, mzid, n
 
 
-def test_mzid_to_idxml_roundtrip_preserves_psms(tmp_path):
-    from onsite.mzid_adapter import mzid_to_idxml
-    from pyopenms import IdXMLFile, PeptideIdentificationList
-    _, mzid, n = _make_small_mzid(tmp_path)
-    out_idxml = str(tmp_path / "back.idXML")
-    info = mzid_to_idxml(mzid, out_idxml)
-    assert info.n_psms == n
-    prot, pep = [], PeptideIdentificationList()
-    IdXMLFile().load(out_idxml, prot, pep)
-    assert len(pep) == n
-
-
-def test_idxml_to_mzid_creates_file(tmp_path):
-    from onsite.mzid_adapter import idxml_to_mzid
-    small_idxml, _, _ = _make_small_mzid(tmp_path)
-    out_mzid = str(tmp_path / "out.mzid")
-    idxml_to_mzid(small_idxml, out_mzid)
-    assert os.path.exists(out_mzid) and os.path.getsize(out_mzid) > 0
-
-
 def _has_score(pep_ids, meta):
     for pid in pep_ids:
         for hit in pid.getHits():
             if hit.metaValueExists(meta):
                 return True
     return False
+
+
+def test_load_store_roundtrip_idxml(tmp_path):
+    from onsite.mzid_adapter import load_identifications, store_identifications
+    prot, pep = load_identifications(str(IDXML))
+    n = sum(len(p.getHits()) for p in pep)
+    out = str(tmp_path / "rt.idXML")
+    store_identifications(out, prot, pep)
+    prot2, pep2 = load_identifications(out)
+    assert sum(len(p.getHits()) for p in pep2) == n
+
+
+def test_store_mzid_with_phosphodecoy_roundtrips(tmp_path):
+    from onsite.mzid_adapter import store_identifications, load_identifications
+    from pyopenms import (AASequence, PeptideHit, PeptideIdentification,
+                          ProteinIdentification, PeptideIdentificationList)
+    hit = PeptideHit(); hit.setSequence(AASequence.fromString("AS(Phospho)A(PhosphoDecoy)K"))
+    hit.setScore(1.0); hit.setCharge(2); hit.setMetaValue("AScore_site_scores", "{1: 50.0}")
+    pid = PeptideIdentification(); pid.setHits([hit]); pid.setScoreType("AScore")
+    pid.setMetaValue("spectrum_reference", "scan=1")
+    prot = ProteinIdentification(); sp = prot.getSearchParameters()
+    sp.variable_modifications = [b"Phospho (S)", b"PhosphoDecoy (A)"]; prot.setSearchParameters(sp)
+    pep = PeptideIdentificationList(); pep.push_back(pid)
+    out = str(tmp_path / "decoy.mzid")
+    store_identifications(out, [prot], pep)  # must not raise
+    prot2, pep2 = load_identifications(out)
+    h = pep2.at(0).getHits()[0]
+    assert "PhosphoDecoy" in h.getSequence().toString()
+    assert h.getMetaValue("AScore_site_scores") == "{1: 50.0}"
+
+
+def test_has_alanine(tmp_path):
+    from onsite.mzid_adapter import has_alanine
+    from pyopenms import AASequence, PeptideHit, PeptideIdentification, PeptideIdentificationList
+    def mk(seq):
+        hit = PeptideHit(); hit.setSequence(AASequence.fromString(seq))
+        pid = PeptideIdentification(); pid.setHits([hit])
+        pep = PeptideIdentificationList(); pep.push_back(pid); return pep
+    assert has_alanine(mk("AS(Phospho)K")) is True
+    assert has_alanine(mk("S(Phospho)PEK")) is False
 
 
 @pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")

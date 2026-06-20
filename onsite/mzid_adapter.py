@@ -1,35 +1,51 @@
-"""Adapter bridging mzIdentML to the idXML-based onsite localizer pipeline."""
-from dataclasses import dataclass
+"""Format-agnostic identification I/O for the onsite localizer pipeline."""
+import os
 from pyopenms import IdXMLFile, MzIdentMLFile, PeptideIdentificationList
 
-TARGET_RESIDUES = set("STY")
+_MZID_EXTS = (".mzid", ".mzidentml")
 
 
-@dataclass
-class LoadInfo:
-    n_psms: int
-    has_ala: bool
+def is_mzid(path: str) -> bool:
+    p = path.lower()
+    return p.endswith(_MZID_EXTS)
 
 
-def _has_alanine(pep_ids) -> bool:
-    """True if any peptide hit's unmodified sequence contains an 'A' residue
-    (the practical precondition for Ala-decoy scoring to do anything)."""
-    for pid in pep_ids:
+def load_identifications(path: str):
+    """Load idXML or mzIdentML by extension. Returns (prot_list, PeptideIdentificationList)."""
+    prot = []
+    pep = PeptideIdentificationList()
+    if is_mzid(path):
+        MzIdentMLFile().load(path, prot, pep)
+    else:
+        IdXMLFile().load(path, prot, pep)
+    return prot, pep
+
+
+def _strip_custom_variable_mods(prot):
+    """Remove non-UNIMOD custom modifications (PhosphoDecoy) from each protein's
+    SearchParameters.variable_modifications so MzIdentMLFile().store() does not
+    reject them ('Invalid CV identifier!'). The modification on the hits is kept."""
+    for p in prot:
+        sp = p.getSearchParameters()
+        kept = [m for m in sp.variable_modifications
+                if b"PhosphoDecoy" not in (m if isinstance(m, bytes) else m.encode())]
+        sp.variable_modifications = kept
+        p.setSearchParameters(sp)
+
+
+def store_identifications(path: str, prot, pep) -> None:
+    """Store idXML or mzIdentML by extension. For mzid, strip custom variable mods first."""
+    if is_mzid(path):
+        _strip_custom_variable_mods(prot)
+        MzIdentMLFile().store(path, prot, pep)
+    else:
+        IdXMLFile().store(path, prot, pep)
+
+
+def has_alanine(pep) -> bool:
+    """True if any peptide hit's unmodified sequence contains an 'A' residue."""
+    for pid in pep:
         for hit in pid.getHits():
             if "A" in hit.getSequence().toUnmodifiedString():
                 return True
     return False
-
-
-def mzid_to_idxml(mzid_path: str, idxml_path: str) -> LoadInfo:
-    prot, pep = [], PeptideIdentificationList()
-    MzIdentMLFile().load(mzid_path, prot, pep)
-    IdXMLFile().store(idxml_path, prot, pep)
-    n = sum(len(pid.getHits()) for pid in pep)
-    return LoadInfo(n_psms=n, has_ala=_has_alanine(pep))
-
-
-def idxml_to_mzid(idxml_path: str, mzid_path: str) -> None:
-    prot, pep = [], PeptideIdentificationList()
-    IdXMLFile().load(idxml_path, prot, pep)
-    MzIdentMLFile().store(mzid_path, prot, pep)
