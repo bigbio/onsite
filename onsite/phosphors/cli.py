@@ -15,6 +15,7 @@ from .phosphors import (
     calculate_phospho_localization_compomics_style,
     site_deltas_from_isomers,
 )
+from onsite.mzid_adapter import load_identifications as _load_identifications, store_identifications as _store_identifications
 
 
 @click.command()
@@ -333,9 +334,7 @@ def load_spectra(mzml_file):
 def load_identifications(idxml_file):
     """Load identification results with metadata validation"""
     print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
-    protein_ids = []
-    peptide_ids = PeptideIdentificationList()
-    IdXMLFile().load(idxml_file, protein_ids, peptide_ids)
+    protein_ids, peptide_ids = _load_identifications(idxml_file)
     print(f"Loaded {len(peptide_ids)} peptide identifications")
     return protein_ids, peptide_ids
 
@@ -373,7 +372,7 @@ def save_identifications(out_file, protein_ids, peptide_ids):
                     hit.setMetaValue(
                         "SpecEValue_score", float(hit.getMetaValue("MS:1002052"))
                     )
-        IdXMLFile().store(out_file, protein_ids, peptide_ids)
+        _store_identifications(out_file, protein_ids, peptide_ids)
         print(f"Successfully saved {len(peptide_ids)} identifications to {out_file}")
     except Exception as e:
         print(f"Error saving results: {str(e)}")

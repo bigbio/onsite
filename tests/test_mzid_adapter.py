@@ -92,6 +92,28 @@ def test_validate_spectrum_refs_raises_on_mismatch(tmp_path):
 
 
 @pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
+def test_ascore_accepts_mzid_in_and_out(tmp_path):
+    from onsite.mzid_adapter import load_identifications, store_identifications
+    from pyopenms import PeptideIdentificationList
+    from click.testing import CliRunner
+    from onsite.ascore.cli import ascore
+    # build a small mzid input from a few PSMs of the committed idXML
+    prot, pep = load_identifications(str(IDXML))
+    small = PeptideIdentificationList()
+    for i in range(min(5, pep.size())):
+        small.push_back(pep.at(i))
+    in_mzid = str(tmp_path / "in.mzid"); store_identifications(in_mzid, prot, small)
+    out_mzid = str(tmp_path / "out.mzid")
+    res = CliRunner().invoke(ascore, ["-in", str(MZML), "-id", in_mzid,
+                                      "-out", out_mzid, "--threads", "1"],
+                             catch_exceptions=False)
+    assert res.exit_code == 0
+    assert os.path.exists(out_mzid)
+    _, outpep = load_identifications(out_mzid)
+    assert _has_score(outpep, "AScore_site_scores")
+
+
+@pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
 def test_run_all_localizers_writes_three_scores(tmp_path):
     from onsite.onsitec import run_all_localizers
     from pyopenms import IdXMLFile

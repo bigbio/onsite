@@ -12,6 +12,7 @@ import click
 from pyopenms import *
 
 from .ascore import AScore
+from onsite.mzid_adapter import load_identifications as _load_identifications, store_identifications as _store_identifications
 
 
 @click.command()
@@ -347,9 +348,7 @@ def load_spectra(mzml_file):
 def load_identifications(idxml_file):
     """Load identification results"""
     print(f"[{time.strftime('%H:%M:%S')}] Loading identifications from {idxml_file}")
-    protein_ids = []
-    peptide_ids = PeptideIdentificationList()
-    IdXMLFile().load(idxml_file, protein_ids, peptide_ids)
+    protein_ids, peptide_ids = _load_identifications(idxml_file)
     print(f"Loaded {len(peptide_ids)} peptide identifications")
     return protein_ids, peptide_ids
 
@@ -380,7 +379,7 @@ def save_identifications(out_file, protein_ids, peptide_ids):
                     hit.setMetaValue("AScore_pep_score", hit.getScore())
 
         # Write with XML format validation
-        IdXMLFile().store(out_file, protein_ids, peptide_ids)
+        _store_identifications(out_file, protein_ids, peptide_ids)
         print(f"Successfully saved {len(peptide_ids)} identifications to {out_file}")
     except Exception as e:
         print(f"Critical error saving results: {str(e)}")

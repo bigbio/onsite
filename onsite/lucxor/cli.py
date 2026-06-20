@@ -28,6 +28,7 @@ from .psm import PSM
 from .peptide import Peptide
 from .models import CIDModel, HCDModel
 from .constants import NTERM_MOD, CTERM_MOD, AA_MASSES, DEFAULT_CONFIG
+from onsite.mzid_adapter import load_identifications as _load_identifications, store_identifications as _store_identifications
 from .spectrum import Spectrum
 from .flr import FLRCalculator
 from .parallel import parallel_psm_processing, get_optimal_thread_count
@@ -527,9 +528,7 @@ class PyLuciPHOr2:
     ) -> Tuple[PeptideIdentificationList, List[ProteinIdentification], MSExperiment]:
         """Load input files"""
         # Load identifications
-        pep_ids = PeptideIdentificationList()
-        prot_ids = []
-        IdXMLFile().load(input_id, prot_ids, pep_ids)
+        prot_ids, pep_ids = _load_identifications(input_id)
 
         if not pep_ids:
             self.logger.warning("No peptide identifications found in input file")
@@ -992,7 +991,7 @@ class PyLuciPHOr2:
                     pass
 
         # 7. Save results
-        IdXMLFile().store(output, prot_ids, new_pep_ids)
+        _store_identifications(output, prot_ids, new_pep_ids)
         self.logger.info(f"Results saved to: {output}")
 
         # 8. Processing completed - print run summary similar to Ascore
