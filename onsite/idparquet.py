@@ -397,13 +397,26 @@ def save_psms_from_scratch(
     # Enforce dtypes — for integer columns, fill NaN with -1 sentinel BEFORE
     # casting so that float64 columns containing NaN do not silently stay
     # float64 (which would produce a schema-mismatched parquet).
-    # Float/bool/object columns keep the original silent-pass behaviour.
+    # For bool columns, fill NaN with False BEFORE casting (astype(bool) turns
+    # NaN into True, which is incorrect). Float/object columns keep the original
+    # silent-pass behaviour.
     _int32_dtype_cols = _int32_cols  # same set defined above
+    _bool_dtype_cols = _bool_cols    # same set defined above
     for col, dtype in _PSM_DTYPE_MAP.items():
         if col not in df.columns:
             continue
         if col in _int32_dtype_cols:
             df[col] = df[col].fillna(-1).astype(dtype)
+        elif col in _bool_dtype_cols:
+            # NaN in bool columns must become False (astype(bool) turns NaN
+            # into True). Replace NaN explicitly before casting to avoid both
+            # wrong values and pandas FutureWarning about object-dtype downcasting.
+            import pandas as _pd
+            series = df[col]
+            # Map: True-ish → True, NaN/None → False, everything else → bool
+            df[col] = series.map(
+                lambda v: False if (v is None or _pd.isna(v)) else bool(v)
+            ).astype(dtype)
         else:
             try:
                 df[col] = df[col].astype(dtype)

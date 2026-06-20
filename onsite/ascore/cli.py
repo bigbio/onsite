@@ -112,11 +112,11 @@ def ascore(
         )
 
     try:
-        exp = load_spectra(in_file)
-        psms_df, proteins_df, _, _ = load_identifications(id_file)
-
         log_file = f"{out_file}.debug.log"
         logger = log_debug(log_file, debug)
+
+        exp = load_spectra(in_file)
+        psms_df, proteins_df, _, _ = load_identifications(id_file)
         if debug:
             logger.info("PhosphoScoring Debug Log")
             logger.info(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

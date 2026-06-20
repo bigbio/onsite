@@ -125,7 +125,14 @@ def save_identifications(
         The output path (idParquet returns the directory path).
     """
     path = str(path)
-    fmt = detect_format(path)
+    try:
+        fmt = detect_format(path)
+    except ValueError:
+        # For extensionless paths (e.g. "-out results"), treat as idparquet
+        if os.path.splitext(path)[1] == "":
+            fmt = "idparquet"
+        else:
+            raise
 
     if fmt == "idparquet":
         if source_idparquet is not None and (
@@ -312,26 +319,15 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
             # mzIdentML round-trip can rename the score_type (e.g. to
             # "PSM-level search engine specific statistic") and move the
             # original score value into a named meta value. When hit.getScore()
-            # is 0.0, try to recover the score from:
-            #  1. A metavalue whose name matches score_type (idXML round-trip)
-            #  2. Any numeric metavalue that is not a known non-score field
+            # is 0.0, try to recover the score ONLY from a metavalue whose
+            # name exactly matches score_type. A legitimate 0.0 score must
+            # not be overwritten by unrelated numeric metavalues (e.g. counts).
             if score == 0.0:
                 if score_type in meta_by_name:
                     try:
                         score = float(meta_by_name[score_type])
                     except (ValueError, TypeError):
                         pass
-                if score == 0.0:
-                    for _k, _v in meta_by_name.items():
-                        if _k in _NON_SCORE_KEYS:
-                            continue
-                        try:
-                            candidate = float(_v)
-                        except (ValueError, TypeError):
-                            continue
-                        if candidate != 0.0:
-                            score = candidate
-                            break
 
             # modifications: populated from the peptidoform
             modifications = peptidoform_to_modifications(peptidoform)
@@ -479,7 +475,64 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
             hit.setCharge(int(charge) if not pd.isna(charge) else 0)
 
             score_val = row.get("score", 0.0)
-            hit.setScore(float(score_val) if not pd.isna(score_val) else 0.0)
+            final_score = float(score_val) if not pd.isna(score_val) else 0.0
+            hit.setScore(final_score)
+
+            # Persist the score under the score_type name as a metavalue so
+            # that the score-recovery path (score_type in meta_by_name) can
+            # find it after an mzIdentML round-trip, where the score_type is
+            # renamed by pyOpenMS to "PSM-level search engine specific statistic"
+            # and the original score is stored under the original score_type name.
+            if score_type and score_type not in ("", "score"):
+                hit.setMetaValue(score_type, final_score)
+
+            # Restore is_decoy as target_decoy metavalue (only if not already
+            # present in psm_metavalues, to avoid duplicate entries)
+            is_decoy_val = row.get("is_decoy", None)
+            if is_decoy_val is not None and not pd.isna(is_decoy_val):
+                td_str = "decoy" if bool(is_decoy_val) else "target"
+                hit.setMetaValue("target_decoy", td_str)
+
+            # Restore protein_accessions as PeptideEvidence objects.
+            # protein_accessions is stored as a numpy object array of dicts:
+            #   {'accession': str, 'aa_before': str, 'aa_after': str,
+            #    'start': int, 'end': int}
+            pa_val = row.get("protein_accessions", None)
+            if pa_val is not None:
+                if isinstance(pa_val, np.ndarray):
+                    pa_iter = pa_val.tolist()
+                elif isinstance(pa_val, list):
+                    pa_iter = pa_val
+                else:
+                    pa_iter = []
+                evidences = []
+                for entry in pa_iter:
+                    if isinstance(entry, dict):
+                        ev = oms.PeptideEvidence()
+                        acc = entry.get("accession", "")
+                        if acc:
+                            ev.setProteinAccession(str(acc))
+                        aa_before = entry.get("aa_before", "")
+                        aa_after = entry.get("aa_after", "")
+                        if aa_before:
+                            ev.setAABefore(aa_before.encode() if isinstance(aa_before, str) else aa_before)
+                        if aa_after:
+                            ev.setAAAfter(aa_after.encode() if isinstance(aa_after, str) else aa_after)
+                        start = entry.get("start", -1)
+                        end = entry.get("end", -1)
+                        try:
+                            ev.setStart(int(start))
+                            ev.setEnd(int(end))
+                        except (ValueError, TypeError):
+                            pass
+                        evidences.append(ev)
+                    elif isinstance(entry, str):
+                        # Fallback: plain accession string
+                        ev = oms.PeptideEvidence()
+                        ev.setProteinAccession(entry)
+                        evidences.append(ev)
+                if evidences:
+                    hit.setPeptideEvidences(evidences)
 
             # Set metavalues
             mv = row.get("psm_metavalues", None)
@@ -558,13 +611,41 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
     sp.variable_modifications = vmods
     pi.setSearchParameters(sp)
 
-    # Add protein hits if proteins_df provided
+    # Collect protein accessions from proteins_df AND from protein_accessions
+    # column in psms_df (populated on load from PeptideEvidence objects).
+    # idXML requires every accession referenced in PeptideEvidence to be
+    # registered as a ProteinHit in the ProteinIdentification.
+    seen_accs: set = set()
     prot_hits = []
     if proteins_df is not None and "accession" in proteins_df.columns:
         for acc in proteins_df["accession"].dropna():
-            ph = oms.ProteinHit()
-            ph.setAccession(str(acc))
-            prot_hits.append(ph)
+            acc_str = str(acc)
+            if acc_str not in seen_accs:
+                ph = oms.ProteinHit()
+                ph.setAccession(acc_str)
+                prot_hits.append(ph)
+                seen_accs.add(acc_str)
+    # Also register any accession found in psm_metavalues / protein_accessions
+    if "protein_accessions" in psms_df.columns:
+        for pa_val in psms_df["protein_accessions"].dropna():
+            if isinstance(pa_val, np.ndarray):
+                pa_iter = pa_val.tolist()
+            elif isinstance(pa_val, list):
+                pa_iter = pa_val
+            else:
+                continue
+            for entry in pa_iter:
+                if isinstance(entry, dict):
+                    acc_str = str(entry.get("accession", ""))
+                elif isinstance(entry, str):
+                    acc_str = entry
+                else:
+                    continue
+                if acc_str and acc_str not in seen_accs:
+                    ph = oms.ProteinHit()
+                    ph.setAccession(acc_str)
+                    prot_hits.append(ph)
+                    seen_accs.add(acc_str)
     pi.setHits(prot_hits)
 
     prot = [pi]
