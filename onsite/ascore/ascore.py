@@ -138,13 +138,18 @@ class AScore:
         if not real_spectrum.isSorted():
             real_spectrum.sortByPosition()
         windows_top10 = self.peakPickingPerWindowsInSpectrum_(real_spectrum)
+        # Precompute, once per PSM, for each 100-Da window the m/z arrays of its
+        # top-i peaks (i=1..10) sorted ascending by m/z. This replaces the
+        # per-call MSSpectrum copy+truncate+sort that numberOfMatchedIons_ used
+        # to do (10x per window). See windowDepthMZArrays_.
+        windows_depth_mz = [self.windowDepthMZArrays_(w) for w in windows_top10]
 
         self.base_match_probability_ = self.computeBaseProbability_(
             real_spectrum[real_spectrum.size() - 1].getMZ()
         )
 
         peptide_site_scores = self.calculatePermutationPeptideScores_(
-            th_spectra, windows_top10
+            th_spectra, windows_depth_mz
         )
 
         ranking = self.rankWeightedPermutationPeptideScores_(peptide_site_scores)
@@ -199,22 +204,22 @@ class AScore:
                     N = site_determining_ions[0].size()
                     p = float(phospho_site["peak_depth"]) * self.base_match_probability_
 
+                    depth = phospho_site["peak_depth"]
+                    th_first_mz = self.spectrumMZArray_(site_determining_ions[0])
+                    th_second_mz = self.spectrumMZArray_(site_determining_ions[1])
+
                     n_first = 0
-                    for window_idx in range(len(windows_top10)):
-                        n_first += self.numberOfMatchedIons_(
-                            site_determining_ions[0],
-                            windows_top10[window_idx],
-                            phospho_site["peak_depth"],
+                    for window_depth_mz in windows_depth_mz:
+                        n_first += self.countMatchedMZ_(
+                            th_first_mz, window_depth_mz, depth
                         )
 
                     P_first = self.computeCumulativeScore_(N, n_first, p)
 
                     n_second = 0
-                    for window_idx in range(len(windows_top10)):
-                        n_second += self.numberOfMatchedIons_(
-                            site_determining_ions[1],
-                            windows_top10[window_idx],
-                            phospho_site["peak_depth"],
+                    for window_depth_mz in windows_depth_mz:
+                        n_second += self.countMatchedMZ_(
+                            th_second_mz, window_depth_mz, depth
                         )
 
                     N2 = site_determining_ions[1].size()
@@ -409,39 +414,78 @@ class AScore:
             result.push_back(spectrum1[i])
             i += 1
 
-    def numberOfMatchedIons_(self, th, window, depth):
-        """Count matched ions between theoretical and experimental spectra."""
-        window_reduced = MSSpectrum(window)
-        if window_reduced.size() > depth:
-            temp = MSSpectrum()
-            for i in range(depth):
-                if i < window_reduced.size():
-                    temp.push_back(window_reduced[i])
-            window_reduced = temp
+    def spectrumMZArray_(self, spectrum):
+        """Extract a spectrum's peak m/z values as a plain float64 numpy array.
 
-        window_reduced.sortByPosition()
+        The spectrum is assumed already sorted ascending by m/z (theoretical
+        spectra from the generator and the site-determining ion spectra are
+        sorted by position before use). One get_peaks() call replaces all the
+        per-peak getMZ() binding calls that numberOfMatchedIons_ used to do.
+        """
+        mz, _ = spectrum.get_peaks()
+        return np.asarray(mz, dtype=np.float64)
+
+    def windowDepthMZArrays_(self, window):
+        """Precompute the top-i peak m/z arrays (i=1..10) for one window.
+
+        `window` is an MSSpectrum already ordered by intensity descending
+        (peakPickingPerWindowsInSpectrum_ calls sortByIntensity(True)). For each
+        depth i, the reduced window is the top-i peaks; we sort those by m/z
+        ascending once. Returns a list indexed [i-1] -> sorted float64 m/z array
+        of the top-i peaks. This reproduces, exactly, the per-call
+        copy/truncate-to-depth/sortByPosition that numberOfMatchedIons_ did 10x.
+        """
+        mz, _ = window.get_peaks()
+        mz = np.asarray(mz, dtype=np.float64)
+        size = mz.shape[0]
+        depth_arrays = []
+        for i in range(1, 11):
+            k = i if size > i else size
+            top = np.sort(mz[:k])
+            depth_arrays.append(top)
+        return depth_arrays
+
+    def countMatchedMZ_(self, th_mz, window_depth_mz, depth):
+        """Count matched ions between theoretical and reduced-window m/z arrays.
+
+        `th_mz` is the theoretical spectrum's ascending m/z array.
+        `window_depth_mz` is the precomputed list (windowDepthMZArrays_) of
+        top-i m/z arrays; the reduced window for this call is window_depth_mz at
+        index min(depth, 10)-1 (depth is always 1..10 here). Reproduces the
+        exact two-pointer semantics of the former numberOfMatchedIons_: a match
+        (|th - window| <= tolerance) consumes both pointers; otherwise the
+        smaller m/z advances.
+        """
+        idx = depth - 1
+        if idx >= len(window_depth_mz):
+            idx = len(window_depth_mz) - 1
+        window_mz = window_depth_mz[idx]
+
+        n_th = th_mz.shape[0]
+        n_win = window_mz.shape[0]
 
         matched_peaks = 0
         th_idx = 0
         window_idx = 0
 
-        while th_idx < th.size() and window_idx < window_reduced.size():
-            th_mz = th[th_idx].getMZ()
-            window_mz = window_reduced[window_idx].getMZ()
+        ppm = self.fragment_tolerance_ppm_
+        base_tol = self.fragment_mass_tolerance_
 
-            tolerance = self.fragment_mass_tolerance_
-            if self.fragment_tolerance_ppm_:
-                avg_mass = (th_mz + window_mz) / 2.0
-                tolerance = tolerance * avg_mass / 1.0e6
+        while th_idx < n_th and window_idx < n_win:
+            t = th_mz[th_idx]
+            w = window_mz[window_idx]
 
-            error = abs(th_mz - window_mz)
+            tolerance = base_tol
+            if ppm:
+                tolerance = base_tol * ((t + w) / 2.0) / 1.0e6
+
+            error = abs(t - w)
 
             if error <= tolerance:
                 matched_peaks += 1
                 th_idx += 1
                 window_idx += 1
-
-            elif th_mz < window_mz:
+            elif t < w:
                 th_idx += 1
             else:
                 window_idx += 1
@@ -711,19 +755,25 @@ class AScore:
 
         return windows_top10
 
-    def calculatePermutationPeptideScores_(self, th_spectra, windows_top10):
-        """Calculate scores for each permutation at different peak depths."""
+    def calculatePermutationPeptideScores_(self, th_spectra, windows_depth_mz):
+        """Calculate scores for each permutation at different peak depths.
+
+        windows_depth_mz is a list (one per 100-Da window) of precomputed
+        top-i m/z arrays (see windowDepthMZArrays_), so the inner matching no
+        longer rebuilds/sorts MSSpectrum objects per depth.
+        """
         permutation_peptide_scores = []
         for _ in range(len(th_spectra)):
             permutation_peptide_scores.append([0.0] * 10)
 
         for idx, spectrum in enumerate(th_spectra):
             N = spectrum.size()
+            th_mz = self.spectrumMZArray_(spectrum)
 
             for i in range(1, 11):
                 n = 0
-                for window in windows_top10:
-                    n += self.numberOfMatchedIons_(spectrum, window, i)
+                for window_depth_mz in windows_depth_mz:
+                    n += self.countMatchedMZ_(th_mz, window_depth_mz, i)
 
                 p = float(i) * self.base_match_probability_
                 cumulative_score = self.computeCumulativeScore_(N, n, p)

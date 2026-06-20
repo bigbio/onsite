@@ -651,6 +651,87 @@ class PSM:
                 logger.debug(f"No charge model found for charge {self.charge}")
                 return
 
+            # ─────────────────────────────────────────────────────────────
+            # Hoist the per-charge density evaluator out of the hot per-peak
+            # loop. The charge is constant within this PSM, so re-fetching
+            # the charge model (model.get_charge_model) on every peak is pure
+            # overhead. We bind the correct density callables ONCE here.
+            #
+            # IMPORTANT: the CID and HCD models compute densities differently:
+            #   * CID (CIDModel) uses a parametric Gaussian on the charge
+            #     model's (mu, var) moment attributes.
+            #   * HCD (HCDModel) uses a NON-parametric kernel-density lookup
+            #     table (tick marks + interpolation) implemented as instance
+            #     methods on ModelData_HCD.
+            # We must dispatch on the model type, otherwise the HCD path is
+            # silently wrong (Gaussian applied to a non-parametric model).
+            #
+            # For HCD we call the charge model's own (already-correct) methods
+            # directly, which is exactly the original code path but with the
+            # per-peak get_charge_model lookup removed. For CID we inline the
+            # Gaussian using hoisted constants.
+            # ─────────────────────────────────────────────────────────────
+            _is_hcd = hasattr(charge_model, "get_log_np_density_int")
+
+            if _is_hcd:
+                # Bind the model's own non-parametric density methods once.
+                _cm_int = charge_model.get_log_np_density_int
+                _cm_dist = charge_model.get_log_np_density_dist_pos
+
+                def _intensity_density(ion_type, x):
+                    return _cm_int(ion_type, x)
+
+                def _distance_density(x):
+                    return _cm_dist(x)
+            else:
+                # CID: hoist the parametric Gaussian constants per ion class.
+                _TWO_PI = 2.0 * np.pi
+
+                _mu_u = charge_model.mu_int_u
+                _var_u = charge_model.var_int_u
+                _u_valid = _var_u > 0
+                _u_const = -0.5 * np.log(_TWO_PI * _var_u) if _u_valid else 0.0
+
+                _mu_b = charge_model.mu_int_b
+                _var_b = charge_model.var_int_b
+                _b_valid = _var_b > 0
+                _b_const = -0.5 * np.log(_TWO_PI * _var_b) if _b_valid else 0.0
+
+                _mu_y = charge_model.mu_int_y
+                _var_y = charge_model.var_int_y
+                _y_valid = _var_y > 0
+                _y_const = -0.5 * np.log(_TWO_PI * _var_y) if _y_valid else 0.0
+
+                # Distance (m/z accuracy), mu == 0.0
+                _var_dist = charge_model.var_dist_b
+                _dist_valid = _var_dist > 0
+                _dist_const = (
+                    -0.5 * np.log(_TWO_PI * _var_dist) if _dist_valid else 0.0
+                )
+
+                def _intensity_density(ion_type, x):
+                    if ion_type == "b":
+                        if not _b_valid:
+                            return float("-inf")
+                        _d = x - _mu_b
+                        return _b_const - 0.5 * (_d * _d) / _var_b
+                    elif ion_type == "y":
+                        if not _y_valid:
+                            return float("-inf")
+                        _d = x - _mu_y
+                        return _y_const - 0.5 * (_d * _d) / _var_y
+                    elif ion_type == "n":
+                        if not _u_valid:
+                            return float("-inf")
+                        _d = x - _mu_u
+                        return _u_const - 0.5 * (_d * _d) / _var_u
+                    return float("-inf")
+
+                def _distance_density(x):
+                    if not _dist_valid:
+                        return float("-inf")
+                    return _dist_const - 0.5 * (x * x) / _var_dist
+
             # Get spectrum data once
             mz_values, intensities = self.spectrum.get_peaks()
             if len(mz_values) == 0:
@@ -829,16 +910,15 @@ class PSM:
                     ion_type = ion_types[ion_idx]
                     peak_norm_intensity = norm_intensity[orig_idx]
 
-                    # Intensity score
-                    intensity_m = model.get_log_np_density_int(
-                        ion_type, peak_norm_intensity, self.charge
-                    )
-                    intensity_u = model.get_log_np_density_int(
-                        "n", peak_norm_intensity, self.charge
-                    )
+                    # Intensity score (matched ion: b or y), via the hoisted
+                    # per-charge density evaluator (CID Gaussian / HCD NP).
+                    intensity_m = _intensity_density(ion_type, peak_norm_intensity)
 
-                    # Distance score
-                    dist_m = model.get_log_np_density_dist_pos(mass_diff, self.charge)
+                    # Unmatched/noise intensity score (ion_type "n")
+                    intensity_u = _intensity_density("n", peak_norm_intensity)
+
+                    # Distance score (dist_u == 0.0)
+                    dist_m = _distance_density(mass_diff)
                     dist_u = 0.0
 
                     # Calculate score
