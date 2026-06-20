@@ -139,6 +139,8 @@ def save_identifications(
                 source_idparquet=source_idparquet,
             )
         else:
+            # TODO(phase3): forward template_df to save_psms_from_scratch once the
+            # parameter wiring (search_params.parquet population) is implemented.
             from onsite.idparquet import save_psms_from_scratch
             return save_psms_from_scratch(path, psms_df, proteins_df)
 
@@ -421,14 +423,14 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
     for pid_idx, group in psms_df.groupby(group_col, sort=True):
         first = group.iloc[0]
 
-        # score_type
+        # score_type — use pd.isna() to catch None, NaN, and pd.NA
         score_type = first.get("score_type", None)
-        if score_type is None or (isinstance(score_type, float) and np.isnan(score_type)):
+        if pd.isna(score_type):
             score_type = "score"
 
-        # higher_score_better
+        # higher_score_better — use pd.isna() to catch None, NaN, and pd.NA
         hsb_val = first.get("higher_score_better", False)
-        if hsb_val is None or (isinstance(hsb_val, float) and np.isnan(hsb_val)):
+        if pd.isna(hsb_val):
             hsb_val = False
         higher_score_better = bool(hsb_val)
 
@@ -438,11 +440,12 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
         pid.setIdentifier("run1")
 
         rt_val = first.get("rt", float("nan"))
-        if rt_val is not None and isinstance(rt_val, (int, float)) and np.isfinite(rt_val):
+        # Guard against None, NaN, pd.NA, and non-finite values
+        if not pd.isna(rt_val) and np.isfinite(float(rt_val)):
             pid.setRT(float(rt_val))
 
         mz_val = first.get("observed_mz", float("nan"))
-        if mz_val is not None and isinstance(mz_val, (int, float)) and np.isfinite(mz_val):
+        if not pd.isna(mz_val) and np.isfinite(float(mz_val)):
             pid.setMZ(float(mz_val))
 
         spec_ref = first.get("spectrum_reference", None)
@@ -472,10 +475,11 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
             hit.setSequence(seq)
 
             charge = row.get("precursor_charge", 0)
-            hit.setCharge(int(charge) if charge is not None else 0)
+            # Guard against None and pd.NA (pd.isna covers all NA sentinels)
+            hit.setCharge(int(charge) if not pd.isna(charge) else 0)
 
             score_val = row.get("score", 0.0)
-            hit.setScore(float(score_val) if score_val is not None else 0.0)
+            hit.setScore(float(score_val) if not pd.isna(score_val) else 0.0)
 
             # Set metavalues
             mv = row.get("psm_metavalues", None)

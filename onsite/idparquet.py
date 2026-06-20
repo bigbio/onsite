@@ -321,6 +321,8 @@ def _copy_or_create_parquet(name: str, out_dir: str,
         return
 
     if name == "search_params":
+        # TODO(phase3): populate from real search parameters (engine, enzyme, mods,
+        # etc.) once the template_df / SearchParameters wiring is implemented.
         row = {
             "run_identifier": run_identifier or "",
             "search_engine": "", "search_engine_version": "",
@@ -392,9 +394,17 @@ def save_psms_from_scratch(
             else:
                 df[col] = None
 
-    # Enforce dtypes
+    # Enforce dtypes — for integer columns, fill NaN with -1 sentinel BEFORE
+    # casting so that float64 columns containing NaN do not silently stay
+    # float64 (which would produce a schema-mismatched parquet).
+    # Float/bool/object columns keep the original silent-pass behaviour.
+    _int32_dtype_cols = _int32_cols  # same set defined above
     for col, dtype in _PSM_DTYPE_MAP.items():
-        if col in df.columns:
+        if col not in df.columns:
+            continue
+        if col in _int32_dtype_cols:
+            df[col] = df[col].fillna(-1).astype(dtype)
+        else:
             try:
                 df[col] = df[col].astype(dtype)
             except (ValueError, TypeError):

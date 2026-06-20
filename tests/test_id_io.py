@@ -673,46 +673,107 @@ class TestSaveLoadMzidRoundtrip:
         assert "UNIMOD:21" in pf0_rt
 
     def test_phosphodecoy_does_not_raise(self, tmp_path):
-        """A PhosphoDecoy peptidoform must NOT cause MzIdentMLFile.store to raise."""
+        """A PhosphoDecoy peptidoform must NOT cause MzIdentMLFile.store to raise.
+
+        Uses a REAL PhosphoDecoy-on-Alanine peptidoform built from pyOpenMS:
+          AASequence.fromString("ALS(Phospho)A(PhosphoDecoy)K") ->
+          pyopenms_to_unimod_notation -> "ALS[UNIMOD:21]A[UNIMOD:99913]K"
+
+        The PhosphoDecoy mod (UNIMOD:99913) is stripped from SearchParameters
+        variable_modifications before mzIdentML export (it is not a standard
+        UNIMOD mod recognised by all readers), but the hit AASequence preserves
+        PhosphoDecoy. On reload, pyopenms_to_unimod_notation maps it back to
+        UNIMOD:99913, and unimod_to_pyopenms_notation converts that back to
+        "PhosphoDecoy". The strip of variable_modifications is therefore a
+        REACHABLE documented guard — the hit survives, the SearchParams entry
+        is omitted.
+        """
         from onsite.id_io import save_identifications
+        from onsite.idparquet import pyopenms_to_unimod_notation, unimod_to_pyopenms_notation
         import pyopenms as oms
 
-        pi = oms.ProteinIdentification()
-        pi.setIdentifier("run1")
-        pi.setScoreType("Percolator_qvalue")
-        pi.setHigherScoreBetter(False)
-        prot = [pi]
+        # Build the canonical PhosphoDecoy peptidoform the same way production
+        # code would: fromString -> toString -> pyopenms_to_unimod_notation.
+        seq_obj = oms.AASequence.fromString("ALS(Phospho)A(PhosphoDecoy)K")
+        phosphodecoy_pf = pyopenms_to_unimod_notation(seq_obj.toString())
+        # Sanity: must contain both Phospho (UNIMOD:21) and PhosphoDecoy (UNIMOD:99913)
+        assert "UNIMOD:21" in phosphodecoy_pf, f"Expected UNIMOD:21 in {phosphodecoy_pf!r}"
+        assert "UNIMOD:99913" in phosphodecoy_pf, f"Expected UNIMOD:99913 in {phosphodecoy_pf!r}"
 
-        pep_list = oms.PeptideIdentificationList()
-        pid = oms.PeptideIdentification()
-        pid.setScoreType("Percolator_qvalue")
-        pid.setHigherScoreBetter(False)
-        pid.setRT(100.0)
-        pid.setMZ(500.0)
-        pid.setIdentifier("run1")
-        pid.setMetaValue("spectrum_reference", "scan=1")
-
-        # PhosphoDecoy peptidoform — uses a custom (non-UNIMOD) mod
-        hit = oms.PeptideHit()
-        hit.setSequence(oms.AASequence.fromString("S(Phospho)PEK"))
-        hit.setCharge(2)
-        hit.setScore(0.01)
-        pid.setHits([hit])
-        pep_list.push_back(pid)
-
-        # Build psms_df with a PhosphoDecoy peptidoform entry
+        prot, pep_list = _build_pep_list()
         path_in = str(tmp_path / "source.idXML")
         oms.IdXMLFile().store(path_in, prot, pep_list)
         psms_df, *_ = load_identifications(path_in)
-        # Inject a PhosphoDecoy peptidoform (simulate it)
+
+        # Replace first row's peptidoform with the real PhosphoDecoy peptidoform
         psms_df = psms_df.copy()
-        psms_df.at[psms_df.index[0], "peptidoform"] = "S[UNIMOD:21]PEK"  # normal phospho, not decoy
+        psms_df.at[psms_df.index[0], "peptidoform"] = phosphodecoy_pf
 
         path_out = str(tmp_path / "out.mzid")
-        # Must not raise
+        # Must not raise even with PhosphoDecoy (strip guard is active)
+        save_identifications(path_out, psms_df)
+
+        psms2, *_ = load_identifications(path_out)
+        assert len(psms2) >= 1, "Expected at least one PSM after round-trip"
+
+        # The reloaded peptidoform for the modified row must still carry
+        # PhosphoDecoy when converted back to pyOpenMS notation.
+        hit0_pf = psms2.loc[psms2["hit_index"] == 0, "peptidoform"].iloc[0]
+        hit0_pyo = unimod_to_pyopenms_notation(hit0_pf)
+        assert "PhosphoDecoy" in hit0_pyo, (
+            f"Expected PhosphoDecoy in pyOpenMS notation after round-trip, got {hit0_pyo!r}"
+        )
+
+    def test_mzid_score_preserved(self, tmp_path):
+        """Score values must be recoverable after mzid save→load (within 1e-6)."""
+        from onsite.id_io import save_identifications
+
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        path_out = str(tmp_path / "out.mzid")
         save_identifications(path_out, psms_df)
         psms2, *_ = load_identifications(path_out)
-        assert len(psms2) >= 1
+
+        scores_orig = sorted(psms_df["score"].tolist())
+        scores_rt = sorted(psms2["score"].tolist())
+        assert len(scores_orig) == len(scores_rt), "Row count must be equal"
+        for a, b in zip(scores_orig, scores_rt):
+            assert abs(a - b) < 1e-6, (
+                f"Score not preserved: original={a}, reloaded={b}"
+            )
+
+    def test_mzid_metavalue_survives(self, tmp_path):
+        """A psm_metavalue injected before save must appear in the reloaded row."""
+        from onsite.id_io import save_identifications
+
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        # Inject a string metavalue on the first hit row
+        mv0 = psms_df["psm_metavalues"].iloc[0]
+        new_entry = {"name": "AScore_site_scores", "value": "{1: 50.0}", "value_type": "string"}
+        existing_names = {m["name"] for m in mv0}
+        if "AScore_site_scores" not in existing_names:
+            psms_df.at[psms_df.index[0], "psm_metavalues"] = np.append(
+                mv0, np.array([new_entry], dtype=object)
+            )
+
+        path_out = str(tmp_path / "out.mzid")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+
+        mv_rt = psms2.loc[psms2["hit_index"] == 0, "psm_metavalues"].iloc[0]
+        names_rt = {m["name"] for m in mv_rt}
+        assert "AScore_site_scores" in names_rt, (
+            f"AScore_site_scores not found in reloaded metavalues: {names_rt}"
+        )
 
 
 class TestSaveIdparquetFromScratch:
@@ -730,3 +791,28 @@ class TestSaveIdparquetFromScratch:
         save_identifications(out, psms_df, proteins_df, source_idparquet=None)
         psms2, *_ = load_dataframes(out)
         assert len(psms2) == len(psms_df)
+
+    def test_from_scratch_peptidoform_preserved(self, tmp_path):
+        """Peptidoform column must survive the from-scratch idparquet round-trip."""
+        from onsite.idparquet import load_dataframes
+        from onsite.id_io import save_identifications
+        psms_df, proteins_df, _, _ = load_dataframes(_FIXTURE_IDPARQUET)
+        out = str(tmp_path / "out.idparquet")
+        save_identifications(out, psms_df, proteins_df, source_idparquet=None)
+        psms2, *_ = load_dataframes(out)
+        assert list(psms2["peptidoform"]) == list(psms_df["peptidoform"]), (
+            "peptidoform column must be identical after from-scratch save/load"
+        )
+
+    def test_from_scratch_int32_dtypes(self, tmp_path):
+        """Integer columns must be int32 after from-scratch idparquet save/load."""
+        from onsite.idparquet import load_dataframes
+        from onsite.id_io import save_identifications
+        psms_df, proteins_df, _, _ = load_dataframes(_FIXTURE_IDPARQUET)
+        out = str(tmp_path / "out.idparquet")
+        save_identifications(out, psms_df, proteins_df, source_idparquet=None)
+        psms2, *_ = load_dataframes(out)
+        for col in ("scan", "precursor_charge", "hit_index", "peptide_identification_index"):
+            assert psms2[col].dtype == np.int32, (
+                f"{col} must be int32 after from-scratch save, got {psms2[col].dtype}"
+            )
