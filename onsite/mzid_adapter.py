@@ -1,5 +1,5 @@
 """Format-agnostic identification I/O for the onsite localizer pipeline."""
-import os
+import re
 from dataclasses import dataclass
 from pyopenms import IdXMLFile, MzIdentMLFile, MSExperiment, FileHandler, PeptideIdentificationList
 
@@ -25,7 +25,8 @@ def load_identifications(path: str):
 def _strip_custom_variable_mods(prot):
     """Remove non-UNIMOD custom modifications (PhosphoDecoy) from each protein's
     SearchParameters.variable_modifications so MzIdentMLFile().store() does not
-    reject them ('Invalid CV identifier!'). The modification on the hits is kept."""
+    reject them ('Invalid CV identifier!'). The modification on the hits is kept.
+    Note: mutates the passed-in ``prot`` objects in place."""
     for p in prot:
         sp = p.getSearchParameters()
         kept = [m for m in sp.variable_modifications
@@ -52,6 +53,20 @@ def has_alanine(pep) -> bool:
     return False
 
 
+_SCAN_RE = re.compile(r"scan=(\d+)")
+
+
+def _extract_scan_number(ref: str):
+    """Extract the integer scan number from a spectrum reference string.
+
+    Handles both compact forms (``"scan=4886"``) and full mzML nativeID strings
+    (``"controllerType=0 controllerNumber=1 scan=4886"``).  Returns ``None``
+    when no ``scan=<int>`` token is present.
+    """
+    m = _SCAN_RE.search(ref)
+    return int(m.group(1)) if m else None
+
+
 class SpectrumRefError(RuntimeError):
     pass
 
@@ -65,14 +80,40 @@ class ValidationResult:
 
 def validate_spectrum_refs(pep, mzml_path: str, min_match_fraction: float = 0.5) -> ValidationResult:
     """Confirm PSM spectrum_reference values resolve to mzML spectrum native IDs.
-    Raise SpectrumRefError when references exist but mostly fail to resolve."""
+
+    Matching is scan-number-tolerant: a reference is considered resolved when
+    EITHER (a) it matches a native ID by exact string, OR (b) the integer scan
+    number embedded in the reference (``scan=N``) matches the scan number
+    embedded in any native ID.  This mirrors the behaviour of
+    ``extract_scan_number_from_reference`` / ``find_spectrum_by_scan`` in the
+    phosphors resolver, so a compact ref ``"scan=4886"`` correctly resolves
+    against a full mzML nativeID
+    ``"controllerType=0 controllerNumber=1 scan=4886"``.
+
+    Raises SpectrumRefError when references exist but mostly fail to resolve.
+    """
     exp = MSExperiment()
     FileHandler().loadExperiment(mzml_path, exp)
     native_ids = {s.getNativeID() for s in exp.getSpectra()}
+    # Build a set of integer scan numbers from native IDs once for efficiency.
+    native_scan_numbers = {
+        _extract_scan_number(nid)
+        for nid in native_ids
+        if _extract_scan_number(nid) is not None
+    }
     refs = [pid.getMetaValue("spectrum_reference")
             for pid in pep if pid.metaValueExists("spectrum_reference")]
     n_total = len(refs)
-    n_resolved = sum(1 for r in refs if r in native_ids)
+
+    def _resolves(ref: str) -> bool:
+        # (a) exact string match
+        if ref in native_ids:
+            return True
+        # (b) scan-number match
+        scan = _extract_scan_number(ref)
+        return scan is not None and scan in native_scan_numbers
+
+    n_resolved = sum(1 for r in refs if _resolves(r))
     ok = (n_total == 0) or (n_resolved / n_total >= min_match_fraction)
     if n_total > 0 and not ok:
         raise SpectrumRefError(

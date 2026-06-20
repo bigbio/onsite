@@ -15,7 +15,6 @@ from collections import defaultdict
 import numpy as np
 
 from pyopenms import (
-    IdXMLFile,
     MzMLFile,
     MSExperiment,
     PeptideIdentification,

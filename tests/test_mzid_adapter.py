@@ -91,6 +91,44 @@ def test_validate_spectrum_refs_raises_on_mismatch(tmp_path):
         validate_spectrum_refs(pep1, empty_mzml)
 
 
+def test_validate_spectrum_refs_scan_number_tolerant(tmp_path):
+    """A compact ref 'scan=1' must resolve against a full mzML nativeID
+    'controllerType=0 controllerNumber=1 scan=1' without raising."""
+    from onsite.mzid_adapter import validate_spectrum_refs, SpectrumRefError
+    from pyopenms import (
+        MSExperiment, MSSpectrum, FileHandler,
+        AASequence, PeptideHit, PeptideIdentification, PeptideIdentificationList,
+    )
+    import numpy as np
+
+    # Build a minimal mzML with one MS2 spectrum whose nativeID is the full mzML form.
+    s = MSSpectrum()
+    s.setNativeID("controllerType=0 controllerNumber=1 scan=1")
+    s.setMSLevel(2)
+    s.set_peaks(([100.0], [1000.0]))
+    exp = MSExperiment()
+    exp.addSpectrum(s)
+    mzml_path = str(tmp_path / "one_spectrum.mzML")
+    FileHandler().storeExperiment(mzml_path, exp)
+
+    # Build a PSM whose spectrum_reference uses the compact form.
+    hit = PeptideHit()
+    hit.setSequence(AASequence.fromString("AS(Phospho)K"))
+    hit.setScore(1.0)
+    hit.setCharge(2)
+    pid = PeptideIdentification()
+    pid.setHits([hit])
+    pid.setMetaValue("spectrum_reference", "scan=1")
+    pep = PeptideIdentificationList()
+    pep.push_back(pid)
+
+    # Must not raise and must report ok=True.
+    result = validate_spectrum_refs(pep, mzml_path)
+    assert result.ok is True
+    assert result.n_resolved == 1
+    assert result.n_total == 1
+
+
 @pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
 def test_ascore_accepts_mzid_in_and_out(tmp_path):
     from onsite.mzid_adapter import load_identifications, store_identifications
@@ -146,7 +184,7 @@ def test_all_id_mzid_out_mzid_has_three_scores(tmp_path):
 
 
 @pytest.mark.skipif(not MZML.exists(), reason="data/1.mzML not present")
-def test_add_decoys_falls_back_when_no_ala(tmp_path, monkeypatch):
+def test_add_decoys_falls_back_when_no_ala(tmp_path, monkeypatch, capsys):
     from onsite import mzid_adapter
     from onsite.onsitec import run_all_localizers
     monkeypatch.setattr(mzid_adapter, "has_alanine", lambda pep: False)
@@ -160,3 +198,10 @@ def test_add_decoys_falls_back_when_no_ala(tmp_path, monkeypatch):
     # should not raise and should complete in no-decoy mode
     run_all_localizers(str(MZML), in_idxml, out_idxml, threads=1, add_decoys=True)
     assert os.path.exists(out_idxml)
+    # Verify the fallback warning about no Alanine was emitted.  click.echo
+    # writes to sys.stdout which capsys captures.
+    captured = capsys.readouterr()
+    assert "--add-decoys" in captured.out and "no Alanine" in captured.out, (
+        "Expected fallback warning about '--add-decoys' / 'no Alanine' in stdout; "
+        f"got: {captured.out[:300]!r}"
+    )
