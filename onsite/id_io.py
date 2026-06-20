@@ -1,14 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Unified identification I/O — Phase 1: load side.
+Unified identification I/O — Phase 1 + Phase 2: load and save side.
 
 Provides:
     detect_format(path)          -> 'idparquet' | 'idxml' | 'mzid'
     load_identifications(path)   -> (psms_df, proteins_df, search_params_df, protein_groups_df)
+    save_identifications(path, psms_df, proteins_df, template_df, source_idparquet)
 
-Internal helper:
+Internal helpers:
     _peptide_ids_to_psms_df(prot, pep, source_path) -> pd.DataFrame
+    _psms_df_to_peptide_ids(psms_df, proteins_df)   -> (prot_list, PeptideIdentificationList)
 """
 
 import os
@@ -82,6 +84,82 @@ def load_identifications(
 
     if fmt == "mzid":
         return _load_mzid(path)
+
+    raise ValueError(f"Unsupported format: {fmt!r}")  # unreachable
+
+
+# ---------------------------------------------------------------------------
+# Public save entry-point
+# ---------------------------------------------------------------------------
+
+def save_identifications(
+    path: str,
+    psms_df: pd.DataFrame,
+    proteins_df=None,
+    template_df=None,
+    source_idparquet=None,
+) -> str:
+    """Save identifications to *path*, dispatching on file extension.
+
+    Parameters
+    ----------
+    path : str
+        Output path. Extension determines format:
+        ``.idparquet`` or directory → idParquet
+        ``.idxml`` → idXML
+        ``.mzid`` / ``.mzidentml`` → mzIdentML
+    psms_df : pd.DataFrame
+        PSMs DataFrame with the 29-column schema.
+    proteins_df : pd.DataFrame, optional
+        Proteins DataFrame.
+    template_df : pd.DataFrame, optional
+        Template DataFrame (idParquet only, forwarded to save_dataframes).
+    source_idparquet : str, optional
+        Path to source idParquet directory. When provided together with
+        idParquet output, ``save_dataframes`` is used (schema-copy mode).
+        Otherwise, ``save_psms_from_scratch`` is used.
+
+    Returns
+    -------
+    str
+        The output path (idParquet returns the directory path).
+    """
+    path = str(path)
+    fmt = detect_format(path)
+
+    if fmt == "idparquet":
+        if source_idparquet is not None and (
+            os.path.isdir(source_idparquet)
+            or str(source_idparquet).endswith(".idparquet")
+        ):
+            from onsite.idparquet import save_dataframes
+            return save_dataframes(
+                path, psms_df, proteins_df,
+                template_df=template_df,
+                source_idparquet=source_idparquet,
+            )
+        else:
+            from onsite.idparquet import save_psms_from_scratch
+            return save_psms_from_scratch(path, psms_df, proteins_df)
+
+    if fmt == "idxml":
+        prot, pep = _psms_df_to_peptide_ids(psms_df, proteins_df)
+        import pyopenms as oms
+        oms.IdXMLFile().store(str(path), prot, pep)
+        return path
+
+    if fmt == "mzid":
+        prot, pep = _psms_df_to_peptide_ids(psms_df, proteins_df)
+        # Strip non-UNIMOD / custom mods from SearchParameters to avoid mzid errors
+        import pyopenms as oms
+        for pi in prot:
+            sp = pi.getSearchParameters()
+            vmods = sp.variable_modifications
+            filtered = [m for m in vmods if b"PhosphoDecoy" not in m]
+            sp.variable_modifications = filtered
+            pi.setSearchParameters(sp)
+        oms.MzIdentMLFile().store(str(path), prot, pep)
+        return path
 
     raise ValueError(f"Unsupported format: {fmt!r}")  # unreachable
 
@@ -309,6 +387,184 @@ def _peptide_ids_to_psms_df(prot, pep, source_path: str) -> pd.DataFrame:
     df["ion_mobility"] = df["ion_mobility"].astype("float64")
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# _psms_df_to_peptide_ids  (Phase 2 — save side)
+# ---------------------------------------------------------------------------
+
+def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
+    """Convert a psms DataFrame to pyOpenMS PeptideIdentification objects.
+
+    Parameters
+    ----------
+    psms_df : pd.DataFrame
+        PSMs DataFrame with the 29-column schema.
+    proteins_df : pd.DataFrame, optional
+        Proteins DataFrame (accession column used if present).
+
+    Returns
+    -------
+    (prot_list, PeptideIdentificationList)
+    """
+    import pyopenms as oms
+    from onsite.idparquet import unimod_to_pyopenms_notation
+
+    pep_list = oms.PeptideIdentificationList()
+
+    # Group by peptide_identification_index
+    group_col = "peptide_identification_index"
+    if group_col not in psms_df.columns:
+        psms_df = psms_df.copy()
+        psms_df[group_col] = 0
+
+    for pid_idx, group in psms_df.groupby(group_col, sort=True):
+        first = group.iloc[0]
+
+        # score_type
+        score_type = first.get("score_type", None)
+        if score_type is None or (isinstance(score_type, float) and np.isnan(score_type)):
+            score_type = "score"
+
+        # higher_score_better
+        hsb_val = first.get("higher_score_better", False)
+        if hsb_val is None or (isinstance(hsb_val, float) and np.isnan(hsb_val)):
+            hsb_val = False
+        higher_score_better = bool(hsb_val)
+
+        pid = oms.PeptideIdentification()
+        pid.setScoreType(score_type)
+        pid.setHigherScoreBetter(higher_score_better)
+        pid.setIdentifier("run1")
+
+        rt_val = first.get("rt", float("nan"))
+        if rt_val is not None and isinstance(rt_val, (int, float)) and np.isfinite(rt_val):
+            pid.setRT(float(rt_val))
+
+        mz_val = first.get("observed_mz", float("nan"))
+        if mz_val is not None and isinstance(mz_val, (int, float)) and np.isfinite(mz_val):
+            pid.setMZ(float(mz_val))
+
+        spec_ref = first.get("spectrum_reference", None)
+        if spec_ref and str(spec_ref).strip():
+            pid.setMetaValue("spectrum_reference", str(spec_ref))
+
+        # Build hits sorted by hit_index
+        hits = []
+        sort_col = "hit_index" if "hit_index" in group.columns else None
+        sorted_group = group.sort_values("hit_index") if sort_col else group
+
+        for _, row in sorted_group.iterrows():
+            pf = row.get("peptidoform", None)
+            if pf is None or (isinstance(pf, float) and np.isnan(pf)):
+                logger.warning("Skipping hit with None/NaN peptidoform at index %s", row.name)
+                continue
+            pf_str = str(pf)
+
+            try:
+                pyo_seq = unimod_to_pyopenms_notation(pf_str)
+                seq = oms.AASequence.fromString(pyo_seq)
+            except Exception as exc:
+                logger.warning("Could not parse peptidoform %r: %s", pf_str, exc)
+                continue
+
+            hit = oms.PeptideHit()
+            hit.setSequence(seq)
+
+            charge = row.get("precursor_charge", 0)
+            hit.setCharge(int(charge) if charge is not None else 0)
+
+            score_val = row.get("score", 0.0)
+            hit.setScore(float(score_val) if score_val is not None else 0.0)
+
+            # Set metavalues
+            mv = row.get("psm_metavalues", None)
+            if mv is not None:
+                # handle numpy array, list, or None
+                if isinstance(mv, np.ndarray):
+                    mv_iter = mv.tolist() if mv.ndim > 0 else []
+                elif isinstance(mv, list):
+                    mv_iter = mv
+                else:
+                    mv_iter = []
+                for entry in mv_iter:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = entry.get("name", "")
+                    value = entry.get("value", "")
+                    vtype = entry.get("value_type", "string")
+                    if not name:
+                        continue
+                    try:
+                        if vtype == "double":
+                            hit.setMetaValue(name, float(value))
+                        elif vtype == "int":
+                            hit.setMetaValue(name, int(float(value)))
+                        else:
+                            hit.setMetaValue(name, str(value))
+                    except (ValueError, TypeError):
+                        hit.setMetaValue(name, str(value))
+
+            hits.append(hit)
+
+        pid.setHits(hits)
+        pep_list.push_back(pid)
+
+    # Build ProteinIdentification
+    pi = oms.ProteinIdentification()
+    pi.setIdentifier("run1")
+
+    # Collect unique score_type for SearchParameters
+    score_types = psms_df["score_type"].dropna().unique().tolist() if "score_type" in psms_df.columns else []
+    score_type_main = score_types[0] if score_types else "score"
+    pi.setScoreType(score_type_main)
+
+    higher_score_better_main = False
+    if "higher_score_better" in psms_df.columns:
+        vals = psms_df["higher_score_better"].dropna().unique().tolist()
+        if vals:
+            higher_score_better_main = bool(vals[0])
+    pi.setHigherScoreBetter(higher_score_better_main)
+
+    sp = pi.getSearchParameters()
+
+    # Collect UNIMOD mods seen in peptidoforms and add as variable modifications
+    seen_mods = set()
+    if "peptidoform" in psms_df.columns:
+        for pf in psms_df["peptidoform"].dropna():
+            for m in re.finditer(r"\[UNIMOD:(\d+)\]", str(pf)):
+                seen_mods.add(f"UNIMOD:{m.group(1)}")
+
+    # Only add standard UNIMOD mods (skip PhosphoDecoy or custom names)
+    from onsite.idparquet import unimod_to_pyopenms_notation
+    vmods = []
+    for unimod_acc in sorted(seen_mods):
+        # Convert UNIMOD accession to pyOpenMS name for use in SearchParameters
+        # Use a dummy single-AA peptidoform to get the mod name
+        test_pf = f"S[{unimod_acc}]"
+        pyo_name = unimod_to_pyopenms_notation(test_pf)
+        # Extract just the modification name from "S(Name)" format
+        m = re.search(r"\(([^)]+)\)", pyo_name)
+        if m:
+            mod_name = m.group(1)
+            # Skip custom / non-standard mods
+            if b"PhosphoDecoy" not in mod_name.encode():
+                vmods.append(mod_name.encode())
+
+    sp.variable_modifications = vmods
+    pi.setSearchParameters(sp)
+
+    # Add protein hits if proteins_df provided
+    prot_hits = []
+    if proteins_df is not None and "accession" in proteins_df.columns:
+        for acc in proteins_df["accession"].dropna():
+            ph = oms.ProteinHit()
+            ph.setAccession(str(acc))
+            prot_hits.append(ph)
+    pi.setHits(prot_hits)
+
+    prot = [pi]
+    return prot, pep_list
 
 
 def _metavalue_type_str(value) -> str:

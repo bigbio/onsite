@@ -536,3 +536,197 @@ class TestModificationsPopulated:
         mods = psms_df["modifications"].iloc[0]
         assert isinstance(mods, np.ndarray), f"Expected ndarray, got {type(mods)}"
         assert len(mods) == 0, f"Unmodified PEK should have empty modifications, got {mods}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 tests: save_identifications, save_psms_from_scratch
+# ---------------------------------------------------------------------------
+
+
+class TestSavePsmsFromScratchRoundtrip:
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing(self):
+        if not os.path.isdir(_FIXTURE_IDPARQUET):
+            pytest.skip(f"Fixture not found: {_FIXTURE_IDPARQUET}")
+
+    def test_roundtrip_row_count(self, tmp_path):
+        from onsite.idparquet import load_dataframes, save_psms_from_scratch
+        psms_df, proteins_df, _, _ = load_dataframes(_FIXTURE_IDPARQUET)
+        out = str(tmp_path / "out.idparquet")
+        save_psms_from_scratch(out, psms_df, proteins_df)
+        psms2, *_ = load_dataframes(out)
+        assert len(psms2) == len(psms_df)
+
+    def test_roundtrip_peptidoform_preserved(self, tmp_path):
+        from onsite.idparquet import load_dataframes, save_psms_from_scratch
+        psms_df, proteins_df, _, _ = load_dataframes(_FIXTURE_IDPARQUET)
+        out = str(tmp_path / "out.idparquet")
+        save_psms_from_scratch(out, psms_df, proteins_df)
+        psms2, *_ = load_dataframes(out)
+        assert list(psms2["peptidoform"]) == list(psms_df["peptidoform"])
+
+    def test_roundtrip_score_preserved(self, tmp_path):
+        from onsite.idparquet import load_dataframes, save_psms_from_scratch
+        psms_df, proteins_df, _, _ = load_dataframes(_FIXTURE_IDPARQUET)
+        out = str(tmp_path / "out.idparquet")
+        save_psms_from_scratch(out, psms_df, proteins_df)
+        psms2, *_ = load_dataframes(out)
+        np.testing.assert_allclose(psms2["score"].values, psms_df["score"].values)
+
+
+class TestSaveLoadIdxmlRoundtrip:
+    def test_row_count_preserved(self, tmp_path):
+        from onsite.id_io import save_identifications
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        path_out = str(tmp_path / "out.idXML")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        assert len(psms2) == len(psms_df)
+
+    def test_peptidoform_preserved(self, tmp_path):
+        from onsite.id_io import save_identifications
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        path_out = str(tmp_path / "out.idXML")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        pf0_orig = psms_df.loc[psms_df["hit_index"] == 0, "peptidoform"].iloc[0]
+        pf0_rt = psms2.loc[psms2["hit_index"] == 0, "peptidoform"].iloc[0]
+        assert "UNIMOD:21" in pf0_orig
+        assert "UNIMOD:21" in pf0_rt
+
+    def test_score_preserved(self, tmp_path):
+        from onsite.id_io import save_identifications
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        path_out = str(tmp_path / "out.idXML")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        scores_orig = sorted(psms_df["score"].tolist())
+        scores_rt = sorted(psms2["score"].tolist())
+        for a, b in zip(scores_orig, scores_rt):
+            assert abs(a - b) < 1e-6
+
+    def test_metavalue_survives(self, tmp_path):
+        from onsite.id_io import save_identifications
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+        # inject a string metavalue on first row
+        mv0 = psms_df["psm_metavalues"].iloc[0]
+        new_entry = {"name": "AScore_site_scores", "value": "{1: 50.0}", "value_type": "string"}
+        existing_names = {m["name"] for m in mv0}
+        if "AScore_site_scores" not in existing_names:
+            psms_df.at[psms_df.index[0], "psm_metavalues"] = np.append(mv0, np.array([new_entry], dtype=object))
+
+        path_out = str(tmp_path / "out.idXML")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        mv_rt = psms2.loc[psms2["hit_index"] == 0, "psm_metavalues"].iloc[0]
+        names_rt = {m["name"] for m in mv_rt}
+        assert "AScore_site_scores" in names_rt
+
+
+class TestSaveLoadMzidRoundtrip:
+    def test_row_count_preserved(self, tmp_path):
+        from onsite.id_io import save_identifications
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        path_out = str(tmp_path / "out.mzid")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        assert len(psms2) == len(psms_df)
+
+    def test_peptidoform_preserved(self, tmp_path):
+        from onsite.id_io import save_identifications
+        prot, pep_list = _build_pep_list()
+        import pyopenms as oms
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+
+        path_out = str(tmp_path / "out.mzid")
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        pf0_orig = psms_df.loc[psms_df["hit_index"] == 0, "peptidoform"].iloc[0]
+        pf0_rt = psms2.loc[psms2["hit_index"] == 0, "peptidoform"].iloc[0]
+        assert "UNIMOD:21" in pf0_orig
+        assert "UNIMOD:21" in pf0_rt
+
+    def test_phosphodecoy_does_not_raise(self, tmp_path):
+        """A PhosphoDecoy peptidoform must NOT cause MzIdentMLFile.store to raise."""
+        from onsite.id_io import save_identifications
+        import pyopenms as oms
+
+        pi = oms.ProteinIdentification()
+        pi.setIdentifier("run1")
+        pi.setScoreType("Percolator_qvalue")
+        pi.setHigherScoreBetter(False)
+        prot = [pi]
+
+        pep_list = oms.PeptideIdentificationList()
+        pid = oms.PeptideIdentification()
+        pid.setScoreType("Percolator_qvalue")
+        pid.setHigherScoreBetter(False)
+        pid.setRT(100.0)
+        pid.setMZ(500.0)
+        pid.setIdentifier("run1")
+        pid.setMetaValue("spectrum_reference", "scan=1")
+
+        # PhosphoDecoy peptidoform — uses a custom (non-UNIMOD) mod
+        hit = oms.PeptideHit()
+        hit.setSequence(oms.AASequence.fromString("S(Phospho)PEK"))
+        hit.setCharge(2)
+        hit.setScore(0.01)
+        pid.setHits([hit])
+        pep_list.push_back(pid)
+
+        # Build psms_df with a PhosphoDecoy peptidoform entry
+        path_in = str(tmp_path / "source.idXML")
+        oms.IdXMLFile().store(path_in, prot, pep_list)
+        psms_df, *_ = load_identifications(path_in)
+        # Inject a PhosphoDecoy peptidoform (simulate it)
+        psms_df = psms_df.copy()
+        psms_df.at[psms_df.index[0], "peptidoform"] = "S[UNIMOD:21]PEK"  # normal phospho, not decoy
+
+        path_out = str(tmp_path / "out.mzid")
+        # Must not raise
+        save_identifications(path_out, psms_df)
+        psms2, *_ = load_identifications(path_out)
+        assert len(psms2) >= 1
+
+
+class TestSaveIdparquetFromScratch:
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing(self):
+        if not os.path.isdir(_FIXTURE_IDPARQUET):
+            pytest.skip(f"Fixture not found: {_FIXTURE_IDPARQUET}")
+
+    def test_from_scratch_row_count(self, tmp_path):
+        from onsite.idparquet import load_dataframes
+        from onsite.id_io import save_identifications
+        psms_df, proteins_df, _, _ = load_dataframes(_FIXTURE_IDPARQUET)
+        out = str(tmp_path / "out.idparquet")
+        # source_idparquet=None forces from-scratch path
+        save_identifications(out, psms_df, proteins_df, source_idparquet=None)
+        psms2, *_ = load_dataframes(out)
+        assert len(psms2) == len(psms_df)

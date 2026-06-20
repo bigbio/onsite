@@ -313,7 +313,7 @@ def _copy_or_create_parquet(name: str, out_dir: str,
                             run_identifier: Optional[str]):
     """Write a non-PSM parquet file (search_params / protein_groups)."""
     path = os.path.join(out_dir, f"{name}.parquet")
-    src = os.path.join(source_idparquet, f"{name}.parquet")
+    src = os.path.join(source_idparquet, f"{name}.parquet") if source_idparquet else None
     if src and os.path.isfile(src):
         shutil.copy2(src, path)
         return
@@ -340,3 +340,83 @@ def _copy_or_create_parquet(name: str, out_dir: str,
     else:
         return
     pd.DataFrame([row]).to_parquet(path, index=False)
+
+
+def save_psms_from_scratch(
+    out_dir: str,
+    psms_df: pd.DataFrame,
+    proteins_df: Optional[pd.DataFrame] = None,
+) -> str:
+    """Write an idParquet directory from a psms DataFrame without requiring a source.
+
+    Parameters
+    ----------
+    out_dir : str
+        Output directory path. Will be created if it does not exist.
+        If it does not end with ``.idparquet``, the suffix is appended.
+    psms_df : pd.DataFrame
+        PSMs DataFrame — must be schema-compatible with the 29-column psms schema.
+    proteins_df : pd.DataFrame, optional
+        Proteins DataFrame. If None, an empty proteins.parquet is written.
+
+    Returns
+    -------
+    str
+        Absolute path to the created idParquet directory.
+    """
+    if not out_dir.endswith(".idparquet"):
+        out_dir = out_dir + ".idparquet"
+    os.makedirs(out_dir, exist_ok=True)
+    logger.info("Saving PSMs from scratch to %s", out_dir)
+
+    # Import column list from id_io to avoid duplication
+    from onsite.id_io import _PSM_COLUMNS, _PSM_DTYPE_MAP
+
+    # Ensure all required columns exist with correct defaults
+    df = psms_df.copy()
+    _int32_cols = {"precursor_charge", "scan", "hit_index", "peptide_identification_index"}
+    _float64_cols = {
+        "score", "rt", "observed_mz", "calculated_mz",
+        "posterior_error_probability", "predicted_rt", "ion_mobility",
+    }
+    _bool_cols = {"is_decoy", "higher_score_better"}
+
+    for col in _PSM_COLUMNS:
+        if col not in df.columns:
+            if col in _int32_cols:
+                df[col] = np.int32(0)
+            elif col in _float64_cols:
+                df[col] = float("nan")
+            elif col in _bool_cols:
+                df[col] = False
+            else:
+                df[col] = None
+
+    # Enforce dtypes
+    for col, dtype in _PSM_DTYPE_MAP.items():
+        if col in df.columns:
+            try:
+                df[col] = df[col].astype(dtype)
+            except (ValueError, TypeError):
+                pass
+
+    # Reorder columns to match schema
+    df = df[[c for c in _PSM_COLUMNS if c in df.columns]]
+
+    # Write psms.parquet
+    df.to_parquet(os.path.join(out_dir, "psms.parquet"), index=False)
+    logger.info("Saved %d PSMs to psms.parquet", len(df))
+
+    # Write proteins.parquet
+    if proteins_df is not None and len(proteins_df) > 0:
+        proteins_df.to_parquet(os.path.join(out_dir, "proteins.parquet"), index=False)
+        logger.info("Saved %d proteins to proteins.parquet", len(proteins_df))
+    else:
+        pd.DataFrame().to_parquet(os.path.join(out_dir, "proteins.parquet"), index=False)
+
+    # Write search_params.parquet and protein_groups.parquet (minimal rows)
+    _copy_or_create_parquet("search_params", out_dir, None, None)
+    _copy_or_create_parquet("protein_groups", out_dir, None, None)
+
+    logger.info("Saved idParquet to %s", out_dir)
+    return out_dir
