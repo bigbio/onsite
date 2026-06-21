@@ -26,10 +26,10 @@ def test_flr_curve_hand_computed():
     curve = flr_curve([False, False, False, False, True], t_c=4, x_c=4)
     assert list(curve["cum_decoy"]) == [0, 0, 0, 0, 1]
     assert list(curve["cum_target"]) == [1, 2, 3, 4, 4]
-    # flr_raw: 0,0,0,0, 2*(4/4)*1/5 = 0.4
-    np.testing.assert_allclose(curve["flr_raw"], [0, 0, 0, 0, 0.4])
+    # flr_raw: 0,0,0,0, (4/4)*1/(5-1) = 0.4
+    np.testing.assert_allclose(curve["flr_raw"], [0, 0, 0, 0, 0.25])
     # qval == flr_raw here (already monotone non-decreasing)
-    np.testing.assert_allclose(curve["qval"], [0, 0, 0, 0, 0.4])
+    np.testing.assert_allclose(curve["qval"], [0, 0, 0, 0, 0.25])
 
 
 def test_flr_capped_at_one_when_decoys_dominate():
@@ -179,7 +179,14 @@ def test_compute_tool_flr_filters_intersect_and_normalizes():
         # unambiguous (one candidate, one phospho) -> excluded from analysis
         PSMRecord("s5", "PEPSK", [(4, "S", "Phospho")], {4: 1000.0}, False, 0.001),
     ]
-    keep = {"s1", "s2", "s4", "s5"}  # s3 also fails the ident filter regardless
+
+    keep = {
+            ("s1", "PEPSTYK"),
+            ("s2", "PEPSAK"),
+            ("s4", "PEPSTYK"),
+            ("s5", "PEPSK"),
+        }
+
     res = compute_tool_flr(recs, "ascore", keep, q_threshold=0.01, flr_threshold=0.05)
 
     assert res.n_after_ident_filter == 3   # s1, s2, s5 (s3 decoy, s4 q>0.01)
