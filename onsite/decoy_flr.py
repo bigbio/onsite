@@ -51,8 +51,7 @@ DECOY_RESIDUE = "A"
 # probability is still emitted as PhosphoRS_site_probs for reporting.
 TOOL_SCORE_META = {
     "ascore": "AScore_site_scores",
-    # "phosphors": "PhosphoRS_site_delta",
-    "phosphors": "PhosphoRS_site_probs",
+    "phosphors": "PhosphoRS_site_delta",
     "lucxor": "Luciphor_site_scores",
 }
 
@@ -90,8 +89,19 @@ def flr_curve(is_decoy_by_rank: List[bool], t_c: int, x_c: int) -> Dict[str, np.
     cum_target = ranks - cum_decoy
 
     ratio = (t_c / x_c) if x_c > 0 else 0.0
+
+    # [PMID: 35640880] Kerry A Ramsbottom et al.
     # flr_raw = 2.0 * ratio * cum_decoy / ranks
-    flr_raw = (ratio * cum_decoy) / (ranks - cum_decoy)
+
+    # [PMID: 37099386] Oscar M Camacho et al.
+    denom = ranks - cum_decoy
+    flr_raw = np.divide(
+        ratio * cum_decoy,
+        denom,
+        out=np.ones_like(denom, dtype=float),
+        where=(denom != 0),
+    )
+
     flr_raw = np.minimum(flr_raw, 1.0)  # an FLR cannot exceed 1
 
     # q-value style: the FLR achievable by any threshold at least this permissive
@@ -308,7 +318,7 @@ def compute_tool_flr(
     keep_refs: set,
     q_threshold: Optional[float],
     flr_threshold: float,
-    collapse: bool = True,
+    collapse: bool = False,
 ) -> ToolResult:
     """Compute the decoy-AA FLR curve for one tool over the shared PSM set."""
     n_in = len(records)
@@ -357,8 +367,6 @@ def compute_tool_flr(
     else:
         collapsed = [(s, d, 1) for (_seq, _pos, _res, s, d) in raw_sites]
 
-    # bin score to 2 dp; tie-break by supporting-PSM count (paper).
-    # collapsed.sort(key=lambda t: (round(t[0], 2), t[2]), reverse=True)
     collapsed.sort(key=lambda t: (t[0], t[2]), reverse=True)
     is_decoy_ranked = [d for (_s, d, _c) in collapsed]
 

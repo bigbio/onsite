@@ -411,11 +411,11 @@ def save_psms_from_scratch(
             # NaN in bool columns must become False (astype(bool) turns NaN
             # into True). Replace NaN explicitly before casting to avoid both
             # wrong values and pandas FutureWarning about object-dtype downcasting.
-            import pandas as _pd
+
             series = df[col]
             # Map: True-ish → True, NaN/None → False, everything else → bool
             df[col] = series.map(
-                lambda v: False if (v is None or _pd.isna(v)) else bool(v)
+                lambda v: False if (v is None or pd.isna(v)) else bool(v)
             ).astype(dtype)
         else:
             try:

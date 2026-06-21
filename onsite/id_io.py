@@ -416,7 +416,7 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
         psms_df = psms_df.copy()
         psms_df[group_col] = 0
 
-    for pid_idx, group in psms_df.groupby(group_col, sort=True):
+    for _, group in psms_df.groupby(group_col, sort=True):
         first = group.iloc[0]
 
         # score_type — use pd.isna() to catch None, NaN, and pd.NA
