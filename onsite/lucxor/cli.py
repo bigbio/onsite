@@ -421,11 +421,8 @@ class PyLuciPHOr2:
         # When posterior_error_probability is available (idParquet native), use
         # PEP mode.  For idXML/mzid inputs, posterior_error_probability is NaN
         # — fall back to the DataFrame's score/score_type columns instead.
-        import pandas as _pd
-        import numpy as _np
-
         first_row = psms_df.iloc[0]
-        pep_col = psms_df["posterior_error_probability"] if "posterior_error_probability" in psms_df.columns else _pd.Series(dtype=float)
+        pep_col = psms_df["posterior_error_probability"] if "posterior_error_probability" in psms_df.columns else pd.Series(dtype=float)
         has_pep = pep_col.notna().any()
 
         if has_pep:
@@ -434,9 +431,9 @@ class PyLuciPHOr2:
         else:
             # Fall back to the df's own score_type/higher_score_better
             st = first_row.get("score_type", None)
-            self.score_type = str(st) if (st is not None and not _pd.isna(st)) else "score"
+            self.score_type = str(st) if (st is not None and not pd.isna(st)) else "score"
             hsb = first_row.get("higher_score_better", False)
-            self.higher_score_better = bool(hsb) if (hsb is not None and not _pd.isna(hsb)) else False
+            self.higher_score_better = bool(hsb) if (hsb is not None and not pd.isna(hsb)) else False
 
         # Build pep_ids + PSM objects in a single pass over DataFrame rows
         all_psms = []
@@ -449,11 +446,11 @@ class PyLuciPHOr2:
             hit.setSequence(seq)
             hit.setCharge(int(row["precursor_charge"]))
 
-            pep_value = row.get("posterior_error_probability", _np.nan)
-            if pep_value is None or _pd.isna(pep_value):
+            pep_value = row.get("posterior_error_probability", np.nan)
+            if pep_value is None or pd.isna(pep_value):
                 # No PEP available — use the row's score column instead
                 score_val = row.get("score", 0.0)
-                hit.setScore(float(score_val) if (score_val is not None and not _pd.isna(score_val)) else 0.0)
+                hit.setScore(float(score_val) if (score_val is not None and not pd.isna(score_val)) else 0.0)
                 # Do NOT set "Posterior Error Probability" metavalue when PEP is absent
             else:
                 hit.setScore(float(pep_value))

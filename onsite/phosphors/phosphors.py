@@ -28,7 +28,12 @@ ADD_DECOYS = False  # Configuration parameter to include A as phosphorylation si
 FRAGMENT_TOLERANCE = 0.05  # Typical tolerance for PhosphoRS scoring (Da)
 FRAGMENT_METHOD_PPM = False  # PhosphoRS typically uses Da tolerance
 ADD_PRECURSOR_PEAK = False
-ADD_NEUTRAL_LOSSES = True  # Include neutral losses
+
+# ADD_NEUTRAL_LOSSES defaults to False. Enabling it generates excessive
+# theoretical neutral loss fragment ions that dilute site-determining b/y ions,
+# leading to significantly worse PTM localization performance.
+ADD_NEUTRAL_LOSSES = False
+
 WINDOW_SIZE = 100.0
 MAX_DEPTH = 8
 

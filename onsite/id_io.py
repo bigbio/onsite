@@ -593,7 +593,6 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
                 seen_mods.add(f"UNIMOD:{m.group(1)}")
 
     # Only add standard UNIMOD mods (skip PhosphoDecoy or custom names)
-    from onsite.idparquet import unimod_to_pyopenms_notation
     vmods = []
     for unimod_acc in sorted(seen_mods):
         # Convert UNIMOD accession to pyOpenMS name for use in SearchParameters
