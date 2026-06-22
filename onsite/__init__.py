@@ -1,6 +1,6 @@
 """OnSite: Mass spectrometry post-translational modification localization tool."""
 
-__version__ = "0.0.3"
+__version__ = "0.0.5"
 __author__ = "BigBio Stack"
 __license__ = "MIT"
 
