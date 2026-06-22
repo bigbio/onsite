@@ -24,7 +24,8 @@ from pyopenms import (
     PeptideHit
 )
 
-from onsite.idparquet import pyopenms_to_unimod_notation, save_dataframes, load_dataframes, unimod_to_pyopenms_notation
+from onsite.idparquet import pyopenms_to_unimod_notation, unimod_to_pyopenms_notation
+from onsite.id_io import load_identifications, save_identifications
 from .psm import PSM
 from .peptide import Peptide
 from .models import CIDModel, HCDModel
@@ -393,7 +394,7 @@ class PyLuciPHOr2:
 
         Returns (all_psms, prot_ids, exp).
         """
-        psms_df, proteins_df, _, _ = load_dataframes(input_id)
+        psms_df, proteins_df, _, _ = load_identifications(input_id)
         self._psms_df_template = psms_df  # preserved for output schema
         if psms_df.empty:
             self.logger.warning("No peptide identifications found in input file")
@@ -416,9 +417,23 @@ class PyLuciPHOr2:
         else:
             lookup.readSpectra(exp, "scan=(?<SCAN>\\d+)")
 
-        # PEP converted 1-PEP — set early so get_psm_score uses it inline
-        self.score_type = "Posterior Error Probability"
-        self.higher_score_better = True
+        # Determine score_type and higher_score_better from the DataFrame.
+        # When posterior_error_probability is available (idParquet native), use
+        # PEP mode.  For idXML/mzid inputs, posterior_error_probability is NaN
+        # — fall back to the DataFrame's score/score_type columns instead.
+        first_row = psms_df.iloc[0]
+        pep_col = psms_df["posterior_error_probability"] if "posterior_error_probability" in psms_df.columns else pd.Series(dtype=float)
+        has_pep = pep_col.notna().any()
+
+        if has_pep:
+            self.score_type = "Posterior Error Probability"
+            self.higher_score_better = True
+        else:
+            # Fall back to the df's own score_type/higher_score_better
+            st = first_row.get("score_type", None)
+            self.score_type = str(st) if (st is not None and not pd.isna(st)) else "score"
+            hsb = first_row.get("higher_score_better", False)
+            self.higher_score_better = bool(hsb) if (hsb is not None and not pd.isna(hsb)) else False
 
         # Build pep_ids + PSM objects in a single pass over DataFrame rows
         all_psms = []
@@ -430,8 +445,16 @@ class PyLuciPHOr2:
             hit = PeptideHit()
             hit.setSequence(seq)
             hit.setCharge(int(row["precursor_charge"]))
-            hit.setScore(float(row["posterior_error_probability"]))
-            hit.setMetaValue("Posterior Error Probability", float(row["posterior_error_probability"]))
+
+            pep_value = row.get("posterior_error_probability", np.nan)
+            if pep_value is None or pd.isna(pep_value):
+                # No PEP available — use the row's score column instead
+                score_val = row.get("score", 0.0)
+                hit.setScore(float(score_val) if (score_val is not None and not pd.isna(score_val)) else 0.0)
+                # Do NOT set "Posterior Error Probability" metavalue when PEP is absent
+            else:
+                hit.setScore(float(pep_value))
+                hit.setMetaValue("Posterior Error Probability", float(pep_value))
             add_scores = row.get("additional_scores")
             for ascore in add_scores:
                 sname = ascore.get("score_name", "")
@@ -863,7 +886,7 @@ class PyLuciPHOr2:
 
         # 7. Save results (idParquet format)
         out_df = pd.DataFrame(result_rows) if result_rows else pd.DataFrame()
-        save_dataframes(output, out_df, prot_ids, template_df=self._psms_df_template, source_idparquet=input_id)
+        save_identifications(output, out_df, prot_ids, template_df=self._psms_df_template, source_idparquet=input_id)
         self.logger.info(f"Results saved to: {output}")
 
         # 8. Processing completed - print run summary similar to Ascore

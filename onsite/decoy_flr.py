@@ -13,10 +13,10 @@ phosphorylated, so a localization onto A is a false localization.
 
 Global decoy FLR (Eq. 2 of the paper), at rank ``n`` in the score-ranked list::
 
-    pX_FLR_n = 2 * (T_c / X_c) * (cumulative decoy sites) / n
+    pX_FLR_n = (T_c / X_c) * (cumulative decoy sites) / (n - (cumulative decoy sites))
 
 where ``T_c`` / ``X_c`` are the total counts of target (S/T/Y) and decoy (A)
-candidate residues in the analyzed PSM set. The ``2 * (T_c / X_c)`` factor scales
+candidate residues in the analyzed PSM set. The ``(T_c / X_c)`` factor scales
 the raw decoy fraction to the true expected FLR (without it the estimate is
 optimistic by ~3.7x on typical data).
 
@@ -74,7 +74,8 @@ def flr_curve(is_decoy_by_rank: List[bool], t_c: int, x_c: int) -> Dict[str, np.
           rank        1..N (cumulative site count = the observation count n)
           cum_target  cumulative target (non-decoy) sites
           cum_decoy   cumulative decoy (A) sites
-          flr_raw     2*(T_c/X_c)*cum_decoy/n, capped at 1.0
+        #   flr_raw     2*(T_c/X_c)*cum_decoy/n, capped at 1.0
+          flr_raw     (T_c/X_c)*cum_decoy/(n-cum_decoy), capped at 1.0
           qval        q-value-style monotonization of flr_raw (reverse cummin)
     """
     d = np.asarray(is_decoy_by_rank, dtype=bool)
@@ -88,7 +89,19 @@ def flr_curve(is_decoy_by_rank: List[bool], t_c: int, x_c: int) -> Dict[str, np.
     cum_target = ranks - cum_decoy
 
     ratio = (t_c / x_c) if x_c > 0 else 0.0
-    flr_raw = 2.0 * ratio * cum_decoy / ranks
+
+    # [PMID: 35640880] Kerry A Ramsbottom et al.
+    # flr_raw = 2.0 * ratio * cum_decoy / ranks
+
+    # [PMID: 37099386] Oscar M Camacho et al.
+    denom = ranks - cum_decoy
+    flr_raw = np.divide(
+        ratio * cum_decoy,
+        denom,
+        out=np.ones_like(denom, dtype=float),
+        where=(denom != 0),
+    )
+
     flr_raw = np.minimum(flr_raw, 1.0)  # an FLR cannot exceed 1
 
     # q-value style: the FLR achievable by any threshold at least this permissive
@@ -305,7 +318,7 @@ def compute_tool_flr(
     keep_refs: set,
     q_threshold: Optional[float],
     flr_threshold: float,
-    collapse: bool = True,
+    collapse: bool = False,
 ) -> ToolResult:
     """Compute the decoy-AA FLR curve for one tool over the shared PSM set."""
     n_in = len(records)
@@ -315,12 +328,12 @@ def compute_tool_flr(
     after_ident = [
         r for r in records
         if not r.is_ident_decoy
-        and (q_threshold is None or r.q_value is None or r.q_value <= q_threshold)
+        and (q_threshold is None or r.q_value is None or r.q_value < q_threshold)
     ]
     n_after_ident = len(after_ident)
 
     # 2. Restrict to the PSM set shared by all tools.
-    in_isect = [r for r in after_ident if r.spectrum_ref in keep_refs]
+    in_isect = [r for r in after_ident if (r.spectrum_ref, r.unmod_seq) in keep_refs]
     n_isect = len(in_isect)
 
     # 3. Drop unambiguous peptides (no localization choice) and collect sites.
@@ -354,8 +367,7 @@ def compute_tool_flr(
     else:
         collapsed = [(s, d, 1) for (_seq, _pos, _res, s, d) in raw_sites]
 
-    # bin score to 2 dp; tie-break by supporting-PSM count (paper).
-    collapsed.sort(key=lambda t: (round(t[0], 2), t[2]), reverse=True)
+    collapsed.sort(key=lambda t: (t[0], t[2]), reverse=True)
     is_decoy_ranked = [d for (_s, d, _c) in collapsed]
 
     curve = flr_curve(is_decoy_ranked, t_c, x_c)
@@ -399,10 +411,10 @@ def compute_decoy_flr(
     ref_sets = []
     for recs in parsed.values():
         refs = {
-            r.spectrum_ref
+            (r.spectrum_ref, r.unmod_seq)
             for r in recs
             if not r.is_ident_decoy
-            and (q_threshold is None or r.q_value is None or r.q_value <= q_threshold)
+            and (q_threshold is None or r.q_value is None or r.q_value < q_threshold)
             and r.spectrum_ref is not None
         }
         ref_sets.append(refs)

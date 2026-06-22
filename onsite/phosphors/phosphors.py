@@ -28,7 +28,12 @@ ADD_DECOYS = False  # Configuration parameter to include A as phosphorylation si
 FRAGMENT_TOLERANCE = 0.05  # Typical tolerance for PhosphoRS scoring (Da)
 FRAGMENT_METHOD_PPM = False  # PhosphoRS typically uses Da tolerance
 ADD_PRECURSOR_PEAK = False
-ADD_NEUTRAL_LOSSES = True  # Include neutral losses
+
+# ADD_NEUTRAL_LOSSES defaults to False. Enabling it generates excessive
+# theoretical neutral loss fragment ions that dilute site-determining b/y ions,
+# leading to significantly worse PTM localization performance.
+ADD_NEUTRAL_LOSSES = False
+
 WINDOW_SIZE = 100.0
 MAX_DEPTH = 8
 
@@ -42,6 +47,14 @@ DEFAULT_OCCURRENCE_PROBABILITY = (
 # --- Distribution Cache ---
 DISTRIBUTION_CACHE_SIZE = 1000
 _distribution_cache = {}  # p -> {n -> BinomialDistribution}
+
+# Memoize full binomial-tail results on the (k, n, p) key. The same triples
+# recur heavily across per-window depth optimization, so caching the EXACT
+# computed value (same algorithm/code path) avoids the dominant scipy/lgamma
+# recomputation cost without changing any output. Bounded FIFO, mirroring the
+# DISTRIBUTION_CACHE_SIZE pattern.
+BINOMIAL_TAIL_CACHE_SIZE = 200000
+_binomial_tail_cache = {}  # (k, n, p) -> P(X >= k)
 
 
 # --- Utility helpers ---
@@ -122,6 +135,18 @@ def _add_distribution_to_cache(p: float, n: int, prob: float):
     _distribution_cache[p][n] = prob
 
 
+def _store_binomial_tail(key, value: float) -> float:
+    """Store a computed binomial-tail value under its (k, n, p) key (bounded
+    FIFO). Returns the value so callers can ``return _store_binomial_tail(...)``."""
+    if len(_binomial_tail_cache) >= BINOMIAL_TAIL_CACHE_SIZE:
+        for old_key in list(_binomial_tail_cache.keys())[
+            : len(_binomial_tail_cache) - BINOMIAL_TAIL_CACHE_SIZE + 1
+        ]:
+            del _binomial_tail_cache[old_key]
+    _binomial_tail_cache[key] = value
+    return value
+
+
 def binomial_tail_probability(k: int, n: int, p: float) -> float:
     """
     Descending cumulative probability P(X >= k) for X~Bin(n,p).
@@ -138,12 +163,12 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
     if k > n:
         return 0.0
 
-    # Check cache first
-    if p in _distribution_cache and n in _distribution_cache[p]:
-        cached_prob = _distribution_cache[p][n]
-        # For cached results, we need to recalculate based on k
-        # This is a simplified approach - in practice, we"d cache the full distribution
-        pass  # Continue with calculation
+    # Memoized result on the (k, n, p) key. The cached value is byte-identical
+    # to what the code path below produces; only recomputation is avoided.
+    cache_key = (k, n, p)
+    cached = _binomial_tail_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     # For very small probabilities, use log-space calculation to maintain precision
     # This is crucial for distinguishing between very unlikely events
@@ -182,7 +207,7 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
                 break
 
         if not log_terms:
-            return 0.0
+            return _store_binomial_tail(cache_key, 0.0)
 
         # Use log-sum-exp trick
         max_log_term = max(log_terms)
@@ -193,18 +218,18 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
         # Convert back to linear space
         prob = math.exp(log_prob)
         # Don"t truncate to 1e-15 - keep the actual small probability
-        return prob
+        return _store_binomial_tail(cache_key, prob)
 
     # For normal cases, use scipy if available
     try:
         import scipy.stats
 
-        prob = 1.0 - scipy.stats.binom.cdf(k - 1, n, p)
+        prob = scipy.stats.binom.sf(k - 1, n, p)
         # Clamp to [0,1] without enforcing a positive floor
         result = min(1.0, max(0.0, prob))
         # Cache the result for future use
         _add_distribution_to_cache(p, n, result)
-        return result
+        return _store_binomial_tail(cache_key, result)
     except ImportError:
         pass
 
@@ -233,7 +258,7 @@ def binomial_tail_probability(k: int, n: int, p: float) -> float:
     result = min(1.0, max(0.0, prob))
     # Cache the result for future use
     _add_distribution_to_cache(p, n, result)
-    return result
+    return _store_binomial_tail(cache_key, result)
 
 
 def _count_matched_ions(theo_mz, exp_mz_sorted, fragment_tolerance, fragment_method_ppm):
@@ -261,19 +286,31 @@ def _count_matched_ions(theo_mz, exp_mz_sorted, fragment_tolerance, fragment_met
     -------
         (n_expected, k_matches): unique theoretical ions, and how many matched.
     """
-    def tol(mz):
-        return (mz * fragment_tolerance / 1_000_000.0) if fragment_method_ppm else fragment_tolerance
+    # For Da tolerance the window is a constant; only the ppm case depends on
+    # mz. Hoist the constant out of the per-ion path (millions of invocations)
+    # while keeping the ppm path's mz-dependent tolerance correct.
+    if fragment_method_ppm:
+        def tol(mz):
+            return mz * fragment_tolerance / 1_000_000.0
+    else:
+        const_tol = fragment_tolerance
+        tol = None  # signals the constant-tolerance fast path below
 
     theo_unique = []
-    for mz in sorted(theo_mz):
-        if not theo_unique or (mz - theo_unique[-1]) > tol(mz):
-            theo_unique.append(mz)
+    if tol is None:
+        for mz in sorted(theo_mz):
+            if not theo_unique or (mz - theo_unique[-1]) > const_tol:
+                theo_unique.append(mz)
+    else:
+        for mz in sorted(theo_mz):
+            if not theo_unique or (mz - theo_unique[-1]) > tol(mz):
+                theo_unique.append(mz)
 
     k = 0
     ri = 0
     m = len(exp_mz_sorted)
     for mz in theo_unique:
-        t = tol(mz)
+        t = const_tol if tol is None else tol(mz)
         while ri < m and exp_mz_sorted[ri] < mz - t:
             ri += 1
         if ri < m and exp_mz_sorted[ri] <= mz + t:
@@ -783,11 +820,23 @@ def _theo_mz_charge_valid(spec_gen, seq, precursor_charge) -> list:
     return out
 
 
-def _isoform_theo_mz(spec_gen, seq_profile, precursor_charge):
+def _isoform_theo_mz(spec_gen, seq_profile, precursor_charge, cache=None, cache_tag=None):
     """Sorted, charge-validated theoretical b/y m/z for one isoform (same ion
     model and chargeValidated gate as the final scoring step). ``spec_gen`` must
-    have ``add_metainfo='true'`` so the per-ion charge/loss gates apply."""
-    return sorted(_theo_mz_charge_valid(spec_gen, seq_profile, precursor_charge))
+    have ``add_metainfo='true'`` so the per-ion charge/loss gates apply.
+
+    ``cache`` (optional) is a per-PSM dict that memoizes the result so the same
+    isoform spectrum is not regenerated for depth-selection AND final scoring.
+    ``cache_tag`` distinguishes spec_gen configurations that would produce
+    different m/z (e.g. add_precursor_peaks)."""
+    if cache is None:
+        return sorted(_theo_mz_charge_valid(spec_gen, seq_profile, precursor_charge))
+    key = (cache_tag, seq_profile.toString(), int(precursor_charge))
+    cached = cache.get(key)
+    if cached is None:
+        cached = sorted(_theo_mz_charge_valid(spec_gen, seq_profile, precursor_charge))
+        cache[key] = cached
+    return cached
 
 
 def _window_has_site_determining_ions(isoform_theo_in_window, tol_da):
@@ -869,9 +918,10 @@ def _choose_window_depth(window_peaks, isoform_theo_in_window, has_sdi, tol_da,
 
 
 def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_tolerance,
-                                       fragment_method_ppm, add_neutral_losses):
-    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window.
-    The top-`depth` peaks where `depth` is chosen to best separate the isoforms.
+                                       fragment_method_ppm, add_neutral_losses,
+                                       theo_cache=None):
+    """Pseudocode sections 8-12: split into 100 m/z windows and keep, per window,
+    the top-`depth` peaks where `depth` is chosen to best separate the isoforms.
     Returns the reduced MSSpectrum (or the input unchanged if it has no peaks)."""
     peaks = filtered_spec.get_peaks()
     if not peaks or len(peaks[0]) == 0:
@@ -900,8 +950,11 @@ def _reduce_by_peak_depth_optimization(filtered_spec, profiles, fragment_toleran
         pr.setValue(f"add_{ion_type}_ions", "true" if ion_type in ("b", "y") else "false")
     spec_gen.setParameters(pr)
 
+    # add_precursor_peaks="false" here; the cache tag carries that so depth
+    # and final scoring only share an entry when their ion model matches.
+    cache_tag = ("theo", False, bool(add_neutral_losses))
     isoform_theo = [
-        _isoform_theo_mz(spec_gen, seq_profile, precursor_charge)
+        _isoform_theo_mz(spec_gen, seq_profile, precursor_charge, theo_cache, cache_tag)
         for seq_profile, _sites in profiles
     ]
 
@@ -1143,11 +1196,19 @@ def calculate_phospho_localization_compomics_style(
             print("Warning: No isomer profiles generated.")
             return None, None
 
+        # Per-PSM cache for charge-validated isoform theoretical m/z, shared
+        # between depth-selection and final scoring so the same isoform spectra
+        # are not regenerated twice. The cache tag encodes the ion-model flags
+        # (add_precursor_peaks, add_losses) so entries are only reused when the
+        # generator configuration matches. Local to this call -> no leak across PSMs.
+        theo_cache = {}
+
         # 3) Dynamic per-window peak-depth optimization (phosphoRS, sections 9-12).
         if ENABLE_PEAK_DEPTH_OPTIMIZATION:
             phospho_rs_spec = _reduce_by_peak_depth_optimization(
                 filtered_spec, profiles, fragment_tolerance,
                 fragment_method_ppm, add_neutral_losses,
+                theo_cache=theo_cache,
             )
         else:
             phospho_rs_spec = filtered_spec
@@ -1192,13 +1253,20 @@ def calculate_phospho_localization_compomics_style(
         n_exp_peaks = int(len(red_mz_arr))
         p_calc = getp_style(n_exp_peaks, w, tolerance_da_for_p)
 
+        # Cache tag for the final-scoring ion model; shares entries with the
+        # depth step only when add_precursor_peaks/add_losses match. The cached
+        # value is sorted, which is equivalent here because _count_matched_ions
+        # sorts its theoretical input internally.
+        final_cache_tag = ("theo", bool(add_precursor_peak), bool(add_neutral_losses))
         for seq_profile, site_indices_set in profiles:
             # Charge-validated b/y theoretical m/z (compomics chargeValidated:
             # fragment charge 1..precursor-1, charge <= ion number) with the
             # phospho neutral-loss name filter. Replaces the previous
             # 1..precursor_charge ladder, which over-generated physically
             # impossible ions and inflated the binomial trial count n (D9).
-            theo_mz = _theo_mz_charge_valid(spec_gen, seq_profile, precursor_charge)
+            theo_mz = _isoform_theo_mz(
+                spec_gen, seq_profile, precursor_charge, theo_cache, final_cache_tag
+            )
             if not theo_mz:
                 continue
 
@@ -1212,12 +1280,12 @@ def calculate_phospho_localization_compomics_style(
             big_p = binomial_tail_probability(
                 k_matches, n_expected if n_expected > 0 else 1, p_calc
             )
-            p_inv = 1.0 / big_p if big_p > 0 else 0.0
+            log_p_inv = -math.log(max(float(big_p), 1e-323))
 
             isomer_scores.append(
                 {
                     "isomer_seq": seq_profile,
-                    "p_inv": p_inv,
+                    "log_p_inv": log_p_inv,
                     "big_p": big_p,
                     "sites": set(site_indices_set),
                 }
@@ -1228,12 +1296,15 @@ def calculate_phospho_localization_compomics_style(
             print("Warning: No isomers were generated or scored.")
             return None, None
 
-        total_p_inv = sum(item["p_inv"] for item in isomer_scores)
-        if total_p_inv <= 0.0:
-            print("Warning: Total inverse probability is zero. Aborting.")
-            return None, None
+        max_log_p = max(item["log_p_inv"] for item in isomer_scores)
+
+        sum_exp = sum(
+            math.exp(item["log_p_inv"] - max_log_p) for item in isomer_scores
+        )
+        log_total_p_inv = max_log_p + math.log(sum_exp)
+
         for item in isomer_scores:
-            item["probability"] = item["p_inv"] / total_p_inv
+            item["probability"] = math.exp(item["log_p_inv"] - log_total_p_inv)
 
         # Calculate site probabilities
         site_probabilities = {}

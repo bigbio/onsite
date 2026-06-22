@@ -14,7 +14,7 @@ import click
 import pandas as pd
 from pyopenms import AASequence, MSExperiment, FileHandler, PeptideHit, SpectrumLookup
 from onsite.idparquet import unimod_to_pyopenms_notation, pyopenms_to_unimod_notation
-from onsite.idparquet import save_dataframes as _save_df
+from onsite.id_io import load_identifications as _io_load, save_identifications as _io_save
 
 from .phosphors import (
     calculate_phospho_localization_compomics_style,
@@ -314,8 +314,7 @@ def load_spectra(mzml_file):
 
 def load_identifications(idparquet_path):
     """Load identification results from an idParquet directory as DataFrames."""
-    from onsite.idparquet import load_dataframes as _load_df
-    psms, prots, _, _ = _load_df(idparquet_path)
+    psms, prots, _, _ = _io_load(idparquet_path)
     return psms, prots
 
 
@@ -341,7 +340,7 @@ def save_identifications(out_file, psms_df, proteins_df=None, template_df=None, 
 
         psms_df.at[idx, "psm_metavalues"] = np.array(metas, dtype=object)
 
-    _save_df(out_file, psms_df, proteins_df, template_df=template_df, source_idparquet=source_idparquet)
+    _io_save(out_file, psms_df, proteins_df, template_df=template_df, source_idparquet=source_idparquet)
 
 
 def build_scan_to_spectrum_map(exp):
