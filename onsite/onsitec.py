@@ -21,7 +21,7 @@ from onsite.idparquet import load_dataframes, save_dataframes, unimod_to_pyopenm
 from onsite.id_io import load_identifications, save_identifications
 
 @click.group()
-@click.version_option(version="0.0.4")
+@click.version_option(version="0.0.5")
 def cli():
     """
     OnSite: Mass spectrometry post-translational modification localization tool
