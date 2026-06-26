@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
     help="Tolerance of the peaks in the fragment spectrum (default: 0.5)"
 )
 @click.option(
-    "--fragment-error-units",
+    "--fragment-mass-unit",
     type=click.Choice(["Da", "ppm"], case_sensitive=False),
     default="Da",
     help="Unit of fragment mass tolerance (default: Da)"
@@ -203,7 +203,7 @@ def lucxor(
     output,
     fragment_method,
     fragment_mass_tolerance,
-    fragment_error_units,
+    fragment_mass_unit,
     min_mz,
     target_modifications,
     neutral_losses,
@@ -240,7 +240,7 @@ def lucxor(
             id_file=input_id,
             out_file=output,
             fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_mass_unit=fragment_error_units,
+            fragment_mass_unit=fragment_mass_unit,
             threads=threads,
             debug=debug,
             add_decoys=add_decoys,
@@ -260,7 +260,7 @@ def lucxor(
             output=output,
             fragment_method=fragment_method,
             fragment_mass_tolerance=fragment_mass_tolerance,
-            fragment_error_units=fragment_error_units,
+            fragment_mass_unit=fragment_mass_unit,
             min_mz=min_mz,
             target_modifications=target_modifications,
             neutral_losses=neutral_losses,
@@ -401,7 +401,7 @@ class PyLuciPHOr2:
             return [], None, None
 
         config = config or {}
-        self.logger.info(f"Loaded {len(psms_df)} PSMs from idParquet")
+        self.logger.info(f"Loaded {len(psms_df)} PSMs...")
 
         # Load spectra first
         exp = MSExperiment()
@@ -517,7 +517,7 @@ class PyLuciPHOr2:
         output: str,
         fragment_method: str,
         fragment_mass_tolerance: float,
-        fragment_error_units: str,
+        fragment_mass_unit: str,
         min_mz: float,
         target_modifications: tuple,
         neutral_losses: tuple,
@@ -565,7 +565,7 @@ class PyLuciPHOr2:
             {
                 "fragment_method": fragment_method,
                 "fragment_mass_tolerance": fragment_mass_tolerance,
-                "fragment_error_units": fragment_error_units,
+                "fragment_mass_unit": fragment_mass_unit,
                 "min_mz": min_mz,
                 "target_modifications": parsed_target_modifications,
                 "neutral_losses": list(neutral_losses),
