@@ -104,7 +104,7 @@ DEFAULT_CONFIG = {
     # Algorithm settings
     "fragment_method": "CID",
     "fragment_mass_tolerance": 0.5,
-    "fragment_error_units": "Da",
+    "fragment_mass_unit": "Da",
     "min_mz": 150.0,
     # Modification settings
     "target_modifications": ["Phospho (S)", "Phospho (T)", "Phospho (Y)"],

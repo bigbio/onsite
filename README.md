@@ -152,7 +152,7 @@ python -m onsite.lucxor.cli --input-spectrum spectra.mzML --input-id identificat
 python -m onsite.lucxor.cli --input-spectrum spectra.mzML --input-id identifications.idparquet --output results.idparquet \
     --fragment-method HCD \
     --fragment-mass-tolerance 0.5 \
-    --fragment-error-units Da \
+    --fragment-mass-unit Da \
     --threads 8 \
     --debug
 ```
@@ -196,7 +196,7 @@ python -m onsite.lucxor.cli --input-spectrum spectra.mzML --input-id identificat
 | `-out` | - | Output idparquet file with scores |
 | `--fragment-method` | CID | Fragmentation method (CID or HCD) |
 | `--fragment-mass-tolerance` | 0.5 | Fragment mass tolerance |
-| `--fragment-error-units` | Da | Tolerance units (Da or ppm) |
+| `--fragment-mass-unit` | Da | Tolerance units (Da or ppm) |
 | `--min-mz` | 150.0 | Minimum m/z value to consider |
 | `--target-modifications` | Phospho (S/T/Y) | List of target PTM definitions |
 | `--neutral-losses` | sty -H3PO4 -97.97690 | Neutral loss definitions applied during scoring |

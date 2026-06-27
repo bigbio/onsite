@@ -43,7 +43,7 @@ LucXor implements a sophisticated two-stage approach:
 |-----------|---------|-------------|
 | `fragment_method` | "CID" | Fragmentation method (CID or HCD) |
 | `fragment_mass_tolerance` | 0.5 | Fragment mass tolerance |
-| `fragment_error_units` | "Da" | Tolerance units (Da or ppm) |
+| `fragment_mass_unit` | "Da" | Tolerance units (Da or ppm) |
 | `min_mz` | 150.0 | Minimum m/z value to consider |
 | `target_modifications` | ["Phospho (S)", "Phospho (T)", "Phospho (Y)"] | Target modifications |
 | `neutral_losses` | ["sty -H3PO4 -97.97690"] | Neutral loss definitions |
@@ -138,7 +138,7 @@ onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparq
 onsite lucxor -in spectra.mzML -id identifications.idparquet -out results.idparquet \
     --fragment-method HCD \
     --fragment-mass-tolerance 0.5 \
-    --fragment-error-units Da \
+    --fragment-mass-unit Da \
     --threads 8 \
     --debug
 ```
@@ -172,7 +172,7 @@ from onsite.lucxor.spectrum import Spectrum
 config = LucXorConfig()
 config.fragment_method = "HCD"
 config.fragment_mass_tolerance = 0.5
-config.fragment_error_units = "Da"
+config.fragment_mass_unit = "Da"
 config.threads = 4
 
 # Initialize processor

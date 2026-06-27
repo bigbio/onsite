@@ -109,7 +109,7 @@ jobs:
             -out test_lucxor_output.idparquet \
             --fragment-method HCD \
             --fragment-mass-tolerance 0.5 \
-            --fragment-error-units Da \
+            --fragment-mass-unit Da \
             --threads 1 \
             --min-num-psms-model 5
 
