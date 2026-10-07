@@ -178,6 +178,12 @@ def pyopenms_to_unimod_notation(seq_str: str) -> str:
 def peptidoform_to_modifications(peptidoform: str, site_scores: Optional[Dict[int, float]] = None):
     return _MAPPER.peptidoform_to_modifications(peptidoform, site_scores)
 
+
+def register_modification(mod) -> None:
+    """Add a modification registered after the mapper loaded (unloaded mappers pick it up lazily)."""
+    if _MAPPER._unimod_to_pyo:
+        _MAPPER._register_mod(mod)
+
 # ---------------------------------------------------------------------------
 # Path resolution helper
 # ---------------------------------------------------------------------------
