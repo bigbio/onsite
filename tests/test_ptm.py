@@ -88,6 +88,12 @@ def test_parse_localized_sites_respects_spec():
     assert sites == [(6, "S", "Phospho")]
 
 
+def test_parse_localized_sites_skips_n_terminal_modification():
+    acetyl = ptm.get_ptm("Acetyl")
+    assert parse_localized_sites("(Acetyl)PEK(Acetyl)R", acetyl) == ("PEKR", [(3, "K", "Acetyl")])
+    assert parse_localized_sites(".(Acetyl)PEKR", acetyl) == ("PEKR", [])
+
+
 def test_compute_tool_flr_counts_spec_residues():
     acetyl = ptm.get_ptm("Acetyl")
     recs = [

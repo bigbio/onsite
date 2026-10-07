@@ -157,7 +157,7 @@ def parse_localized_sites(
             if j == -1:
                 break
             mod = seq_str[i + 1 : j]
-            if mod in (ptm.name, ptm.decoy_name) and pos >= 0:
+            if mod in (ptm.name, ptm.decoy_name) and pos >= 1:
                 sites.append((pos, unmod[-1], mod))
             i = j + 1
         elif c == "[":
