@@ -500,7 +500,7 @@ def _worker_process_pid_threaded(task):
         return {"status": "error", "reason": str(e)}
 
 
-def _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, isomer_list, original_metavalues=None):
+def _metas_list_from_hit_result(seq_str, final_score, site_probs, isomer_list):
     """Build metas list from a PhosphoRS scoring result."""
     regular_count = sum(seq_str.count(f"{aa}(Phospho)") for aa in ["S", "T", "Y"])
     decoy_count = seq_str.count("(PhosphoDecoy)")
@@ -620,7 +620,7 @@ def _process_single_hit(hit_idx, row, ctx, spectrum, fragment_mass_tolerance, fr
     new_sequence = _restore_nterm_mod(seq_str, best_isomer[0])
     new_peptidoform = pyopenms_to_unimod_notation(new_sequence)
 
-    metas_list = _metas_list_from_hit_result(seq_str, new_sequence, final_score, site_probs, isomer_list)
+    metas_list = _metas_list_from_hit_result(seq_str, final_score, site_probs, isomer_list)
     return {"row": _make_phosphors_row(ctx, seq, new_peptidoform, charge, hit_idx, final_score, metas_list, row),
             "phospho_count": 1}
 

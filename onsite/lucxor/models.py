@@ -1047,7 +1047,6 @@ class CIDModel:
         if charge_model is None:
             return float("-inf")
 
-        mu = 0.0
         var = charge_model.var_dist_b
 
         if var <= 0:

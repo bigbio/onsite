@@ -274,31 +274,6 @@ def log_debug(log_file, enabled):
     return logger
 
 
-def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
-    if not hasattr(find_spectrum_by_mz, "spectrum_cache"):
-        find_spectrum_by_mz.spectrum_cache = {}
-        find_spectrum_by_mz.spectrum_list = []
-        for spec in exp:
-            if spec.getMSLevel() == 2 and spec.getPrecursors():
-                mz = spec.getPrecursors()[0].getMZ()
-                find_spectrum_by_mz.spectrum_list.append((mz, spec))
-        find_spectrum_by_mz.spectrum_list.sort(key=lambda x: x[0])
-
-    left, right = 0, len(find_spectrum_by_mz.spectrum_list) - 1
-    best_match = None
-    min_diff = float("inf")
-    while left <= right:
-        mid = (left + right) // 2
-        mz, spec = find_spectrum_by_mz.spectrum_list[mid]
-        diff = abs(mz - target_mz)
-        if diff < min_diff:
-            min_diff = diff
-            best_match = spec
-        if mz < target_mz:
-            left = mid + 1
-        else:
-            right = mid - 1
-    return best_match
 
 
 def _metas_from_scored_hit(scored_hit, original_seq_str: str) -> tuple:

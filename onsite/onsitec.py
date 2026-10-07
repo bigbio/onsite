@@ -17,7 +17,7 @@ from onsite.lucxor.cli import lucxor
 from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
 import pandas as pd
-from onsite.idparquet import load_dataframes, save_dataframes, unimod_to_pyopenms_notation
+from onsite.idparquet import load_dataframes, unimod_to_pyopenms_notation
 from onsite.id_io import load_identifications, save_identifications
 
 @click.group()
