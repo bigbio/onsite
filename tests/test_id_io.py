@@ -367,8 +367,8 @@ def _build_pep_list_with_protein():
 
     ev = oms.PeptideEvidence()
     ev.setProteinAccession("PROT_A")
-    ev.setAABefore(b"K")
-    ev.setAAAfter(b"L")
+    ev.setAABefore("K")
+    ev.setAAAfter("L")
     ev.setStart(10)
     ev.setEnd(13)
     hit.setPeptideEvidences([ev])

@@ -164,7 +164,7 @@ def save_identifications(
         for pi in prot:
             sp = pi.getSearchParameters()
             vmods = sp.variable_modifications
-            filtered = [m for m in vmods if b"PhosphoDecoy" not in m]
+            filtered = [m for m in vmods if "PhosphoDecoy" not in m]
             sp.variable_modifications = filtered
             pi.setSearchParameters(sp)
         oms.MzIdentMLFile().store(str(path), prot, pep)
@@ -515,9 +515,9 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
                         aa_before = entry.get("aa_before", "")
                         aa_after = entry.get("aa_after", "")
                         if aa_before:
-                            ev.setAABefore(aa_before.encode() if isinstance(aa_before, str) else aa_before)
+                            ev.setAABefore(str(aa_before))
                         if aa_after:
-                            ev.setAAAfter(aa_after.encode() if isinstance(aa_after, str) else aa_after)
+                            ev.setAAAfter(str(aa_after))
                         start = entry.get("start", -1)
                         end = entry.get("end", -1)
                         try:
@@ -604,8 +604,8 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
         if m:
             mod_name = m.group(1)
             # Skip custom / non-standard mods
-            if b"PhosphoDecoy" not in mod_name.encode():
-                vmods.append(mod_name.encode())
+            if "PhosphoDecoy" not in mod_name:
+                vmods.append(mod_name)
 
     sp.variable_modifications = vmods
     pi.setSearchParameters(sp)

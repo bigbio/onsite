@@ -52,7 +52,7 @@ def _register_phospho_decoy_modifications():
             mod.setFullId(f'PhosphoDecoy ({aa})')
             mod.setName('PhosphoDecoy')
             mod.setDiffMonoMass(phospho_decoy_mass)
-            mod.setOrigin(aa.encode())
+            mod.setOrigin(aa)
             mod_db.addModification(mod)
         except Exception as e:
             logger.debug(f"PhosphoDecoy registration for {aa}: {e}")
