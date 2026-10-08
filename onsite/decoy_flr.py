@@ -261,6 +261,11 @@ def parse_tool_idparquet(path: str, tool: str, ptm: PTMSpec = DEFAULT_PTM) -> Li
                 q_value=q_value,
             )
         )
+    if records and not any(r.sites for r in records):
+        logger.warning(
+            f"{tool}: no {ptm.name}/{ptm.decoy_name} sites in {path}; "
+            "AScore/PhosphoRS/LucXor only localize Phospho, check --modification"
+        )
     return records
 
 

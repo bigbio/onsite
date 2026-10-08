@@ -6,7 +6,6 @@ on, and the decoy residues used for the decoy-amino-acid FLR. Phospho (S/T/Y,
 decoy A) is the default and reproduces the historical behaviour.
 """
 
-import logging
 import re
 import zlib
 from dataclasses import dataclass
@@ -14,8 +13,6 @@ from functools import lru_cache
 from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
 from pyopenms import ModificationsDB, ResidueModification
-
-logger = logging.getLogger(__name__)
 
 STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
 DECOY_SUFFIX = "Decoy"
@@ -152,7 +149,8 @@ def register_decoy(spec: PTMSpec) -> None:
     If OpenMS already ships the decoy (PhosphoDecoy on A/G/L), the remaining
     residues are added under residue-qualified ids, as before. Otherwise the
     short name is defined on every residue with a pseudo-UniMod id so it
-    round-trips through idParquet.
+    round-trips through idParquet. Raises if the pseudo id is taken or any
+    residue fails to register.
     """
     if spec.decoy_name in _REGISTERED:
         return
@@ -163,7 +161,10 @@ def register_decoy(spec: PTMSpec) -> None:
     builtin = db.has(spec.decoy_name)
     mass = spec.mass
     record_id = None if builtin else decoy_record_id(spec)
+    if record_id is not None:
+        _check_record_id_free(db, record_id, spec.decoy_name)
 
+    failed = []
     for aa in STANDARD_AAS:
         full_id = f"{spec.decoy_name} ({aa})"
         try:
@@ -179,6 +180,18 @@ def register_decoy(spec: PTMSpec) -> None:
             if record_id is not None:
                 register_modification(mod)
         except Exception as e:
-            logger.debug(f"{full_id} registration: {e}")
+            failed.append(f"{aa}: {e}")
 
+    if failed:
+        raise RuntimeError(f"Could not register {spec.decoy_name}: " + "; ".join(failed))
     _REGISTERED.add(spec.decoy_name)
+
+
+def _check_record_id_free(db, record_id: int, decoy_name: str) -> None:
+    for i in range(db.getNumberOfModifications()):
+        mod = db.getModification(i)
+        if mod.getUniModRecordId() == record_id and mod.getName() != decoy_name:
+            raise ValueError(
+                f"Pseudo-UniMod id {record_id} for {decoy_name} is already used by "
+                f"{mod.getName() or mod.getFullId()}; rename the modification"
+            )

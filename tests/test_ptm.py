@@ -113,3 +113,27 @@ def test_compute_tool_flr_counts_spec_residues():
     assert res.n_analyzed_psms == 2
     assert (res.t_c, res.x_c) == (4, 2)  # two K and one A per peptide
     assert [d for (_s, d, _c, _k) in res.site_records] == [False, True]
+
+
+def test_register_decoy_rejects_taken_record_id(monkeypatch):
+    spec = ptm.get_ptm("Crotonyl", residues="K")
+    monkeypatch.setattr(ptm, "decoy_record_id", lambda _spec: 99913)  # OpenMS PhosphoDecoy
+    with pytest.raises(ValueError, match="already used"):
+        ptm.register_decoy(spec)
+    assert spec.decoy_name not in ptm._REGISTERED
+
+
+def test_register_decoy_raises_when_residues_fail(monkeypatch):
+    import pyopenms
+
+    spec = ptm.get_ptm("Formyl", residues="K")
+
+    class Broken(pyopenms.ResidueModification):
+        def setOrigin(self, _aa):
+            raise TypeError("bad origin")
+
+    monkeypatch.setattr(ptm, "ResidueModification", Broken)
+    with pytest.raises(RuntimeError, match="Could not register FormylDecoy"):
+        ptm.register_decoy(spec)
+    assert spec.decoy_name not in ptm._REGISTERED
+
