@@ -17,9 +17,6 @@ _AA_MASSES: dict = {}
 _MASS_ARRAY: np.ndarray = None  # Indexed by ord(char) for fast lookup
 _INITIALIZED: bool = False
 
-# Residues that already have PhosphoDecoy defined in PyOpenMS
-_BUILTIN_PHOSPHO_DECOY_RESIDUES = set()
-
 # All standard amino acids
 _STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -41,8 +38,6 @@ def get_phospho_decoy_mod_name(residue: str) -> str:
     Returns:
         Modification name to use with AASequence.setModification()
     """
-    if residue in _BUILTIN_PHOSPHO_DECOY_RESIDUES:
-        return "PhosphoDecoy"
     return f"PhosphoDecoy ({residue})"
 
 

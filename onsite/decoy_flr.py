@@ -38,12 +38,6 @@ from onsite.ptm import PHOSPHO as DEFAULT_PTM, PTMSpec, get_ptm, register_decoy
 
 logger = logging.getLogger(__name__)
 
-# Phospho defaults, kept for backward compatibility; the functions take a PTMSpec.
-PHOSPHO = DEFAULT_PTM.name
-PHOSPHO_DECOY = DEFAULT_PTM.decoy_name
-TARGET_RESIDUES = set(DEFAULT_PTM.residues)
-DECOY_RESIDUE = "A"
-
 # Per-tool meta value holding the position-keyed {residue_index: score} dict,
 # and whether a higher score means more confident.
 # Per-tool position-keyed {residue_index: score} meta value used to RANK sites
@@ -464,8 +458,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--modification", default="Phospho",
                     help="Localized modification: a preset (Phospho, Acetyl, Methyl, Dimethyl, "
                          "Trimethyl, GG) or any ModificationsDB name with --target-residues")
-    ap.add_argument("--target-residues", help="Override target residues, e.g. STY or K")
-    ap.add_argument("--decoy-residues", help="Override decoy residues (default A)")
+    ap.add_argument("--target-residues", help="Override target residues, e.g. STY, S,T,Y or K")
+    ap.add_argument("--decoy-residues", help="Override decoy residues, e.g. A or A,G (default A)")
     args = ap.parse_args(argv)
 
     try:

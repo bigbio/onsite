@@ -36,9 +36,17 @@ def test_overrides_and_custom_modification():
     assert c.name == "Crotonyl" and c.residues == frozenset("K")
 
 
+@pytest.mark.parametrize("residues", ["STY", "S,T,Y", "s, t, y", "S T Y", ["S", "T", "Y"]])
+def test_residue_lists_accept_separators(residues):
+    assert ptm.get_ptm("Phospho", residues=residues).residues == frozenset("STY")
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
+        {"name": "Phospho", "decoy_residues": ""},
+        {"name": "Phospho", "residues": " , "},
+        {"name": "Crotonyl", "residues": ""},
         {"name": "NotAMod", "residues": "K"},
         {"name": "Crotonyl"},
         {"name": "Acetyl", "residues": "K", "decoy_residues": "K"},

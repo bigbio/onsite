@@ -7,6 +7,7 @@ decoy A) is the default and reproduces the historical behaviour.
 """
 
 import logging
+import re
 import zlib
 from dataclasses import dataclass
 from functools import lru_cache
@@ -77,14 +78,15 @@ def get_ptm(
     """
     Resolve a preset by name (case-insensitive), or build a custom spec.
 
-    ``residues`` / ``decoy_residues`` override the preset; a name that is not a
-    preset requires ``residues``. The modification must exist in ModificationsDB
-    on every target residue, and decoy residues must not overlap the targets.
+    ``residues`` / ``decoy_residues`` override the preset when not None and
+    accept "STY", "S,T,Y", "S T Y" or a list; a name that is not a preset
+    requires ``residues``. The modification must exist in ModificationsDB on
+    every target residue, and decoy residues must not overlap the targets.
     """
     key = _ALIASES.get(name.lower(), name.lower())
     base = PRESETS.get(key)
     if base is None:
-        if not residues:
+        if residues is None:
             raise ValueError(
                 f"'{name}' is not a preset ({', '.join(sorted(PRESETS))}); "
                 "pass the target residues explicitly"
@@ -93,14 +95,23 @@ def get_ptm(
 
     spec = PTMSpec(
         name=base.name,
-        residues=frozenset(r.upper() for r in residues) if residues else base.residues,
+        residues=base.residues if residues is None else _parse_residues(residues, "target"),
         decoy_residues=(
-            frozenset(r.upper() for r in decoy_residues) if decoy_residues else base.decoy_residues
+            base.decoy_residues if decoy_residues is None else _parse_residues(decoy_residues, "decoy")
         ),
         neutral_losses=base.neutral_losses,
     )
     _validate(spec)
     return spec
+
+
+def _parse_residues(value: Iterable[str], kind: str) -> FrozenSet[str]:
+    """Residue letters from "STY", "S,T,Y", "S T Y" or a list; empty is an error."""
+    text = value if isinstance(value, str) else "".join(value)
+    parsed = frozenset(re.sub(r"[\s,;]+", "", text).upper())
+    if not parsed:
+        raise ValueError(f"empty {kind} residues")
+    return parsed
 
 
 def _validate(spec: PTMSpec) -> None:
