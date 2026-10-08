@@ -8,7 +8,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Dict, List
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import click
 import pandas as pd
@@ -197,61 +197,29 @@ def phosphors(
             if debug:
                 logger.info(f"Starting parallel processing with {workers} workers")
 
-            # Build tasks - with threads we can pass objects directly (shared memory)
-            params = {
-                "fragment_mass_tolerance": fragment_mass_tolerance,
-                "fragment_mass_unit": fragment_mass_unit,
-                "add_decoys": bool(add_decoys),
-            }
-            tasks = []
-            for idx, (_, group_df) in enumerate(grouped):
-                hit_payloads = []
-                for _, row in group_df.iterrows():
-                    raw_seq = str(row.get("peptidoform", row.get("sequence", "")))
-                    seq_str = unimod_to_pyopenms_notation(raw_seq)
-                    proforma = None
-                    mv = row.get("psm_metavalues")
-                    if isinstance(mv, np.ndarray):
-                        for m in mv:
-                            if isinstance(m, dict) and m.get("name") == "ProForma":
-                                proforma = m.get("value")
-                                break
-                    hit_payloads.append({"sequence": seq_str, "proforma": proforma})
-                row0 = group_df.iloc[0]
-                tasks.append({
-                    "idx": idx,
-                    "exp": exp,
-                    "lookup": lookup,
-                    "params": params,
-                    "mz": float(row0.get("observed_mz", row0.get("calculated_mz", 0.0))),
-                    "rt": float(row0.get("rt", 0.0)),
-                    "spectrum_reference": str(row0.get("scan")),
-                    "hits": hit_payloads,
-                })
-
-            indexed_results = {}
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_worker_process_pid_threaded, t): t["idx"] for t in tasks}
-                for fut in as_completed(futures):
-                    idx = futures[fut]
+                futures = [
+                    executor.submit(
+                        _process_psm_group, group_df, exp, fragment_mass_tolerance,
+                        fragment_mass_unit, add_decoys, logger, lookup,
+                    )
+                    for _, group_df in grouped
+                ]
+                for fut in futures:
                     try:
-                        indexed_results[idx] = fut.result()
+                        res = fut.result()
                     except Exception as e:
-                        indexed_results[idx] = {"status": "error", "reason": str(e)}
-
-            # Rebuild results in order
-            for idx in range(len(grouped)):
-                res = indexed_results.get(idx, {"status": "error", "reason": "unknown"})
-                if res["status"] == "success":
-                    result_rows.extend(res["rows"])
-                    stats["processed"] += 1
-                    stats["phospho"] += res["phospho_count"]
-                else:
-                    stats["errors"] += 1
-                    if debug:
-                        logger.error(
-                            f"Error processing identification: {res.get('reason', 'unknown')}"
-                        )
+                        res = {"status": "error", "reason": str(e)}
+                    if res["status"] == "success":
+                        result_rows.extend(res["rows"])
+                        stats["processed"] += 1
+                        stats["phospho"] += res["phospho_count"]
+                    else:
+                        stats["errors"] += 1
+                        if debug:
+                            logger.error(
+                                f"Error processing identification: {res.get('reason', 'unknown')}"
+                            )
 
         # Count how many PSMs had their modification sites reassigned
         relocated_count = 0
@@ -354,39 +322,6 @@ def build_scan_to_spectrum_map(exp):
     return lookup
 
 
-# Managed PhosphoRS metadata keys, written on scored hits and stripped from
-# hits PhosphoRS does not score (so stale values can't leak downstream).
-_MANAGED_PHOSPHORS_METAS = (
-    "search_engine_sequence",
-    "regular_phospho_count",
-    "phospho_decoy_count",
-    "PhosphoRS_pep_score",
-    "PhosphoRS_site_probs",
-    "PhosphoRS_site_delta",
-    "SpecEValue_score",
-    "ProForma",
-)
-
-
-def make_unscored_hit(hit_src):
-    """Build the output hit for a peptide PhosphoRS does not score (no phospho
-    site, or scoring returned no result): the original hit with score -1 and
-    all managed PhosphoRS metadata removed.
-
-    Both the serial (threads=1) and threaded (threads>1) paths route their
-    skip branches through this so the two produce byte-identical output.
-    """
-    h = PeptideHit(hit_src)
-    h.setScore(-1.0)
-    for k in _MANAGED_PHOSPHORS_METAS:
-        if h.metaValueExists(k):
-            try:
-                h.removeMetaValue(k)
-            except Exception:
-                pass
-    return h
-
-
 def _has_localizable_phospho(seq_str):
     """True if the (normalized) sequence carries an explicit (Phospho)/
     (PhosphoDecoy) on a localizable residue (S/T/Y/A).
@@ -404,100 +339,6 @@ def _has_localizable_phospho(seq_str):
         if f"{aa}(Phospho)" in seq_str or f"{aa}(PhosphoDecoy)" in seq_str:
             return True
     return False
-
-
-# ----------------------- Threading worker utilities -----------------------
-# Note: Using ThreadPoolExecutor instead of ProcessPoolExecutor allows threads
-# to share the spectrum data (exp object) directly without reloading the file.
-# This provides significant performance improvement for parallel processing.
-
-
-def _worker_process_pid_threaded(task):
-    """Thread-safe worker that uses shared spectrum data.
-
-    Unlike process-based workers, threads share memory so we can pass
-    the exp and scan_map objects directly without serialization or file reloading.
-    """
-    try:
-        exp = task["exp"]  # Shared spectrum object - no file reload needed
-        lookup = task["lookup"]  # Shared scan map - no rebuild needed
-        pid_info = task["pid"]
-        params = task["params"]
-
-        # First, try to find by scan number from spectrum_reference
-
-        scan_number = pid_info["scan"]
-        index = lookup.findByScanNumber(scan_number)
-        spectrum = exp.getSpectrum(index)
-
-
-        results = []
-        for hit_info in pid_info["hits"]:
-            seq = AASequence.fromString(hit_info["sequence"])
-            hit = PeptideHit()
-            hit.setSequence(seq)
-            if hit_info.get("proforma") is not None:
-                hit.setMetaValue("ProForma", hit_info["proforma"])
-
-            # Same localizable-phospho gate as the serial path, so the two paths
-            # skip identical hits (the rebuild routes "no_result" through
-            # make_unscored_hit, mirroring the serial make_unscored_hit branch).
-            if not _has_localizable_phospho(seq.toString()):
-                results.append({"status": "no_result"})
-                continue
-
-            site_probs, isomer_list = calculate_phospho_localization_compomics_style(
-                hit,
-                spectrum,
-                fragment_tolerance=params["fragment_mass_tolerance"],
-                fragment_method_ppm=(params["fragment_mass_unit"] == "ppm"),
-                add_decoys=params.get("add_decoys", False),
-            )
-
-            if site_probs is None or isomer_list is None:
-                results.append({"status": "no_result"})
-                continue
-
-            best_isomer = min(isomer_list, key=lambda x: x[1])
-            final_score = float(best_isomer[1])
-            new_sequence = best_isomer[0]
-
-            seq_str = hit.getSequence().toString()
-            regular_count = sum(
-                seq_str.count(f"{aa}(Phospho)") for aa in ["S", "T", "Y"]
-            )
-            decoy_count = seq_str.count("(PhosphoDecoy)")
-            simple_site_probs = {int(k) + 1: float(v) for k, v in site_probs.items()}
-
-            meta_fields = []
-            meta_fields.append(("search_engine_sequence", seq_str))
-            meta_fields.append(("regular_phospho_count", regular_count))
-            meta_fields.append(("phospho_decoy_count", decoy_count))
-            meta_fields.append(("PhosphoRS_pep_score", final_score))
-            meta_fields.append(("PhosphoRS_site_probs", str(simple_site_probs)))
-            meta_fields.append(
-                ("PhosphoRS_site_delta", str(site_deltas_from_isomers(isomer_list)))
-            )
-
-            if hit.metaValueExists("MS:1002052"):
-                meta_fields.append(
-                    ("SpecEValue_score", float(hit.getMetaValue("MS:1002052")))
-                )
-            if hit.metaValueExists("ProForma"):
-                meta_fields.append(("ProForma", hit.getMetaValue("ProForma")))
-
-            results.append(
-                {
-                    "status": "success",
-                    "new_sequence": new_sequence,
-                    "score": final_score,
-                    "meta_fields": meta_fields,
-                }
-            )
-
-        return {"status": "success", "hits": results}
-    except Exception as e:
-        return {"status": "error", "reason": str(e)}
 
 
 def _metas_list_from_hit_result(seq_str, final_score, site_probs, isomer_list):
