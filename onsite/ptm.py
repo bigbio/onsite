@@ -29,7 +29,6 @@ class PTMSpec:
     name: str
     residues: FrozenSet[str]
     decoy_residues: FrozenSet[str] = frozenset("A")
-    neutral_losses: Tuple[Tuple[str, float], ...] = ()
 
     @property
     def decoy_name(self) -> str:
@@ -46,7 +45,7 @@ class PTMSpec:
 
 
 PRESETS: Dict[str, PTMSpec] = {
-    "phospho": PTMSpec("Phospho", frozenset("STY"), neutral_losses=(("H3PO4", -97.97690),)),
+    "phospho": PTMSpec("Phospho", frozenset("STY")),
     "acetyl": PTMSpec("Acetyl", frozenset("K")),
     "methyl": PTMSpec("Methyl", frozenset("KR")),
     "dimethyl": PTMSpec("Dimethyl", frozenset("KR")),
@@ -96,7 +95,6 @@ def get_ptm(
         decoy_residues=(
             base.decoy_residues if decoy_residues is None else _parse_residues(decoy_residues, "decoy")
         ),
-        neutral_losses=base.neutral_losses,
     )
     _validate(spec)
     return spec

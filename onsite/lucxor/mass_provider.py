@@ -7,7 +7,9 @@ providing fast O(1) lookup during processing.
 
 import logging
 import numpy as np
-from pyopenms import ResidueDB, ModificationsDB, ResidueModification, Residue, Constants, EmpiricalFormula
+from pyopenms import ResidueDB, ModificationsDB, Residue, Constants, EmpiricalFormula
+
+from onsite.ptm import PHOSPHO, modification_mass, register_decoy
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +25,6 @@ _STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
 
 def _register_phospho_decoy_modifications():
     """Register PhosphoDecoy on every residue (PyOpenMS only ships A, G, L)."""
-    from onsite.ptm import PHOSPHO, register_decoy
-
     register_decoy(PHOSPHO)
 
 
@@ -122,10 +122,7 @@ def get_modification_mass(mod_name: str, residue: str = None) -> float:
     # Use precise lookup when residue is known (silent, no warnings)
     if residue:
         try:
-            mod = mod_db.getModification(
-                mod_name, residue, ResidueModification.TermSpecificity.ANYWHERE
-            )
-            mass = mod.getDiffMonoMass()
+            mass = modification_mass(mod_name, residue)
             _MOD_MASS_CACHE[cache_key] = mass
             return mass
         except Exception:
