@@ -34,13 +34,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+from onsite.ptm import PHOSPHO as DEFAULT_PTM, PTMSpec, get_ptm, register_decoy
 
-# Modification names written by the three tools.
-PHOSPHO = "Phospho"
-PHOSPHO_DECOY = "PhosphoDecoy"
-TARGET_RESIDUES = set("STY")
-DECOY_RESIDUE = "A"
+logger = logging.getLogger(__name__)
 
 # Per-tool meta value holding the position-keyed {residue_index: score} dict,
 # and whether a higher score means more confident.
@@ -134,10 +130,12 @@ def sites_at_flr(curve: Dict[str, np.ndarray], threshold: float) -> Tuple[int, i
 
 
 # ───────────────────────────── sequence parsing ────────────────────────────
-def parse_localized_sites(seq_str: str) -> Tuple[str, List[Tuple[int, str, str]]]:
+def parse_localized_sites(
+    seq_str: str, ptm: PTMSpec = DEFAULT_PTM
+) -> Tuple[str, List[Tuple[int, str, str]]]:
     """
     Parse a modified peptide string into its unmodified backbone and the
-    Phospho / PhosphoDecoy sites.
+    target / decoy modification sites (Phospho / PhosphoDecoy by default).
 
     Returns (unmodified_sequence, [(residue_index, residue, mod_name), ...])
     with 1-based residue indices (N-terminus = 0, first residue = 1, etc.).
@@ -153,7 +151,7 @@ def parse_localized_sites(seq_str: str) -> Tuple[str, List[Tuple[int, str, str]]
             if j == -1:
                 break
             mod = seq_str[i + 1 : j]
-            if mod in (PHOSPHO, PHOSPHO_DECOY) and pos >= 0:
+            if mod in (ptm.name, ptm.decoy_name) and pos >= 1:
                 sites.append((pos, unmod[-1], mod))
             i = j + 1
         elif c == "[":
@@ -168,10 +166,10 @@ def parse_localized_sites(seq_str: str) -> Tuple[str, List[Tuple[int, str, str]]
     return "".join(unmod), sites
 
 
-def _candidate_counts(unmod_seq: str) -> Tuple[int, int]:
-    """(target S/T/Y residues, decoy A residues) in an unmodified sequence."""
-    t = sum(1 for c in unmod_seq if c in TARGET_RESIDUES)
-    x = unmod_seq.count(DECOY_RESIDUE)
+def _candidate_counts(unmod_seq: str, ptm: PTMSpec = DEFAULT_PTM) -> Tuple[int, int]:
+    """(target residues, decoy residues) in an unmodified sequence."""
+    t = sum(1 for c in unmod_seq if c in ptm.residues)
+    x = sum(1 for c in unmod_seq if c in ptm.decoy_residues)
     return t, x
 
 
@@ -212,9 +210,10 @@ def _find_meta(metavalues, name: str) -> Optional[str]:
     return None
 
 
-def parse_tool_idparquet(path: str, tool: str) -> List[PSMRecord]:
+def parse_tool_idparquet(path: str, tool: str, ptm: PTMSpec = DEFAULT_PTM) -> List[PSMRecord]:
     """Parse a tool's idParquet directory into one PSMRecord per identification."""
     score_meta = TOOL_SCORE_META[tool]
+    register_decoy(ptm)
     psm_path = os.path.join(path, "psms.parquet")
     if not os.path.isfile(psm_path):
         raise FileNotFoundError(f"Expected psms.parquet in {path}")
@@ -234,7 +233,7 @@ def parse_tool_idparquet(path: str, tool: str) -> List[PSMRecord]:
         else:
             seq = raw_seq
 
-        unmod, sites = parse_localized_sites(seq)
+        unmod, sites = parse_localized_sites(seq, ptm)
         spectrum_ref = str(row.get("spectrum_reference", ""))
         is_ident_decoy = bool(row.get("is_decoy", False))
 
@@ -262,13 +261,18 @@ def parse_tool_idparquet(path: str, tool: str) -> List[PSMRecord]:
                 q_value=q_value,
             )
         )
+    if records and not any(r.sites for r in records):
+        logger.warning(
+            f"{tool}: no {ptm.name}/{ptm.decoy_name} sites in {path}; "
+            "AScore/PhosphoRS/LucXor only localize Phospho, check --modification"
+        )
     return records
 
 
-def is_unambiguous(unmod_seq: str, n_reported: int) -> bool:
+def is_unambiguous(unmod_seq: str, n_reported: int, ptm: PTMSpec = DEFAULT_PTM) -> bool:
     """A peptide carries no localization choice when every candidate site
-    (S/T/Y + decoy A) is occupied."""
-    t, x = _candidate_counts(unmod_seq)
+    (target + decoy residues) is occupied."""
+    t, x = _candidate_counts(unmod_seq, ptm)
     return (t + x) <= n_reported
 
 
@@ -319,6 +323,7 @@ def compute_tool_flr(
     q_threshold: Optional[float],
     flr_threshold: float,
     collapse: bool = False,
+    ptm: PTMSpec = DEFAULT_PTM,
 ) -> ToolResult:
     """Compute the decoy-AA FLR curve for one tool over the shared PSM set."""
     n_in = len(records)
@@ -343,7 +348,7 @@ def compute_tool_flr(
     n_analyzed = 0
     for r in in_isect:
         n_reported = len(r.sites)
-        if n_reported == 0 or is_unambiguous(r.unmod_seq, n_reported):
+        if n_reported == 0 or is_unambiguous(r.unmod_seq, n_reported, ptm):
             continue
         # A reported site contributes only if it has a usable confidence score.
         contributed = False
@@ -351,12 +356,12 @@ def compute_tool_flr(
             if pos not in r.site_scores:
                 continue
             score = r.site_scores[pos]
-            is_decoy = (mod_name == PHOSPHO_DECOY) or (residue == DECOY_RESIDUE)
+            is_decoy = (mod_name == ptm.decoy_name) or (residue in ptm.decoy_residues)
             raw_sites.append((r.unmod_seq, pos, residue, score, is_decoy))
             contributed = True
         if contributed:
             # T_c / X_c must be computed over exactly the analyzed population.
-            t, x = _candidate_counts(r.unmod_seq)
+            t, x = _candidate_counts(r.unmod_seq, ptm)
             t_c += t
             x_c += x
             n_analyzed += 1
@@ -390,6 +395,7 @@ def compute_decoy_flr(
     q_threshold: Optional[float] = 0.01,
     flr_threshold: float = 0.05,
     collapse: bool = True,
+    ptm: PTMSpec = DEFAULT_PTM,
 ) -> Dict[str, ToolResult]:
     """
     Compute the unified decoy-AA FLR for every provided tool on the shared,
@@ -404,7 +410,7 @@ def compute_decoy_flr(
     """
     parsed = {}
     for t, p in tool_paths.items():
-        parsed[t] = parse_tool_idparquet(p, t)
+        parsed[t] = parse_tool_idparquet(p, t, ptm)
 
     # Intersection of spectrum references that survive the identification filter
     # in EVERY tool, so all tools report on the identical PSM population.
@@ -421,7 +427,7 @@ def compute_decoy_flr(
     keep_refs = set.intersection(*ref_sets) if ref_sets else set()
 
     return {
-        t: compute_tool_flr(recs, t, keep_refs, q_threshold, flr_threshold, collapse)
+        t: compute_tool_flr(recs, t, keep_refs, q_threshold, flr_threshold, collapse, ptm)
         for t, recs in parsed.items()
     }
 
@@ -454,7 +460,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-collapse", action="store_true",
                     help="Do not collapse redundant (peptide, position) sites")
     ap.add_argument("--out-prefix", help="If set, write <prefix>_<tool>_flr.csv curves")
+    ap.add_argument("--modification", default="Phospho",
+                    help="Localized modification: a preset (Phospho, Acetyl, Methyl, Dimethyl, "
+                         "Trimethyl, GG) or any ModificationsDB name with --target-residues")
+    ap.add_argument("--target-residues", help="Override target residues, e.g. STY, S,T,Y or K")
+    ap.add_argument("--decoy-residues", help="Override decoy residues, e.g. A or A,G (default A)")
     args = ap.parse_args(argv)
+
+    try:
+        ptm = get_ptm(args.modification, args.target_residues, args.decoy_residues)
+    except ValueError as e:
+        ap.error(str(e))
 
     tool_paths = {
         t: p for t, p in (("ascore", args.ascore),
@@ -465,7 +481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error("provide at least one of --ascore / --phosphors / --lucxor")
 
     q_thr = None if args.q_value_threshold is not None and args.q_value_threshold < 0 else args.q_value_threshold
-    results = compute_decoy_flr(tool_paths, q_thr, args.flr_threshold, not args.no_collapse)
+    results = compute_decoy_flr(tool_paths, q_thr, args.flr_threshold, not args.no_collapse, ptm)
 
     isect = next(iter(results.values())).n_in_intersection if results else 0
     print(f"\nShared PSM set (q-value <= {q_thr}, ident-decoys removed): {isect} PSMs")

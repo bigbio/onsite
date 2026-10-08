@@ -10,7 +10,6 @@ import sys
 import logging
 import time
 import random
-from typing import Dict
 from collections import defaultdict
 import numpy as np
 

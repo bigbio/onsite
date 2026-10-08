@@ -7,7 +7,9 @@ providing fast O(1) lookup during processing.
 
 import logging
 import numpy as np
-from pyopenms import ResidueDB, ModificationsDB, ResidueModification, Residue, Constants, EmpiricalFormula
+from pyopenms import ResidueDB, ModificationsDB, Residue, Constants, EmpiricalFormula
+
+from onsite.ptm import PHOSPHO, modification_mass, register_decoy
 
 logger = logging.getLogger(__name__)
 
@@ -16,48 +18,14 @@ logger = logging.getLogger(__name__)
 _AA_MASSES: dict = {}
 _MASS_ARRAY: np.ndarray = None  # Indexed by ord(char) for fast lookup
 _INITIALIZED: bool = False
-_PHOSPHO_DECOY_REGISTERED: bool = False
-
-# Residues that already have PhosphoDecoy defined in PyOpenMS
-_BUILTIN_PHOSPHO_DECOY_RESIDUES = set()
 
 # All standard amino acids
 _STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
 
 
 def _register_phospho_decoy_modifications():
-    """
-    Register PhosphoDecoy modification for all amino acid residues.
-
-    PyOpenMS only has PhosphoDecoy defined for A, G, L by default.
-    This function registers it for all other residues so that decoy
-    sequences can be handled uniformly by TheoreticalSpectrumGenerator.
-    """
-    global _PHOSPHO_DECOY_REGISTERED
-
-    if _PHOSPHO_DECOY_REGISTERED:
-        return
-
-    mod_db = ModificationsDB()
-    phospho_decoy_mass = 79.966331  # Same as Phospho
-
-    # Register PhosphoDecoy for residues that don't have it
-    for aa in _STANDARD_AAS:
-        if aa in _BUILTIN_PHOSPHO_DECOY_RESIDUES:
-            continue  # Already defined in PyOpenMS
-
-        try:
-            mod = ResidueModification()
-            mod.setId(f'PhosphoDecoy ({aa})')
-            mod.setFullId(f'PhosphoDecoy ({aa})')
-            mod.setName('PhosphoDecoy')
-            mod.setDiffMonoMass(phospho_decoy_mass)
-            mod.setOrigin(aa)
-            mod_db.addModification(mod)
-        except Exception as e:
-            logger.debug(f"PhosphoDecoy registration for {aa}: {e}")
-
-    _PHOSPHO_DECOY_REGISTERED = True
+    """Register PhosphoDecoy on every residue (PyOpenMS only ships A, G, L)."""
+    register_decoy(PHOSPHO)
 
 
 def get_phospho_decoy_mod_name(residue: str) -> str:
@@ -70,8 +38,6 @@ def get_phospho_decoy_mod_name(residue: str) -> str:
     Returns:
         Modification name to use with AASequence.setModification()
     """
-    if residue in _BUILTIN_PHOSPHO_DECOY_RESIDUES:
-        return "PhosphoDecoy"
     return f"PhosphoDecoy ({residue})"
 
 
@@ -156,10 +122,7 @@ def get_modification_mass(mod_name: str, residue: str = None) -> float:
     # Use precise lookup when residue is known (silent, no warnings)
     if residue:
         try:
-            mod = mod_db.getModification(
-                mod_name, residue, ResidueModification.TermSpecificity.ANYWHERE
-            )
-            mass = mod.getDiffMonoMass()
+            mass = modification_mass(mod_name, residue)
             _MOD_MASS_CACHE[cache_key] = mass
             return mass
         except Exception:

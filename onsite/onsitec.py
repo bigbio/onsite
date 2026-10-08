@@ -17,8 +17,9 @@ from onsite.lucxor.cli import lucxor
 from onsite.phosphors.cli import phosphors
 from onsite.ascore.cli import ascore
 import pandas as pd
-from onsite.idparquet import load_dataframes, save_dataframes, unimod_to_pyopenms_notation
+from onsite.idparquet import load_dataframes, unimod_to_pyopenms_notation
 from onsite.id_io import load_identifications, save_identifications
+from onsite.ptm import PHOSPHO
 
 @click.group()
 @click.version_option(version="0.0.5")
@@ -44,6 +45,12 @@ def cli():
 cli.add_command(ascore)
 cli.add_command(phosphors)
 cli.add_command(lucxor)
+
+
+def _lucxor_target_mods(add_decoys):
+    """LucXor target modifications for Phospho, plus the Alanine decoy."""
+    decoys = (f"{PHOSPHO.decoy_name} (A)",) if add_decoys else ()
+    return PHOSPHO.target_mod_names + decoys
 
 
 @click.command()
@@ -175,10 +182,7 @@ def all(
             click.echo(f"{'='*60}")
             from onsite.lucxor.cli import PyLuciPHOr2, setup_logging as lucxor_setup_logging
 
-            if add_decoys:
-                target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
-            else:
-                target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
+            target_mods = _lucxor_target_mods(add_decoys)
 
             lucxor_setup_logging(debug, None, lucxor_out)
             tool = PyLuciPHOr2()
@@ -481,10 +485,7 @@ def run_all_algorithms_from_single_cli(
             )
 
             # Run LucXor
-            if add_decoys:
-                target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)", "PhosphoDecoy (A)")
-            else:
-                target_mods = ("Phospho (S)", "Phospho (T)", "Phospho (Y)")
+            target_mods = _lucxor_target_mods(add_decoys)
 
             from onsite.lucxor.cli import PyLuciPHOr2, setup_logging as lucxor_setup_logging
             lucxor_out = os.path.join(tmpdir, "lucxor_result.idparquet")

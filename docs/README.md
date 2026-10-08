@@ -292,6 +292,7 @@ For more detailed information:
 - [AScore Algorithm Documentation](algorithms/ascore.md)
 - [PhosphoRS Algorithm Documentation](algorithms/phosphors.md)
 - [LucXor Algorithm Documentation](algorithms/lucxor.md)
+- [Decoy-Amino-Acid FLR Documentation](algorithms/decoy_flr.md)
 - [Citations and References](citations.md)
 
 ## 👥 Contributing

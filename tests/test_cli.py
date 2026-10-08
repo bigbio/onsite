@@ -98,3 +98,19 @@ def test_cli_unknown_command():
     result = runner.invoke(cli, ["unknown"])
     assert result.exit_code != 0
     assert "No such command" in result.output
+
+
+@pytest.mark.parametrize("tool", ["ascore", "phosphors"])
+def test_threaded_output_matches_sequential(tool, mzml_file, idparquet_dir, data_files_exist, tmp_path):
+    runner = CliRunner()
+    outputs = {}
+    for threads in (1, 3):
+        out = tmp_path / f"{tool}_t{threads}.idparquet"
+        result = runner.invoke(cli, [
+            tool, "-in", str(mzml_file), "-id", str(idparquet_dir), "-out", str(out),
+            "--add-decoys", "--threads", str(threads),
+        ])
+        assert result.exit_code == 0, result.output
+        outputs[threads] = pd.read_parquet(out / "psms.parquet")
+    assert len(outputs[1]) > 0
+    pd.testing.assert_frame_equal(outputs[1].astype(str), outputs[3].astype(str))

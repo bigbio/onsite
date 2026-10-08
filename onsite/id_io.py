@@ -21,6 +21,8 @@ from typing import List
 import numpy as np
 import pandas as pd
 
+from onsite.ptm import is_decoy_mod_name
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -164,7 +166,7 @@ def save_identifications(
         for pi in prot:
             sp = pi.getSearchParameters()
             vmods = sp.variable_modifications
-            filtered = [m for m in vmods if "PhosphoDecoy" not in m]
+            filtered = [m for m in vmods if not is_decoy_mod_name(m)]
             sp.variable_modifications = filtered
             pi.setSearchParameters(sp)
         oms.MzIdentMLFile().store(str(path), prot, pep)
@@ -592,7 +594,7 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
             for m in re.finditer(r"\[UNIMOD:(\d+)\]", str(pf)):
                 seen_mods.add(f"UNIMOD:{m.group(1)}")
 
-    # Only add standard UNIMOD mods (skip PhosphoDecoy or custom names)
+    # Only add standard UNIMOD mods (skip decoy or custom names)
     vmods = []
     for unimod_acc in sorted(seen_mods):
         # Convert UNIMOD accession to pyOpenMS name for use in SearchParameters
@@ -604,7 +606,7 @@ def _psms_df_to_peptide_ids(psms_df: pd.DataFrame, proteins_df=None):
         if m:
             mod_name = m.group(1)
             # Skip custom / non-standard mods
-            if "PhosphoDecoy" not in mod_name:
+            if not is_decoy_mod_name(mod_name):
                 vmods.append(mod_name)
 
     sp.variable_modifications = vmods

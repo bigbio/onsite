@@ -75,6 +75,11 @@ class ModMapper:
         if key not in self._unimod_to_pyo:
             self._unimod_to_pyo[key] = short
 
+    def add(self, mod):
+        """Add a modification registered after loading; an unloaded mapper picks it up lazily."""
+        if self._unimod_to_pyo:
+            self._register_mod(mod)
+
     # -- public converters --------------------------------------------------
 
     def unimod_to_pyopenms(self, peptidoform: str) -> str:
@@ -177,6 +182,10 @@ def pyopenms_to_unimod_notation(seq_str: str) -> str:
 
 def peptidoform_to_modifications(peptidoform: str, site_scores: Optional[Dict[int, float]] = None):
     return _MAPPER.peptidoform_to_modifications(peptidoform, site_scores)
+
+
+def register_modification(mod) -> None:
+    return _MAPPER.add(mod)
 
 # ---------------------------------------------------------------------------
 # Path resolution helper

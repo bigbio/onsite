@@ -7,7 +7,7 @@ import time
 import logging
 import traceback
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List
 
 import click
@@ -160,48 +160,25 @@ def ascore(
         else:
             workers = max(1, int(threads))
             click.echo(f"[{time.strftime('%H:%M:%S')}] Parallel execution with {workers} threads")
-            params = {
-                "fragment_mass_tolerance": fragment_mass_tolerance,
-                "fragment_mass_unit": fragment_mass_unit,
-                "add_decoys": add_decoys,
-            }
-            tasks = []
-            for idx, (_, group_df) in enumerate(grouped):
-                hit_payloads = []
-                for _, row in group_df.iterrows():
-                    orig_mv = row.get("psm_metavalues")
-                    hit_payloads.append({
-                        "sequence": unimod_to_pyopenms_notation(str(row.get("peptidoform", row.get("sequence", "")))),
-                        "charge": int(row.get("precursor_charge", 0)) if pd.notna(row.get("precursor_charge")) else 0,
-                        "orig_metas": list(orig_mv) if isinstance(orig_mv, np.ndarray) else [],
-                    })
-                tasks.append({
-                    "idx": idx,
-                    "exp": exp,
-                    "lookup": lookup,
-                    "params": params,
-                    "scan": int(group_df.iloc[0].get("scan")),
-                    "hits": hit_payloads,
-                })
-
-            indexed_results = {}
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_worker_process_pid_threaded, t): t["idx"] for t in tasks}
-                for fut in as_completed(futures):
-                    idx = futures[fut]
+                futures = [
+                    executor.submit(
+                        process_psm_group, group_df, exp, lookup, fragment_mass_tolerance,
+                        fragment_mass_unit, add_decoys, logger, debug,
+                    )
+                    for _, group_df in grouped
+                ]
+                for fut in futures:
                     try:
-                        indexed_results[idx] = fut.result()
+                        res = fut.result()
                     except Exception as e:
-                        indexed_results[idx] = {"status": "error", "reason": str(e)}
-
-            for idx in range(len(grouped)):
-                res = indexed_results.get(idx, {"status": "error", "reason": "unknown"})
-                if res["status"] == "success":
-                    result_rows.extend(res["rows"])
-                    stats["processed"] += 1
-                    stats["phospho"] += res["phospho_count"]
-                else:
-                    stats["errors"] += 1
+                        res = {"status": "error", "reason": str(e)}
+                    if res["status"] == "success":
+                        result_rows.extend(res["rows"])
+                        stats["processed"] += 1
+                        stats["phospho"] += res["phospho_count"]
+                    else:
+                        stats["errors"] += 1
 
         # Count how many PSMs had their modification sites reassigned
         relocated_count = 0
@@ -274,31 +251,6 @@ def log_debug(log_file, enabled):
     return logger
 
 
-def find_spectrum_by_mz(exp, target_mz, rt=None, ppm_tolerance=10):
-    if not hasattr(find_spectrum_by_mz, "spectrum_cache"):
-        find_spectrum_by_mz.spectrum_cache = {}
-        find_spectrum_by_mz.spectrum_list = []
-        for spec in exp:
-            if spec.getMSLevel() == 2 and spec.getPrecursors():
-                mz = spec.getPrecursors()[0].getMZ()
-                find_spectrum_by_mz.spectrum_list.append((mz, spec))
-        find_spectrum_by_mz.spectrum_list.sort(key=lambda x: x[0])
-
-    left, right = 0, len(find_spectrum_by_mz.spectrum_list) - 1
-    best_match = None
-    min_diff = float("inf")
-    while left <= right:
-        mid = (left + right) // 2
-        mz, spec = find_spectrum_by_mz.spectrum_list[mid]
-        diff = abs(mz - target_mz)
-        if diff < min_diff:
-            min_diff = diff
-            best_match = spec
-        if mz < target_mz:
-            left = mid + 1
-        else:
-            right = mid - 1
-    return best_match
 
 
 def _metas_from_scored_hit(scored_hit, original_seq_str: str) -> tuple:
@@ -435,50 +387,6 @@ def process_psm_group(group_df, exp, lookup, fragment_mass_tolerance, fragment_m
         if debug and logger:
             logger.error(f"Error: {e}")
         return {"status": "error", "reason": str(e)}
-
-
-def _worker_process_pid_threaded(task):
-    """Thread worker. task has: exp, lookup, params, hits=[{sequence, charge}]."""
-    try:
-        lookup = task["lookup"]
-        params = task["params"]
-        index = lookup.findByScanNumber(task["scan"])
-        spectrum = task["exp"].getSpectrum(index)
-
-        rows = []
-        for hit_info in task["hits"]:
-            seq = AASequence.fromString(hit_info["sequence"])
-            hit = PeptideHit()
-            hit.setSequence(seq)
-            if hit_info.get("charge"):
-                hit.setCharge(hit_info["charge"])
-
-            ascore = AScore()
-            ascore.fragment_mass_tolerance_ = params["fragment_mass_tolerance"]
-            ascore.fragment_tolerance_ppm_ = params["fragment_mass_unit"] == "ppm"
-            ascore.setAddDecoys(params.get("add_decoys", False))
-
-            scored_hit = ascore.compute(hit, spectrum)
-            meta_fields, best_ascore, new_seq_str, _ = _metas_from_scored_hit(scored_hit, hit_info["sequence"])
-
-            metas_list = [{"name": k, "value": str(v), "value_type": "double" if isinstance(v, float) else "string"} for k, v in meta_fields]
-            _ascore_prefixes = {"search_engine_sequence", "regular_phospho_count", "phospho_decoy_count",
-                                "AScore_pep_score", "AScore_site_scores", "ProForma", "AScore_"}
-            orig = hit_info.get("orig_metas", [])
-            filtered_orig = [m for m in orig if isinstance(m, dict) and m.get("name") not in _ascore_prefixes
-                            and not m.get("name", "").startswith("AScore_")]
-            combined = filtered_orig + metas_list
-            rows.append({
-                "new_sequence": new_seq_str,
-                "best_ascore": best_ascore,
-                "meta_fields": meta_fields,
-                "metas_list": combined,
-            })
-
-        return {"status": "success", "hits": rows}
-    except Exception as e:
-        return {"status": "error", "reason": str(e)}
-
 
 
 def _preserve_plus_new(row, new_metas: list, managed_prefixes: set) -> list:
